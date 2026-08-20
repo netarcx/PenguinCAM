@@ -148,12 +148,11 @@
           part.surveyKey = j && j.success ? surveyKey(part, payloadTools) : null;
           part.drills = j && j.success ? j.drill_suggestions : null;
           part.plan = j && j.success ? j.suggested_plan : null;
-          if (j && j.success && !opsFor(part).length) {
-            part.ops = (j.suggested_operations || []).map(function (o) {
-              return { op_type: o.op_type, tool_slot: o.tool_slot, name: o.name,
-                       depth: o.depth, scope: o.scope || {} };
-            });
-          }
+          // Deliberately NOT auto-filling the operation list here. It used to be seeded
+          // from a second, tool-constrained suggester, so a part surveyed with only a
+          // default end mill silently got a plan that milled every hole - and the better
+          // answer sat behind a button nobody had a reason to press. One suggestion,
+          // one visible action.
         })
         .catch(function (err) {
           if (token !== featureRequest) return;
@@ -238,22 +237,23 @@
   function applyPlan(part) {
     var plan = part.plan;
     if (!plan) return;
-    var slotMap = {};
+    // No slot remapping. The survey posts our own tool table as `available`, so the
+    // server reuses those tools by their REAL slot numbers and assigns new ones that do
+    // not collide - every slot in plan.operations is already correct in our numbering.
+    //
+    // Remapping was not just redundant, it was wrong: once the server started reusing
+    // tools, plan.tools held only the NEW ones, so an operation on a reused tool found
+    // no entry in the map and silently fell back to whichever tool happened to be first.
     plan.tools.forEach(function (t) {
-      var existing = tools().filter(function (x) {
-        return Math.abs(x.diameter - t.diameter) < 5e-4 && x.type === t.type;
-      })[0];
-      if (existing) { slotMap[t.slot] = existing.slot; return; }
-      var slot = nextSlot();
-      slotMap[t.slot] = slot;
+      if (toolBySlot(t.slot)) return;      // nothing should claim an occupied slot
       tools().push({
-        slot: slot, name: t.name, diameter: t.diameter,
+        slot: t.slot, name: t.name, diameter: t.diameter,
         diameter_text: t.diameter.toFixed(4), flutes: t.flutes,
         type: t.type, included_angle: t.included_angle || 90,
       });
     });
     part.ops = plan.operations.map(function (o) {
-      return { op_type: o.op_type, tool_slot: slotMap[o.tool_slot] || tools()[0].slot,
+      return { op_type: o.op_type, tool_slot: o.tool_slot,
                name: o.name, depth: o.depth, scope: o.scope || {} };
     });
     pruneUnusedTools();

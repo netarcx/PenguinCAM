@@ -1319,12 +1319,14 @@ def part_features():
         }
         job = _multitool_job_from_request(spec, {0: dxf_path})
         features = tooling.survey_part(job, job.parts[0])
-        suggested = tooling.default_operations(features, job.tools)
         try:
             mill = float(request.form.get('mill_diameter') or 0) or None
         except (TypeError, ValueError):
             mill = None
-        plan = tooling.suggest_tooling(features, mill_diameter=mill,
+        # One suggestion path. It reuses the tools already in the job and proposes new
+        # ones only for what they cannot do, so there is no second, weaker answer that
+        # can disagree with this one.
+        plan = tooling.suggest_tooling(features, available=job.tools, mill_diameter=mill,
                                        include_chamfer=request.form.get('chamfer') == '1')
 
         def _public(feature):
@@ -1339,12 +1341,12 @@ def part_features():
                 'has_perimeter': features['has_perimeter'],
                 'errors': features['errors'],
             },
-            'suggested_operations': [o.to_dict() for o in suggested],
             # A COMPLETE starting plan - the tools to load as well as the operations to
-            # run. Without this the user is asked to plan a part with tools they have not
-            # chosen yet, and only told what the part needs afterwards.
+            # run. `tools` are the ones that would need ADDING; anything already in the
+            # job is reused and appears in `reused`.
             'suggested_plan': {
                 'tools': [t.to_dict() for t in plan['tools']],
+                'reused': [t.to_dict() for t in plan['reused']],
                 'operations': [o.to_dict() for o in plan['operations']],
                 'notes': plan['notes'],
             },

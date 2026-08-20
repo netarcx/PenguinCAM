@@ -305,11 +305,19 @@ CAD nearly always draws holes at real drill sizes, so the answer is usually exac
 a 1.125" bearing bore — is reported as *bore this with an end mill* rather than forced to
 a near miss.
 
-**The suggester is drill-aware, and that matters.** `default_operations` used to sort
-drills in with the end mills and assign holes by diameter *range*, which a drill cannot
-honour because it makes exactly one size. That is how a 5/32" drill got proposed for
-0.1935" holes and produced a plan that failed the instant it ran. A drill now only ever
-receives holes drawn at its own size.
+**The suggester is drill-aware, and that matters.** It used to sort drills in with the
+end mills and assign holes by diameter *range*, which a drill cannot honour because it
+makes exactly one size. That is how a 5/32" drill got proposed for 0.1935" holes and
+produced a plan that failed the instant it ran. A drill now only ever receives holes
+drawn at its own size.
+
+**There is exactly one suggestion path**, `suggest_tooling`. It reuses tools already in
+the job — by their real slot numbers, so nothing needs remapping — and proposes new ones
+only for what those cannot do. A second, tool-constrained suggester used to exist
+alongside it and auto-filled the operation list, so a part surveyed with just a default
+end mill silently got a plan that milled every hole while the better answer sat behind a
+button. Two suggestion paths that can disagree is precisely how the wrong drill gets
+proposed; there is now nothing to disagree with.
 
 ### Feeds
 

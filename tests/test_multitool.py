@@ -1165,7 +1165,7 @@ class TestDrillSizeIndex(unittest.TestCase):
 
 class TestDrillAwareSuggestions(unittest.TestCase):
     """The reported bug: a 5/32 drill was suggested for 0.1935 holes, because
-    default_operations sorted drills in with the end mills and assigned by diameter
+    the suggester sorted drills in with the end mills and assigned by diameter
     RANGE - which a drill cannot honour, since it makes exactly one size."""
 
     def _suggest(self, hole_diameters, tools):
@@ -1174,7 +1174,8 @@ class TestDrillAwareSuggestions(unittest.TestCase):
             dxf_path=dxf, name='p', operations=[Operation('perimeter', tools[-1].slot)])])
         with redirect_stdout(io.StringIO()):
             features = tooling.survey_part(job, job.parts[0])
-            return features, tooling.default_operations(features, tools)
+            plan = tooling.suggest_tooling(features, available=tools, mill_diameter=0.25)
+            return features, plan['operations']
 
     def test_a_drill_is_never_given_a_hole_it_cannot_make(self):
         tools = [Tool(1, '5/32 Drillbit', 0.1562, 2, type='drill'),
@@ -1205,10 +1206,9 @@ class TestDrillAwareSuggestions(unittest.TestCase):
             dxf_path=dxf, name='p', operations=[Operation('perimeter', 3)])])
         with redirect_stdout(io.StringIO()):
             features = tooling.survey_part(job, job.parts[0])
-            ops = tooling.default_operations(features, tools)
-        ops.append(Operation('perimeter', 3))
-        result = generate(build_job(tools=tools, parts=[
-            PartOps(dxf_path=dxf, name='p', operations=ops)]))
+            plan = tooling.suggest_tooling(features, available=tools, mill_diameter=0.25)
+        result = generate(build_job(tools=tools + plan['tools'], parts=[
+            PartOps(dxf_path=dxf, name='p', operations=plan['operations'])]))
         self.assertTrue(result.success, result.errors)
 
     def test_the_error_names_the_drill_that_would_work(self):
@@ -1757,25 +1757,83 @@ class TestJobFromDict(unittest.TestCase):
                                    'tools': [{'slot': 1, 'name': 'a', 'diameter': 0.25}]}, {})
 
 
-class TestDefaultOperations(unittest.TestCase):
-    def test_split_covers_every_hole_exactly_once(self):
+class TestSuggestionReusesLoadedTools(unittest.TestCase):
+    """One suggestion path, and it works with what is already in the spindle rack.
+    Previously a second, tool-constrained suggester auto-filled the operation list, so a
+    part surveyed with only a default end mill silently got a plan that milled every
+    hole while the better answer sat behind a button."""
+
+    def _features(self, dxf=None):
+        job = build_job(tools=[Tool(1, 'seed', 0.157, 1)], parts=[PartOps(
+            dxf_path=dxf or make_mixed_dxf(), name='p',
+            operations=[Operation('perimeter', 1)])])
+        with redirect_stdout(io.StringIO()):
+            return tooling.survey_part(job, job.parts[0])
+
+    def test_an_end_mill_already_loaded_is_reused(self):
+        loaded = [Tool(1, 'my 1/4 endmill', 0.25, 2)]
+        plan = tooling.suggest_tooling(self._features(), available=loaded)
+        self.assertNotIn('endmill', [t.type for t in plan['tools']])
+        self.assertIn(loaded[0], plan['reused'])
+        milling = [o for o in plan['operations'] if o.op_type in ('pockets', 'perimeter')]
+        self.assertTrue(milling)
+        for op in milling:
+            self.assertEqual(op.tool_slot, 1)
+
+    def test_a_drill_already_loaded_is_reused(self):
+        loaded = [Tool(1, '#10 drill', 0.1935, 2, type='drill'),
+                  Tool(2, 'endmill', 0.25, 2)]
+        plan = tooling.suggest_tooling(self._features(), available=loaded)
+        proposed = {round(t.diameter, 4) for t in plan['tools']}
+        self.assertNotIn(0.1935, proposed)          # already have it
+        self.assertIn(0.2570, proposed)             # the F drill is still missing
+
+    def test_new_tools_never_collide_with_loaded_slots(self):
+        loaded = [Tool(1, 'a', 0.125, 1), Tool(2, 'b', 0.25, 2), Tool(5, 'c', 0.5, 2)]
+        plan = tooling.suggest_tooling(self._features(), available=loaded)
+        taken = {t.slot for t in loaded}
+        for tool in plan['tools']:
+            self.assertNotIn(tool.slot, taken, 'proposed a slot already in use')
+            taken.add(tool.slot)
+
+    def test_with_nothing_loaded_it_proposes_the_whole_set(self):
+        plan = tooling.suggest_tooling(self._features(), available=[])
+        kinds = [t.type for t in plan['tools']]
+        self.assertIn('drill', kinds)
+        self.assertIn('endmill', kinds)
+
+    def test_a_reused_plan_still_generates(self):
+        dxf = make_mixed_dxf()
+        loaded = [Tool(1, 'my endmill', 0.25, 2)]
+        plan = tooling.suggest_tooling(self._features(dxf), available=loaded)
+        result = generate(build_job(
+            material='aluminum', tools=loaded + plan['tools'],
+            parts=[PartOps(dxf_path=dxf, name='p', operations=plan['operations'])]))
+        self.assertTrue(result.success, result.errors)
+
+
+class TestSuggestionCoverage(unittest.TestCase):
+    def _plan(self, available=None):
         job = build_job()
         with redirect_stdout(io.StringIO()):
             features = tooling.survey_part(job, job.parts[0])
-        ops = tooling.default_operations(features, job.tools)
+        return features, tooling.suggest_tooling(
+            features, available=available if available is not None else job.tools,
+            mill_diameter=0.25)
+
+    def test_every_hole_is_claimed_exactly_once(self):
+        features, plan = self._plan()
         claimed = []
-        for op in ops:
+        for op in plan['operations']:
             if op.op_type in ('holes', 'interior'):
                 claimed.extend(tooling.selected_hole_keys(features, op.scope))
         self.assertEqual(len(claimed), len(set(claimed)))          # nothing cut twice
         self.assertEqual(set(claimed), {h['key'] for h in features['holes']})
 
-    def test_suggests_a_profile_when_the_part_has_one(self):
-        job = build_job()
-        with redirect_stdout(io.StringIO()):
-            features = tooling.survey_part(job, job.parts[0])
-        ops = tooling.default_operations(features, job.tools)
-        self.assertEqual(ops[-1].op_type, 'perimeter')
+    def test_the_profile_runs_last(self):
+        """The part stays anchored for as long as possible."""
+        _, plan = self._plan()
+        self.assertEqual(plan['operations'][-1].op_type, 'perimeter')
 
 
 # -------------------------------------------------------------------- routes
@@ -1809,7 +1867,7 @@ class TestMultiToolRoutes(unittest.TestCase):
         body = r.get_json()
         self.assertTrue(body['success'])
         self.assertEqual(body['features']['hole_sizes'], [0.196, 0.75])
-        self.assertTrue(body['suggested_operations'])
+        self.assertTrue(body['suggested_plan']['operations'])
         # Internal identity keys must not leak into the API surface.
         self.assertNotIn('key', body['features']['holes'][0])
 

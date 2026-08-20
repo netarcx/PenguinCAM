@@ -1749,23 +1749,48 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
 MAX_SUGGESTED_DRILL = 0.4
 
 
-def suggest_tooling(features: Dict[str, Any], mill_diameter: float = None,
+def suggest_tooling(features: Dict[str, Any], available: Sequence[Tool] = None,
+                    mill_diameter: float = None,
                     include_chamfer: bool = False) -> Dict[str, Any]:
     """Propose a COMPLETE plan for a part: the tools to load and the operations to run.
 
-    `default_operations` can only assign work to tools that already exist, which puts the
-    user in the wrong order - asked to plan a part with tools they have not chosen yet,
-    and only told what the part needs afterwards. This starts from the geometry: it reads
-    the hole sizes, picks the drills that make them, adds one end mill for the pockets and
-    profile, and returns both halves of the plan at once.
+    Starts from the geometry, not from a tool list: reads the hole sizes, picks the drills
+    that make them, adds one end mill for the pockets and profile. `available` tools are
+    REUSED where they fit, so the plan does not ask anyone to load a second 1/4 in end
+    mill they already have; anything the available tools cannot do is proposed as a new
+    tool, flagged by `is_new` on the returned Tool list.
+
+    This replaced a second, tool-constrained suggester. Having both was a trap: the
+    tool-constrained one could only assign work to cutters that already existed, so a part
+    surveyed with just a default end mill in the table got a plan that milled every hole -
+    and it was the one that auto-filled, while the better answer sat behind a button. Two
+    suggestion paths that can disagree is exactly how the wrong drill gets proposed.
 
     Nothing here is binding. It is a starting point the user edits.
     """
+    available = list(available or [])
     mill_diameter = mill_diameter or DEFAULT_MILL_DIAMETER
     tools: List[Tool] = []
     operations: List[Operation] = []
     notes: List[str] = []
-    slot = 1
+    used_slots = {t.slot for t in available}
+
+    def next_slot() -> int:
+        slot = 1
+        while slot in used_slots:
+            slot += 1
+        used_slots.add(slot)
+        return slot
+
+    def adopt(match, kind: str, diameter: float, **kwargs) -> Tool:
+        """Reuse an available tool of the right kind and size, else propose a new one."""
+        for tool in available:
+            if tool.type == kind and abs(tool.diameter - diameter) < 5e-4:
+                return tool
+        tool = Tool(next_slot(), match, diameter, kwargs.pop('flutes', 2),
+                    type=kind, **kwargs)
+        tools.append(tool)
+        return tool
 
     hole_sizes = list(features.get('hole_sizes') or [])
     drilled, milled = [], []
@@ -1777,113 +1802,40 @@ def suggest_tooling(features: Dict[str, Any], mill_diameter: float = None,
             milled.append(size)
 
     for size, match in drilled:
-        tool = Tool(slot, f'{match.label} drill', match.diameter, 2, type='drill')
-        tools.append(tool)
+        tool = adopt(f'{match.label} drill', 'drill', match.diameter)
         operations.append(Operation(
-            'holes', slot, f'Drill {match.label}',
+            'holes', tool.slot, f'Drill {match.label}',
             scope={'min_diameter': size - 1e-4, 'max_diameter': size + 1e-4}))
         if abs(match.diameter - size) > 1e-6:
             notes.append(f'{size:.4f} in holes will be drilled at {match.diameter:.4f} in '
                          f'({match.label}).')
-        slot += 1
 
     needs_mill = bool(milled) or features.get('pockets') or features.get('has_perimeter')
-    mill_slot = None
+    mill = None
     if needs_mill:
-        mill_slot = slot
-        tools.append(Tool(slot, f'{mill_diameter:.4f} in end mill', mill_diameter, 2))
-        slot += 1
+        # Prefer the biggest end mill already loaded: it is what the operator has, and a
+        # bigger cutter clears a pocket faster. Only propose a new one if there is none.
+        existing = sorted([t for t in available if t.type == 'endmill'],
+                          key=lambda t: t.diameter)
+        mill = (existing[-1] if existing
+                else adopt(f'{mill_diameter:.4f} in end mill', 'endmill', mill_diameter))
 
     if milled:
         operations.append(Operation(
-            'holes', mill_slot, 'Bore large holes',
+            'holes', mill.slot, 'Bore large holes',
             scope={'min_diameter': min(milled) - 1e-4, 'max_diameter': max(milled) + 1e-4}))
         notes.append('Holes too large to drill are bored with the end mill: '
                      + ', '.join(f'{d:.4f} in' for d in milled) + '.')
     if features.get('pockets'):
-        operations.append(Operation('pockets', mill_slot, 'Pockets'))
+        operations.append(Operation('pockets', mill.slot, 'Pockets'))
     if features.get('has_perimeter'):
-        operations.append(Operation('perimeter', mill_slot, 'Profile'))
+        operations.append(Operation('perimeter', mill.slot, 'Profile'))
 
     if include_chamfer and features.get('has_perimeter'):
-        tools.append(Tool(slot, '1/2 in 90 deg V-bit', 0.5, 2, type='vbit',
-                          included_angle=90.0))
-        operations.append(Operation('chamfer', slot, 'Edge break',
+        vbit = adopt('1/2 in 90 deg V-bit', 'vbit', 0.5, included_angle=90.0)
+        operations.append(Operation('chamfer', vbit.slot, 'Edge break',
                                     scope={'targets': ['perimeter'], 'width': 0.02}))
 
-    return {'tools': tools, 'operations': operations, 'notes': notes}
-
-
-def default_operations(features: Dict[str, Any], tools: Sequence[Tool]) -> List[Operation]:
-    """A sensible starting operation list for a part, used to seed the UI.
-
-    Small holes go to the smallest tool that can make them, everything else to the largest
-    tool that still fits the work, and the profile runs last so the part stays anchored
-    for as long as possible.
-    """
-    if not tools:
-        return []
-    # Drills are NOT interchangeable with end mills here. A drill makes exactly one size
-    # of hole, so it can only be given the holes drawn at its own size; sorting it in with
-    # the end mills by diameter is how a 5/32 drill got handed 0.1935 holes and produced a
-    # plan that failed the moment it was generated.
-    drills = sorted([t for t in tools if t.type == 'drill'], key=lambda t: t.diameter)
-    mills = sorted([t for t in tools if t.type not in ('vbit', 'drill')],
-                   key=lambda t: t.diameter)
-
-    ops: List[Operation] = []
-    sizes = list(features.get('hole_sizes') or [])
-
-    # Hand each hole size to a drill that can actually make it, one operation per drill.
-    for drill in drills:
-        matched = [d for d in sizes
-                   if abs(d - drill.diameter) <= DEFAULT_DRILL_SIZE_TOLERANCE]
-        if not matched:
-            continue
-        sizes = [d for d in sizes if d not in matched]
-        ops.append(Operation(
-            'holes', drill.slot,
-            f'Drill {drill.diameter:.4f} in',
-            scope={'min_diameter': min(matched) - 1e-4,
-                   'max_diameter': max(matched) + 1e-4}))
-
-    if not mills:
-        # Drill-only tool list: anything left has no tool that can make it, and saying so
-        # is more useful than silently dropping it.
-        return ops
-    small, large = mills[0], mills[-1]
-
-    if sizes:
-        # A hole must be at least ~1.2x the cutter to be bored helically, so that is where
-        # the large tool stops being able to make one. Split on the midpoint between the
-        # two real sizes either side of that line, never on the line itself, so no hole
-        # ends up claimed by both operations (cut twice) or by neither.
-        boundary = large.diameter * 1.2
-        small_sizes = [d for d in sizes if d < boundary]
-        large_sizes = [d for d in sizes if d >= boundary]
-        # Only split when the two neighbouring sizes are far enough apart that the 1e-4
-        # matching tolerance cannot put a hole in BOTH ranges. Sizes closer than 2e-4
-        # (5 microns) are the same hole as far as any cutter is concerned, so keeping
-        # them together is both safer and more honest than a split that immediately
-        # fails validation with "claimed by more than one operation".
-        gap = (min(large_sizes) - max(small_sizes)) if (small_sizes and large_sizes) else 0.0
-        # Bound by the sizes still unassigned, so a range never reaches back over holes a
-        # drill operation above has already claimed.
-        lo, hi = min(sizes) - 1e-4, max(sizes) + 1e-4
-        if small.slot != large.slot and small_sizes and large_sizes and gap > 3e-4:
-            split = (max(small_sizes) + min(large_sizes)) / 2.0
-            ops.append(Operation('holes', small.slot, 'Small holes',
-                                 scope={'min_diameter': lo, 'max_diameter': split}))
-            ops.append(Operation('holes', large.slot, 'Large holes',
-                                 scope={'min_diameter': split, 'max_diameter': hi}))
-        elif small.slot != large.slot and small_sizes:
-            ops.append(Operation('holes', small.slot, 'Holes',
-                                 scope={'min_diameter': lo, 'max_diameter': hi}))
-        else:
-            ops.append(Operation('holes', large.slot, 'Holes',
-                                 scope={'min_diameter': lo, 'max_diameter': hi}))
-    if features.get('pockets'):
-        ops.append(Operation('pockets', large.slot, 'Pockets'))
-    if features.get('has_perimeter'):
-        ops.append(Operation('perimeter', large.slot, 'Perimeter'))
-    return ops
+    return {'tools': tools, 'operations': operations, 'notes': notes,
+            'reused': [t for t in available if any(o.tool_slot == t.slot
+                                                   for o in operations)]}
