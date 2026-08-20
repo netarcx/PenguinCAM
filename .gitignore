@@ -34,6 +34,12 @@ PenguinCAM-config.yaml
 PenguinCAM-config-*.yaml
 PenguinCAM-config.yml
 PenguinCAM-config-*.yml
+
+# ...except this one, which is deliberately tracked: it is Team 2129's own machine
+# config, holds nothing private (machine specs, feeds, team name), and is useful to
+# other FRC teams as a worked example of the v2 schema. The blanket ignore above stays
+# so that anyone else's config still cannot be committed by accident.
+!PenguinCAM-config-2129.yaml
 new-config.yaml
 
 # Generated G-code and DXF debug/test artifacts

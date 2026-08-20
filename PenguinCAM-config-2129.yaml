@@ -1,0 +1,175 @@
+# =============================================================================
+# PenguinCAM configuration - Team 2129 Ultraviolet, Omio X8-2200
+# =============================================================================
+#
+# Local mode finds this by pattern (PenguinCAM-config*.yaml) in the working directory
+# or next to the app - see docs/LOCAL_MODE.md. Edit it and click the reload glyph in the
+# app header; no restart needed. Keep several side by side (one per machine or team) and
+# pass --config to pick between them.
+#
+# The team block below is what prints as the FIRST LINE of every program the operator
+# reads at the machine, so it is worth being right.
+#
+# >>> BEFORE YOU CUT ANYTHING, CHECK THE THREE THINGS MARKED "VERIFY" BELOW. <<<
+# Everything else is either a value taken from PenguinCAM's own Omio X8 profile
+# (feeds_speeds.py) or a tested Team 6238 default, but the work envelope and the
+# park position depend on YOUR machine and I cannot know them.
+#
+# UNITS: a plain number is inches. Add a quoted unit for anything else -
+# "800mm", "1/8", "0.25in". Feed rates, RPM, angles and ratios are always plain
+# numbers (IPM and rev/min).
+# =============================================================================
+
+version: 2
+default_machine: omio_x8
+
+team:
+  number: 2129
+  name: "Ultraviolet"
+
+machines:
+  # The id `omio_x8` is deliberate: it matches the machine key in feeds_speeds.py,
+  # so multi-tool jobs derive per-tool feeds against the real Omio limits
+  # (6,000-24,000 RPM, 150 IPM XY ceiling, medium rigidity) instead of falling
+  # back to a generic router.
+  omio_x8:
+    name: "Omio X8-2200"
+
+    machine:
+      name: "Omio X8-2200"
+      manufacturer: "Omio"
+      # Omio ships the X8 with a USB motion board driven by Mach3. If your team
+      # runs Mach4, LinuxCNC or something else, change this - it only affects the
+      # header comment, but that header is what the operator reads at the machine.
+      controller: "Mach3"
+
+      # ---------------------------------------------------------------- VERIFY 1
+      # The work envelope, used to reject jobs that would not fit. Too small and
+      # good jobs get refused; TOO LARGE AND A JOB THAT OVERRUNS THE TABLE IS
+      # ACCEPTED. These are the X8's nominal figures - jog your machine to each
+      # limit and enter the travel you actually have.
+      dimensions:
+        x_max: "800mm"
+        y_max: "500mm"
+        z_max: "130mm"
+
+      # ---------------------------------------------------------------- VERIFY 2
+      # OPTIONAL end-of-program park, in MACHINE coordinates (G53), to move the
+      # gantry clear for part removal. Left commented out on purpose: this is the
+      # only thing that puts G53 in the output, and a wrong value here drives the
+      # machine somewhere you did not intend. Uncomment once you have read the
+      # real machine coordinates off your controller.
+      # park_position:
+      #   x: 0.5
+      #   y: 19.0
+      #   z: -0.5
+
+      # OPTIONAL. Omit for no coolant M-codes. Set "Air" for an air blast (M7),
+      # "Flood" for M8. Uncomment only if your Omio actually has one plumbed in.
+      # coolant: "Air"
+
+    machining:
+      z_reference:
+        sacrifice_board_depth: 0.008   # how far past the stock, into the spoilboard
+        clearance_height: 0.5          # rapid height above the stock
+
+        # ------------------------------------------------------------- VERIFY 3
+        # OPTIONAL "clear everything" height above Z=0, used only for moves that
+        # cross the bed. Set this ABOVE YOUR TALLEST CLAMP. Without it those moves
+        # clear the stock but not your fixturing. The X8 has ~130mm of Z, so keep
+        # it well inside that.
+        # safe_height: 2.0
+
+      tabs:
+        enabled: true
+        remove_tabs: true
+        width: 0.25
+        height: 0.1
+        spacing: 6.0
+        # NOTE for multi-tool jobs: with tabs disabled, a profile cuts the part
+        # free, and PenguinCAM will refuse any plan that plans further work on
+        # that part or on another part beside it. See docs/MULTI_TOOL_GUIDE.md.
+
+      fixturing:
+        # true = pause after all interior work so you can screw the sheet down
+        # before any profile is cut. Costs a stop; worth it for thin stock.
+        pause_before_perimeter: false
+
+      holes:
+        detection_tolerance: 0.02
+        min_millable_multiplier: 1.2
+
+      pockets:
+        contour_threshold: 510
+
+      default_tool:
+        diameter: "4mm"
+
+    materials:
+      # These are the tested Team 6238 numbers. They already sit under the Omio's
+      # 150 IPM XY ceiling and inside its 6,000-24,000 RPM spindle range, so they
+      # need no derating for this machine.
+      #
+      # In multi-tool jobs, feeds are re-derived per tool from the chipload model
+      # (a 4mm preset means nothing for a 1/4" cutter), but max_slotting_depth
+      # below is a CEILING the model may lower and never raise. That is the number
+      # that keeps a big cutter from taking one full-width pass where it should
+      # take two - so treat it as a real safety limit, not a performance dial.
+      plywood:
+        name: "Plywood"
+        description: "Plywood on the Omio X8 - 18K RPM, 75 IPM"
+        spindle_speed: 18000
+        feed_rate: 75.0
+        ramp_feed_rate: 50.0
+        plunge_rate: 35.0
+        traverse_rate: 200.0
+        approach_rate: 50.0
+        ramp_angle: 20.0
+        ramp_start_clearance: 0.150
+        stepover_percentage: 0.65
+        helix_radius_multiplier: 0.75
+        max_slotting_depth: 0.4
+        corner_min_feed_scale: 0.7     # heat-limited: keep the feed up, avoid rubbing
+        tab_width: 0.25
+        tab_height: 0.15
+
+      aluminum:
+        name: "Aluminum"
+        description: "6061 on the Omio X8 - 18K RPM, 55 IPM, shallow 4 deg ramp"
+        spindle_speed: 18000
+        feed_rate: 55.0
+        ramp_feed_rate: 35.0
+        plunge_rate: 15.0
+        traverse_rate: 200.0
+        approach_rate: 35.0
+        ramp_angle: 4.0                # shallow: the X8 is only medium-rigidity
+        ramp_start_clearance: 0.050
+        stepover_percentage: 0.25      # conservative radial engagement
+        helix_radius_multiplier: 0.5
+        max_slotting_depth: 0.2
+        corner_min_feed_scale: 0.4     # force-limited: ease hard through corners
+        tab_width: 0.25
+        tab_height: 0.15
+
+      polycarbonate:
+        name: "Polycarbonate"
+        description: "Polycarbonate on the Omio X8 - 18K RPM, 75 IPM"
+        spindle_speed: 18000
+        feed_rate: 75.0
+        ramp_feed_rate: 50.0
+        plunge_rate: 20.0
+        traverse_rate: 200.0
+        approach_rate: 50.0
+        ramp_angle: 20.0
+        ramp_start_clearance: 0.150
+        stepover_percentage: 0.65
+        helix_radius_multiplier: 0.75
+        max_slotting_depth: 0.4
+        corner_min_feed_scale: 0.7
+        tab_width: 0.25
+        tab_height: 0.15
+
+    integrations:
+      # Local mode has no Google sign-in, so Drive stays off here.
+      google_drive:
+        enabled: false
