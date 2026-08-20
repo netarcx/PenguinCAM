@@ -13,6 +13,13 @@ subset of G-code (`G0 G1 G2 G3 G4 G17 G20/G21 G40 G49 G54 G80 G90 G91.1 G94`, `M
 M30`). It is designed to run on **GRBL, WinCNC, Mach3/Mach4, LinuxCNC** and similar
 controllers without machine-coordinate moves.
 
+**No canned cycles.** Drilling and pecking are emitted as explicit `G0`/`G1` moves, never
+as `G81`–`G89`. GRBL 1.1 does not implement canned cycles at all — a `G83` there is
+`error:20 Unsupported command` and the program halts — and PenguinCAM's own cycle-time
+estimator, 3D preview and heightmap simulator all parse only `G0`–`G3`, so a canned cycle
+would be invisible to every one of them. See `FRCPostProcessor._emit_peck_cycle`. The
+audit script fails any program containing a `G8x` word.
+
 Three features are **opt-in via config** and, if enabled, add codes or assumptions that not
 every controller supports:
 

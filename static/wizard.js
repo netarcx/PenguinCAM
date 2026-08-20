@@ -9,12 +9,22 @@
   var CFG = window.PenguinCAM || { source: 'upload', bed: { width: 24, height: 24 }, defaultTool: 0.157, defaultToolText: '4mm', machines: {} };
   var DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
 
-  var ALL_STEPS = ['setup', 'parts', 'layout', 'preview'];
+  var ALL_STEPS = ['setup', 'parts', 'tools', 'layout', 'preview'];
   // Every mode uses the Layout step. In 2D it nests parts on a sheet; in tubing it's
   // used only to orient the face(s) to the tube-jig axis (see the tube handling in the
   // rotate + validate paths below). 2.5D is a single part positioned at the origin.
+  // "tools" is the multi-tool operations editor (static/multitool.js) and is only in the
+  // flow when the job actually uses several tools, so the ordinary single-tool flow is
+  // the same four steps it has always been.
   function steps() {
-    return ALL_STEPS;
+    if (multiToolOn()) return ALL_STEPS;
+    return ALL_STEPS.filter(function (s) { return s !== 'tools'; });
+  }
+
+  // The editor lives in its own file and is optional; treat a missing script as "off"
+  // rather than letting the whole wizard fail to start.
+  function multiToolOn() {
+    return !!(window.PCMultiTool && window.PCMultiTool.enabled());
   }
 
   var state = {
@@ -36,7 +46,9 @@
     // The machine envelope is a read-only constraint; the parts' combined bounding box
     // is the stock (G54 origin = its lower-left).
     machine: { width: CFG.bed.width || 24, height: CFG.bed.height || 24, name: CFG.machineName || 'Machine' },
-    parts: [],            // {id,name,width,height,outline,holes,inner,file,cx,cy,rotation,flipped}
+    multitool: false,     // when true, the Tools & Ops step plans several tools per part
+    tools: null,          // [{slot,name,diameter,flutes,type,included_angle}] - see multitool.js
+    parts: [],            // {id,name,width,height,outline,holes,inner,file,cx,cy,rotation,flipped,ops}
     selectedIds: [],
     zoom: 1,
     saveAction: 'download',   // 'download' | 'drive' (final-step action)
@@ -259,6 +271,17 @@
   // Validate the layout: the combined bounding box (the stock) must fit the machine,
   // and no two parts may overlap or sit closer than one kerf. Real-geometry overlap so
   // a part nesting into another's concave region isn't a false positive.
+  // Kerf for the layout clearance check: the widest tool the job will actually use.
+  // Must match frc_cam_gui_app's `kerf = max(t.diameter for t in job.used_tools)`, or the
+  // Layout step passes a nest that Preview then refuses.
+  function jobKerf() {
+    if (multiToolOn() && window.PCMultiTool) {
+      var widest = window.PCMultiTool.widestUsedDiameter();
+      if (widest) return widest;
+    }
+    return state.tool_diameter;
+  }
+
   function validateLayout() {
     // Tubing isn't nested on a sheet: the two faces are opposite walls of one tube, so
     // the machine-bounds and part-overlap checks don't apply. The Layout step exists
@@ -266,7 +289,7 @@
     if (state.mode === 'tubing') return { bad: {}, msgs: [], tooBig: false, bbox: combinedBBox() };
     var msgs = [];
     var bad = {};
-    var gap = state.tool_diameter;
+    var gap = jobKerf();
     var bbox = combinedBBox();
     var tooBig = false;
     if (bbox && (bbox.w > state.machine.width + 1e-6 || bbox.h > state.machine.height + 1e-6)) {
@@ -311,7 +334,15 @@
       chips.push(msel && msel.options[msel.selectedIndex] ? msel.options[msel.selectedIndex].text : state.material);
       chips.push(state.mode === '2.5d' ? '2.5D · thickness from CAD' : (state.thickness_text + ' thick'));
     }
-    chips.push('⌀ ' + state.tool_diameter_text + ' tool');
+    if (multiToolOn()) {
+      // Tools actually used by an operation - a listed-but-unassigned tool inflates the
+      // count and disagrees with the header the operator reads.
+      var n = window.PCMultiTool ? window.PCMultiTool.usedToolCount()
+                                 : (state.tools || []).length;
+      chips.push(n + ' tool' + (n === 1 ? '' : 's'));
+    } else {
+      chips.push('⌀ ' + state.tool_diameter_text + ' tool');
+    }
     if (state.mode === 'tubing') {
       chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
     } else {
@@ -356,9 +387,13 @@
     // quadrant stays "incomplete until you get there" (e.g. Preview generates only
     // when you actually reach it).
     var gridMode = $('#wizard').classList.contains('grid');
+    var inFlow = steps();
     $all('.step').forEach(function (s) {
-      var isCurrent = s.getAttribute('data-step') === name;
-      if (gridMode) { s.hidden = false; s.classList.toggle('current', isCurrent); }
+      var stepName = s.getAttribute('data-step');
+      var isCurrent = stepName === name;
+      // Grid mode shows every step at once - but only the ones actually in the flow, so
+      // the operations editor stays out of sight while the job uses a single tool.
+      if (gridMode) { s.hidden = inFlow.indexOf(stepName) < 0; s.classList.toggle('current', isCurrent); }
       else { s.hidden = !isCurrent; s.classList.remove('current'); }
     });
     var order = steps();
@@ -373,6 +408,12 @@
     var isPreview = name === 'preview';
     nextBtn.hidden = isPreview;
     $('#final-action').hidden = !isPreview;
+    if (name === 'tools' && window.PCMultiTool) {
+      window.PCMultiTool.render();
+      // Re-survey on entry: the parts, their rotation, the material and the tool list can
+      // all have changed since the last visit, and every one of them moves the answer.
+      window.PCMultiTool.refreshFeatures();
+    }
     if (name === 'layout') {
       updateLayoutInfo();
       // Tubing shares one orientation across both faces; select them together so the
@@ -385,6 +426,23 @@
       resetHandleDir();
       refitView();
       drawLayout();
+    }
+    if (isPreview && multiToolOn()) {
+      // The Tools gate only fires when you pass THROUGH that step. In full-page grid
+      // mode the dropzone stays live, so a part added afterwards reached Preview with an
+      // empty operation list. Re-check on the way in, whatever route got us here.
+      var planProblems = window.PCMultiTool.validate();
+      if (planProblems.length) {
+        $('#gen-status').textContent = '';
+        $('#preview-errors').textContent =
+          'Finish the operation plan first:\n'
+          + planProblems.map(function (m) { return '• ' + m; }).join('\n');
+        $('#btn-do').disabled = true;
+        $('#final-action').hidden = false;
+        updateSummary();
+        dbg('step', name);
+        return;
+      }
     }
     if (isPreview) {
       state.saveAction = preferredAction();
@@ -410,6 +468,15 @@
     if (name === 'parts' && state.parts.length === 0) {
       alert('Add at least one part before continuing.');
       return false;
+    }
+    if (name === 'tools' && multiToolOn()) {
+      var problems = window.PCMultiTool.validate();
+      if (problems.length) {
+        alert('Fix the operation plan first:\n' + problems.map(function (m) {
+          return '• ' + m;
+        }).join('\n'));
+        return false;
+      }
     }
     if (name === 'layout') {
       var v = validateLayout();
@@ -461,6 +528,24 @@
       function (inches, text) { state.tubeHeight = inches; state.tubeHeight_text = text; });
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
+    var mt = $('#f-multitool');
+    if (mt && !window.PCMultiTool) {
+      // The editor lives in its own file. If it failed to load, a checkbox that silently
+      // does nothing is worse than no checkbox: say so and disable it.
+      mt.disabled = true;
+      mt.checked = false;
+      var wrap = $('#multitool-toggle');
+      if (wrap) {
+        wrap.title = 'The multi-tool editor failed to load. Reload the page to retry.';
+        wrap.style.opacity = '0.5';
+      }
+    } else if (mt) {
+      mt.addEventListener('change', function () {
+        state.multitool = this.checked;
+        applyMultiToolUI();
+        dbg('multitool', state.multitool);
+      });
+    }
     applyModeUI();
   }
 
@@ -529,8 +614,29 @@
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
     var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
-    renderStepbar();
+    // Several tools per part is a 2D-only plan for now: 2.5D takes its depths from the
+    // CAD layers and tubing runs a fixed program of its own.
+    var mtToggle = $('#multitool-toggle'); if (mtToggle) mtToggle.style.display = (is25 || isTube) ? 'none' : '';
+    applyMultiToolUI();
     updatePartsModeNote();
+  }
+
+  // Reflect the multi-tool toggle everywhere it shows: the single-tool field it replaces,
+  // the extra grid column, the step bar, and the explanatory note.
+  function applyMultiToolUI() {
+    var on = multiToolOn();
+    var toolField = $('#tool-field'); if (toolField) toolField.style.display = on ? 'none' : '';
+    var note = $('#multitool-note'); if (note) note.style.display = on ? '' : 'none';
+    $('#wizard').classList.toggle('has-tools', on);
+    // The toggle changes which steps exist, and gotoStep is the ONLY thing that decides
+    // which sections are visible. Without re-running it, ticking the box applied the
+    // 5-quadrant grid while the new step's panel stayed hidden - the widest column on
+    // screen just went blank - and unticking left an orphaned panel with no grid
+    // placement, collapsing the four real quadrants into strips.
+    //
+    // In full-page grid mode every step is on screen at once, so the toggle can also be
+    // switched off while standing ON the step it removes; land somewhere real then.
+    gotoStep(steps().indexOf(state.step) < 0 ? 'parts' : state.step);
   }
 
   function updatePartsModeNote() {
@@ -975,7 +1081,13 @@
   function updateLayoutInfo() {
     var el = $('#info-machine-name'); if (el) el.textContent = state.machine.name;
     el = $('#info-machine-size'); if (el) el.textContent = state.machine.width + '" x ' + state.machine.height + '"';
-    el = $('#info-tool'); if (el) el.textContent = state.tool_diameter_text;
+    el = $('#info-tool');
+    if (el) {
+      // Show the kerf actually being enforced, not the (hidden) single-tool field.
+      el.textContent = multiToolOn()
+        ? '⌀ ' + jobKerf().toFixed(4) + '" widest tool'
+        : state.tool_diameter_text;
+    }
   }
 
   // The Layout hint reads differently for tubing: there's no sheet to nest on — the
@@ -1007,6 +1119,7 @@
 
     if (state.mode === 'tubing') { generateTube(); }
     else if (state.mode === '2.5d') { generateSingle(); }
+    else if (multiToolOn()) { generateMultiTool(); }
     else { generateJob(); }
   }
 
@@ -1099,6 +1212,31 @@
       .catch(function (e) { dbg('process-job:fail', String(e)); $('#preview-errors').textContent = 'Request failed: ' + e; $('#gen-status').textContent = ''; });
   }
 
+  // Multi-tool jobs post the same placements as generateJob, plus the tool table and each
+  // part's operation list; the server orders the operations and inserts the tool changes.
+  function generateMultiTool() {
+    var bb = combinedBBox() || { minX: 0, minY: 0, w: 0, h: 0 };
+    var placements = state.parts.map(function (p) {
+      var pl = placement(p);
+      return { x: pl.x - bb.minX, y: pl.y - bb.minY };
+    });
+    var fd = window.PCMultiTool.buildFormData(placements, jobFilename(), timestamp());
+    dbg('process-multitool:req', { parts: state.parts.length });
+    return fetch('/process-multitool', { method: 'POST', body: fd })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || !res.j.success) { showGenErrors(res.j); return; }
+        dbg('process-multitool:ok', { tools: res.j.tool_changes, time: res.j.cycle_time });
+        state.lastResponse = res.j;
+        showResult(res.j);
+      })
+      .catch(function (e) {
+        dbg('process-multitool:fail', String(e));
+        $('#preview-errors').textContent = 'Request failed: ' + e;
+        $('#gen-status').textContent = '';
+      });
+  }
+
   function generateSingle() {
     var p = state.parts[0];
     if (!p) { $('#preview-errors').textContent = 'Add a part first.'; $('#gen-status').textContent = ''; return Promise.resolve(); }
@@ -1133,7 +1271,20 @@
     var n;
     if (state.mode === 'tubing') { n = state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'); }
     else { n = resp.parts ? (resp.parts.length + ' part(s)') : '1 part'; }
-    $('#preview-stats').textContent = [n, t].filter(Boolean).join(' · ');
+    var bits = [n, t];
+    if (resp.tools && resp.tools.length) {
+      bits.splice(1, 0, resp.tools.length + ' tool' + (resp.tools.length === 1 ? '' : 's')
+                        + ' · ' + (resp.tool_changes || 0) + ' change'
+                        + (resp.tool_changes === 1 ? '' : 's'));
+      // The M0 waits are operator time, so the estimate below them is cutting time only.
+      if (resp.excludes_tool_change_time) bits.push('excludes tool-change time');
+    }
+    $('#preview-stats').textContent = bits.filter(Boolean).join(' · ');
+    // Feeds warnings (a clamped feed, an odd flute count for the material) are advice,
+    // not failures: show them without blocking the download.
+    $('#preview-errors').textContent = (resp.warnings || []).map(function (w) {
+      return '⚠ ' + w;
+    }).join('\n');
     $('#btn-do').disabled = false;   // gcode ready — enable the save/download action
     show3DPreview(resp);
     updateSummary();  // refresh the stock chip with the server-authoritative size
@@ -1171,7 +1322,7 @@
     }
     viewer.load(resp.gcode, {
       stockWidth: W, stockDepth: D,
-      stockHeight: stockH, toolDiameter: state.tool_diameter,
+      stockHeight: stockH, toolDiameter: multiToolOn() ? jobKerf() : state.tool_diameter,
     });
     dbg('preview', { w: W, d: D });
   }
@@ -1347,6 +1498,17 @@
     // Expose the live mode so the Onshape panel adapter can request a 2.5D
     // (multi-layer) export instead of a flat one when the user picked 2.5D.
     window.PenguinCAM.getMode = function () { return state.mode; };
+    // Started before bindSetup so the setup pass can already ask the editor whether
+    // multi-tool is on (it answers "no" until it has been initialised).
+    if (window.PCMultiTool) {
+      window.PCMultiTool.init({
+        state: state,
+        parseLength: parseLength,
+        cfg: { toolLibrary: CFG.toolLibrary || {}, defaultTool: CFG.defaultTool,
+               defaultToolText: CFG.defaultToolText },
+        onChange: updateSummary,
+      });
+    }
     bindSetup();
     bindParts();
     bindLayout();

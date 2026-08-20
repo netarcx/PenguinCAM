@@ -19,6 +19,7 @@ from typing import List, Tuple, Optional, Dict, Any
 
 # Third-party
 import ezdxf
+import yaml
 from shapely import affinity
 from shapely.geometry import Point, Polygon, LinearRing, MultiPolygon, LineString
 from shapely.geometry.polygon import orient
@@ -121,13 +122,51 @@ def sanitize_filename_base(name: str, fallback: str = "output") -> str:
     return cleaned if cleaned else fallback
 
 
+# Characters that must never reach a G-code comment. Parentheses would nest the comment
+# and square brackets are read as expressions by some controllers, so both are turned into
+# a dash rather than swapped for each other (see CLAUDE.md, "G-code Generation Rules").
+_COMMENT_TRANSLITERATIONS = {
+    '‘': "'", '’': "'", '“': '"', '”': '"',   # curly quotes
+    '–': '-', '—': '-', '−': '-',                   # dashes / minus
+    '°': ' deg', '″': '"', '′': "'",                # degree, inch/foot marks
+    '×': 'x', '→': '->', 'µ': 'u',                  # times, arrow, micro
+}
+
+
+def sanitize_comment(text: str, fallback: str = '') -> str:
+    """Make arbitrary text (a CAD part name, a tool name, a machine name) safe to drop
+    inside a G-code `(...)` comment: pure ASCII, no parentheses, no square brackets.
+
+    Both rules are hard requirements of the controllers this output runs on - nested
+    comments and bracketed text produce unpredictable behaviour - and neither is fully
+    covered by the unit tests, since much of the commentary is generated conditionally."""
+    if not text:
+        return fallback
+    out = str(text)
+    for src_ch, dst in _COMMENT_TRANSLITERATIONS.items():
+        out = out.replace(src_ch, dst)
+    out = out.encode('ascii', 'ignore').decode('ascii')   # drop anything still non-ASCII
+    out = re.sub(r'[()\[\]]+', '-', out)                  # never nest or bracket a comment
+    out = re.sub(r'\s+', ' ', out).strip(' -')
+    return out if out else fallback
+
+
 def build_output_filename(suggested_filename: str, timestamp: str, fallback: str = "output") -> str:
-    """Build the '<name>_<timestamp>.nc' output filename, sanitizing the (possibly CAD- or
-    user-supplied) name so it is safe to write to disk and serve. Single chokepoint shared
-    by every generator and the multi-part job assembler."""
+    """Build the '<name>_<timestamp>.nc' output filename, sanitizing BOTH halves so the
+    result is safe to write to disk and serve. Single chokepoint shared by every generator
+    and the multi-part job assembler.
+
+    The timestamp is client-supplied (the browser sends its local time so the filename
+    matches the operator's clock), and it used to reach the path with only '-', ' ' and
+    ':' stripped - so a value like '/../../escape' walked straight out of the output
+    directory. Only digits and underscores can survive now; anything else falls back to
+    server time, because a filename is not worth trusting input for."""
     base_name = sanitize_filename_base(suggested_filename, fallback)
-    timestamp_for_file = timestamp.replace('-', '').replace(' ', '_').replace(':', '')
-    return f"{base_name}_{timestamp_for_file}.nc"
+    stamped = re.sub(r'[^0-9_]', '', str(timestamp).replace('-', '').replace(' ', '_')
+                     .replace(':', ''))
+    if not stamped.strip('_'):
+        stamped = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{base_name}_{stamped}.nc"
 
 
 class FRCPostProcessor:
@@ -1672,12 +1711,21 @@ class FRCPostProcessor:
         return lines
 
     def _generate_gcode_header(self, timestamp: str = None, is_multilayer: bool = False,
-                               is_job: bool = False, job_part_count: int = None) -> List[str]:
+                               is_job: bool = False, job_part_count: int = None,
+                               tool_table: List[str] = None,
+                               operations_override: str = None,
+                               entry_notes: List[str] = None) -> List[str]:
         """Generate common G-code header (comments + initialization).
 
         is_job: emit a single shared header for a multi-part job (one spindle start,
         one WCS, one safe-Z) instead of a per-part header. job_part_count is shown
-        in the comments. Multi-part jobs are single-layer (2.5D is single-part)."""
+        in the comments. Multi-part jobs are single-layer (2.5D is single-part).
+
+        tool_table: for a multi-tool program, one already-sanitized description line per
+        tool (see tooling.build_tool_table). Replaces the single "(Tool: ...)" line with
+        a listed table plus the manual-tool-change warning, since no one tool describes
+        the program. operations_override replaces the derived operations summary, which
+        is likewise per-tool rather than per-part in a multi-tool program."""
         gcode = []
 
         # Use provided timestamp or generate one
@@ -1686,7 +1734,7 @@ class FRCPostProcessor:
         timestamp_display = timestamp[:16]
 
         # Title
-        gcode.append(f"({self.team_name.upper()} - Team {self.team_number})")
+        gcode.append(f"({sanitize_comment(self.team_name, 'PenguinCAM').upper()} - Team {self.team_number})")
         if is_multilayer:
             gcode.append("(PenguinCAM CNC Post-Processor - MULTI-LAYER)")
         elif is_job:
@@ -1695,14 +1743,17 @@ class FRCPostProcessor:
             gcode.append("(PenguinCAM CNC Post-Processor)")
 
         if hasattr(self, 'user_name'):
-            gcode.append(f"(Generated by: {self.user_name} on {timestamp_display})")
+            # A Google/Onshape display name reads like "Trent Fox (Mentor) Jose" -
+            # a nested paren and a non-ASCII byte, both forbidden, on line 3 of every
+            # program the hosted app produces.
+            gcode.append(f"(Generated by: {sanitize_comment(self.user_name, 'unknown')} on {timestamp_display})")
         else:
             gcode.append(f"(Generated on: {timestamp_display})")
         gcode.append("")
 
-        # Machine info (sanitize to avoid nested parentheses in G-code comments)
-        machine_name = self.machine_name.replace('(', '[').replace(')', ']')
-        controller = self.machine_controller.replace('(', '[').replace(')', ']')
+        # Machine info (sanitized: comments must be ASCII with no parens or brackets)
+        machine_name = sanitize_comment(self.machine_name, 'Unknown')
+        controller = sanitize_comment(self.machine_controller, 'Unknown')
 
         gcode.append(f"(Machine: {machine_name})")
         gcode.append(f"(Controller: {controller})")
@@ -1723,13 +1774,21 @@ class FRCPostProcessor:
         # Material and tool
         material_info = f"{self.material_thickness}\""
         if hasattr(self, 'material_name'):
-            material_info = f"{self.material_name} - {material_info} thick"
+            material_info = f"{sanitize_comment(self.material_name, 'material')} - {material_info} thick"
         else:
             material_info = f"{material_info} thick"
 
         gcode.append(f"(Material: {material_info})")
-        gcode.append(f"(Tool: {self.tool_diameter}\" diam Flat End Mill)")
-        gcode.append(f"(Spindle: {self.spindle_speed} RPM)")
+        if tool_table:
+            gcode.append(f"(Tools: {len(tool_table)} - MANUAL TOOL CHANGES REQUIRED)")
+            for line in tool_table:
+                gcode.append(f"(  {line})")
+            gcode.append("(The program pauses and parks at each change - swap the tool,)")
+            gcode.append("(re-zero Z to the sacrifice board, then press CYCLE START.)")
+            gcode.append("(** Do NOT touch the X or Y zero between tools **)")
+        else:
+            gcode.append(f"(Tool: {self.tool_diameter}\" diam Flat End Mill)")
+            gcode.append(f"(Spindle: {self.spindle_speed} RPM)")
 
         if is_job and job_part_count is not None:
             gcode.append(f"(Parts in job: {job_part_count})")
@@ -1749,7 +1808,9 @@ class FRCPostProcessor:
             gcode.append("")
 
             # Operations
-            if is_job:
+            if operations_override is not None:
+                operations_str = operations_override
+            elif is_job:
                 # Per-part operations are listed in each PART section; the job-level
                 # header just records that this is a multi-part program. No nested parens
                 # in the comment (CNC controllers choke on them).
@@ -1764,11 +1825,16 @@ class FRCPostProcessor:
                     operations.append("Profile")
                 operations_str = ", ".join(operations) if operations else "None"
 
-            helical_angle = f"~{int(self.ramp_angle)} deg"
-
             gcode.append(f"(Operations: {operations_str})")
-            gcode.append(f"(Helical entry angle: {helical_angle})")
-            gcode.append("(No straight plunges)")
+            # "No straight plunges" is a promise about how the tool enters the work, and
+            # it is false the moment a twist drill is involved - drilling IS a straight
+            # plunge. A program that tells the operator otherwise is worse than one that
+            # says nothing, so a drilling job replaces these lines rather than adding to
+            # them. See tooling.assemble_job, which supplies them.
+            for note in (entry_notes if entry_notes is not None
+                         else [f"(Helical entry angle: ~{int(self.ramp_angle)} deg)",
+                               "(No straight plunges)"]):
+                gcode.append(note)
             gcode.append("")
 
             gcode.append("(Z-AXIS REFERENCE:)")
@@ -2621,6 +2687,167 @@ class FRCPostProcessor:
 
         return num_passes, depth_per_pass
 
+    # ---- True drilling (twist drill) --------------------------------------------------
+    # Everything else in this file assumes an end mill: it enters helically, feeds
+    # sideways, and steps over to open a bore. A twist drill can do none of that. It has
+    # no side cutting edges worth the name and no way to clear a lateral cut, so the only
+    # motion it may ever make under load is straight down its own axis. These two methods
+    # are the drilling path; nothing here emits an X or Y feed move.
+
+    #: Included point angle of a standard twist drill, degrees. 118 is the general-purpose
+    #: HSS grind; 135 is the split-point/harder-material grind.
+    DEFAULT_DRILL_POINT_ANGLE = 118.0
+
+    @staticmethod
+    def drill_point_length(diameter: float, point_angle: float = DEFAULT_DRILL_POINT_ANGLE) -> float:
+        """Axial length of a twist drill's conical point.
+
+        The tip reaches full depth before the drill's flutes do, so a through hole has to
+        be driven this much deeper than the stock or the bottom of the hole is a cone
+        rather than a full-diameter opening. For a 118 degree point that is about 0.3 x
+        diameter - on a 1/4 inch drill, 0.075 inch, which is ten times the 0.008 inch
+        spoilboard overcut a milled hole gets away with.
+        """
+        half_angle = math.radians(max(1.0, min(179.0, point_angle)) / 2.0)
+        return (diameter / 2.0) / math.tan(half_angle)
+
+    #: How far above the last peck the tool rapids back to before cutting again. Enough
+    #: to clear chips left in the flute, small enough not to waste the cycle.
+    PECK_RETURN_CLEARANCE = 0.02
+
+    def _emit_peck_cycle(self, gcode: List[str], cx: float, cy: float,
+                         final_depth: float, retract_plane: float,
+                         peck_depth: float, feed: float) -> None:
+        """Peck down to `final_depth` as explicit moves, not a G83 canned cycle.
+
+        This is what a G83 does - cut a peck, retract to the R plane to clear chips, rapid
+        back down, repeat - written out. Expanding it is worth the extra lines for four
+        separate reasons:
+
+        * **GRBL does not implement canned cycles.** G81-G89 are not in GRBL 1.1, so a
+          G83 is `error:20 Unsupported command` and the program stops dead. ASSUMPTIONS.md
+          lists GRBL as a target controller, and the Onshape-era code emitted G83 anyway.
+        * The cycle-time estimator only understands G0/G1/G2/G3, so every G83 counted as
+          zero seconds - a 12-hole plate under-reported by the entire drilling operation.
+        * The 3D preview matches /^(G[0-3])/, so drilled holes did not appear at all.
+        * The heightmap simulator in the test harness likewise never saw the material come
+          out.
+
+        Fixing those three consumers separately would leave the GRBL problem, and would
+        have to be repeated for every future consumer of the G-code.
+        """
+        depth_remaining = retract_plane - final_depth
+        if depth_remaining <= 0:
+            return
+        pecks = max(1, int(math.ceil(depth_remaining / max(peck_depth, 1e-6))))
+        previous = retract_plane
+
+        for peck in range(1, pecks + 1):
+            target = max(final_depth, retract_plane - peck_depth * peck)
+            if peck == pecks:
+                target = final_depth
+            if previous < retract_plane:
+                # Coming back after a chip-clearing retract: rapid down to just above
+                # where the last peck stopped, then cut from there.
+                gcode.append(f"G0 Z{previous + self.PECK_RETURN_CLEARANCE:.4f}  "
+                             f"; Rapid back to just above the last peck")
+            gcode.append(f"G1 Z{target:.4f} F{feed:.1f}  ; Peck {peck} of {pecks}")
+            if peck < pecks:
+                gcode.append(f"G0 Z{retract_plane:.4f}  ; Retract to clear chips")
+            previous = target
+
+    def _generate_drill_gcode(self, cx: float, cy: float, diameter: float,
+                              point_angle: float = None,
+                              through: bool = True) -> List[str]:
+        """One hole, drilled. Rapid over, peck to depth on the axis, retract. Nothing else.
+
+        Depth accounts for the drill point when the hole goes through (see
+        drill_point_length), so the exit side is full diameter. A blind hole is measured
+        to the tip as the operator would expect from the drawing.
+        """
+        gcode = []
+        point_angle = point_angle or self.DEFAULT_DRILL_POINT_ANGLE
+        point = self.drill_point_length(diameter, point_angle)
+
+        # Chip-clearing retract: just above the stock, not the full safe height - a G83
+        # that retracts to safe Z between every peck spends the whole cycle in rapids.
+        retract_plane = self.material_top + 0.1
+        if through:
+            final_depth = self.cut_depth - point
+            note = (f"(Through hole: {self.material_thickness:.4f} in stock plus "
+                    f"{point:.4f} in for the {point_angle:.0f} deg point)")
+        else:
+            final_depth = self.cut_depth
+            note = "(Blind hole: depth measured to the drill tip)"
+
+        gcode.append(f"(Drill {diameter:.4f} in dia at X{cx:.3f} Y{cy:.3f})")
+        gcode.append(note)
+        gcode.append(f"G0 X{cx:.4f} Y{cy:.4f}  ; Rapid over hole centre")
+        gcode.append(f"G0 Z{retract_plane:.4f}  ; Down to the retract plane")
+        self._emit_peck_cycle(gcode, cx, cy, final_depth, retract_plane,
+                              self.peck_drill_depth, self.plunge_rate)
+        gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
+        return gcode
+
+    def spot_drill_depth(self, spot_depth: float = None) -> float:
+        """How deep a centre/spot drill goes: enough to leave a cone the following drill
+        can seat its point in, and no more. A quarter of the tool diameter is the usual
+        rule; never deep enough to matter to the part."""
+        return spot_depth if spot_depth else max(0.02, self.tool_diameter / 4.0)
+
+    def generate_drill_operation_gcode(self, holes: List[Dict[str, Any]],
+                                       point_angle: float = None,
+                                       spot_only: bool = False,
+                                       spot_depth: float = None) -> List[str]:
+        """The whole drilling operation: every hole in `holes`, worked on its axis.
+
+        `spot_only` turns this into a centre-drilling pass: a shallow dimple at each hole
+        centre to locate a later drill, rather than the hole itself. It never goes through
+        the stock, so it takes no drill-point allowance and leaves the part otherwise
+        untouched.
+        """
+        if not holes:
+            return []
+
+        if spot_only:
+            depth = self.spot_drill_depth(spot_depth)
+            gcode = ["(===== CENTRE DRILLING =====)",
+                     f"(Spotting tool {self.tool_diameter:.4f} in diameter)",
+                     f"(Locating dimples {depth:.4f} in deep - these are NOT the holes)",
+                     "(Axial plunge only - no lateral cutting moves)",
+                     ""]
+            for i, hole in enumerate(holes, 1):
+                cx, cy = hole['center']
+                drawn = hole.get('drawn_diameter', hole['diameter'])
+                gcode.append(f"(Spot {i} of {len(holes)} - for a {drawn:.4f} in hole)")
+                gcode.extend(self._generate_spot_gcode(cx, cy, depth))
+                gcode.append("")
+            return gcode
+
+        gcode = ["(===== DRILLING =====)",
+                 f"(Twist drill {self.tool_diameter:.4f} in diameter, "
+                 f"{(point_angle or self.DEFAULT_DRILL_POINT_ANGLE):.0f} deg point)",
+                 "(Axial plunge only - no lateral cutting moves)",
+                 ""]
+        through = self.cut_depth <= 0
+        for i, hole in enumerate(holes, 1):
+            cx, cy = hole['center']
+            gcode.append(f"(Hole {i} of {len(holes)})")
+            gcode.extend(self._generate_drill_gcode(cx, cy, hole['diameter'],
+                                                    point_angle=point_angle, through=through))
+            gcode.append("")
+        return gcode
+
+    def _generate_spot_gcode(self, cx: float, cy: float, depth: float) -> List[str]:
+        """One centre-drill dimple. Shallow enough not to need pecking."""
+        target = self.material_top - depth
+        return [
+            f"G0 X{cx:.4f} Y{cy:.4f}  ; Rapid over hole centre",
+            f"G0 Z{self.material_top + 0.05:.4f}  ; Down to just above the stock",
+            f"G1 Z{target:.4f} F{self.plunge_rate:.1f}  ; Spot",
+            f"G0 Z{self.retract_height:.4f}  ; Retract",
+        ]
+
     def _generate_peck_drill_and_spiral_gcode(self, cx: float, cy: float, diameter: float, final_toolpath_radius: float) -> List[str]:
         """
         Generate G-code for small holes using G83 peck drilling + spiral clearing.
@@ -2655,11 +2882,10 @@ class FRCPostProcessor:
         gcode.append(f"G0 X{cx:.4f} Y{cy:.4f}  ; Rapid to hole center")
         gcode.append(f"G0 Z{retract_plane:.4f}  ; Move to retract plane")
 
-        # G83 peck drilling cycle
-        # Format: G83 X__ Y__ Z__ R__ Q__ F__
-        # Z = final depth (negative), R = retract plane, Q = peck depth, F = plunge rate
-        gcode.append(f"G83 X{cx:.4f} Y{cy:.4f} Z{final_depth:.4f} R{retract_plane:.4f} Q{peck_depth:.4f} F{self.plunge_rate}  ; Peck drill to full depth")
-        gcode.append("G80  ; Cancel canned cycle")
+        # Peck drilling, written out rather than as a G83 canned cycle - see
+        # _emit_peck_cycle for why (GRBL support, cycle time, preview, simulation).
+        self._emit_peck_cycle(gcode, cx, cy, final_depth, retract_plane,
+                              peck_depth, self.plunge_rate)
 
         if pure_drill:
             gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
@@ -4173,6 +4399,123 @@ class FRCPostProcessor:
 
         return gcode
 
+    # ---- Chamfer / edge break (V-tool) ------------------------------------------------
+    # A symmetric V-tool centred exactly ON the true (uncompensated) contour and dropped
+    # `chamfer_depth` below the material top breaks that top edge by `chamfer_width`
+    # horizontally: at height h above the tip the cone radius is h*tan(half_angle), so as
+    # the tool follows the edge its flank sweeps the plane running from (edge, top) down
+    # to (edge, top - depth). That makes a chamfer pass a plain ZERO-COMPENSATION contour
+    # trace at a shallow depth - no offset math - and the same routine works on the
+    # perimeter, a hole, or a pocket. See docs/TOOL_COMPENSATION_GUIDE.md.
+
+    @staticmethod
+    def chamfer_depth(chamfer_width: float, included_angle: float = 90.0) -> float:
+        """Tip depth below the material top that yields `chamfer_width` of horizontal edge
+        break with a V-tool of the given included angle. A 90 deg V-bit gives depth ==
+        width; a narrower tool must go deeper for the same width."""
+        half = math.radians(min(179.0, max(1.0, included_angle)) / 2.0)
+        return chamfer_width / math.tan(half)
+
+    @staticmethod
+    def chamfer_max_width(tool_diameter: float, included_angle: float = 90.0) -> float:
+        """Widest edge break this V-tool can cut in one pass: the cone reaches its full
+        radius at the material top, so the break can't exceed the tool radius."""
+        return tool_diameter / 2.0
+
+    def _orient_ring(self, points: List[Tuple[float, float]], clockwise: bool) -> List[Tuple[float, float]]:
+        """Return `points` as a closed ring (no repeated last vertex) wound CW or CCW.
+        Shapely's orient() gives a CCW exterior; reverse it for CW."""
+        poly = Polygon(points)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or not hasattr(poly, 'exterior'):
+            ring = list(points)
+        else:
+            ring = list(orient(poly, 1.0).exterior.coords)[:-1]
+        if clockwise:
+            ring = ring[::-1]
+        return ring
+
+    def _generate_chamfer_ring_gcode(self, points: List[Tuple[float, float]],
+                                     cut_z: float, clockwise: bool) -> List[str]:
+        """One chamfer lap around a single closed contour at `cut_z`, entered by ramping
+        along the ring (never a straight plunge onto the edge)."""
+        ring = self._orient_ring(points, clockwise)
+        if len(ring) < 3:
+            return []
+
+        gcode = []
+        ramp_start_height = self.material_top + self.ramp_start_clearance
+        start = ring[0]
+        gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract before chamfer move")
+        gcode.append(f"G0 X{start[0]:.4f} Y{start[1]:.4f}  ; Rapid to chamfer start")
+        gcode.extend(self._approach_ramp_start(ramp_start_height))
+        self._emit_ring_ramp(gcode, ring, ramp_start_height, cut_z)  # ends back at ring[0] at depth
+        self._emit_ring_cut_with_corner_slowdown(gcode, ring, self.feed_rate)
+        gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
+        return gcode
+
+    def _generate_chamfer_gcode(self, rings: List[Dict[str, Any]], chamfer_width: float,
+                                included_angle: float = 90.0) -> List[str]:
+        """Generate a complete chamfer operation over a set of contours.
+
+        Args:
+            rings: [{'points': [(x, y), ...], 'clockwise': bool, 'label': str,
+                     'min_radius': float or None}] - `clockwise` should be True for
+                    outside edges (perimeter) and False for inside edges (holes,
+                    pockets) so the V-tool climb mills; `min_radius`, when given, is the
+                    tightest concave radius on the contour and is checked against the
+                    cone radius at the material top.
+            chamfer_width: horizontal edge break, inches.
+            included_angle: V-tool included angle in degrees (90 is typical).
+
+        Validation errors are recorded on self.errors, which callers check.
+        """
+        gcode = []
+        if not rings:
+            return gcode
+
+        max_width = self.chamfer_max_width(self.tool_diameter, included_angle)
+        if chamfer_width > max_width + 1e-9:
+            self._add_error(
+                f"Chamfer width {chamfer_width:.4f}\" exceeds what a {self.tool_diameter:.4f}\" "
+                f"V-tool can cut in one pass, max {max_width:.4f}\". Use a larger V-tool or a "
+                f"smaller chamfer.")
+            return gcode
+
+        depth = self.chamfer_depth(chamfer_width, included_angle)
+        if depth >= self.material_thickness:
+            self._add_error(
+                f"Chamfer of {chamfer_width:.4f}\" needs a {depth:.4f}\" deep cut with a "
+                f"{included_angle:.0f} deg V-tool, which is through {self.material_thickness:.4f}\" "
+                f"stock. Use a smaller chamfer or a wider V-tool.")
+            return gcode
+
+        cut_z = self.material_top - depth
+
+        gcode.append("(===== CHAMFER =====)")
+        gcode.append(f"(V-tool {self.tool_diameter:.4f}\" diam, {included_angle:.0f} deg included angle)")
+        gcode.append(f"(Edge break {chamfer_width:.4f}\" wide, tip depth {depth:.4f}\" below material top)")
+        gcode.append("(Tool centre follows the true edge - no cutter compensation)")
+        gcode.append("")
+
+        for ring in rings:
+            points = ring.get('points') or []
+            if len(points) < 3:
+                continue
+            label = sanitize_comment(ring.get('label') or 'Contour')
+            min_radius = ring.get('min_radius')
+            if min_radius is not None and chamfer_width >= min_radius - 1e-9:
+                self._add_error(
+                    f"Chamfer width {chamfer_width:.4f}\" does not fit {label}, whose tightest "
+                    f"radius is {min_radius:.4f}\". The V-tool would cut past the far wall.")
+                continue
+            gcode.append(f"({label})")
+            gcode.extend(self._generate_chamfer_ring_gcode(points, cut_z, bool(ring.get('clockwise'))))
+            gcode.append("")
+
+        return gcode
+
     def _offset_coordinate(self, line: str, axis: str, offset: float) -> str:
         """
         Offset a coordinate in a G-code line by adding an offset.
@@ -5512,8 +5855,8 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
         px = pj.get('place_x', 0.0)
         py = pj.get('place_y', 0.0)
         rot = pj.get('rotation', 0)
-        # Sanitize the name for a comment (no nested parens, ASCII only).
-        safe_name = str(name).replace('(', '[').replace(')', ']')
+        # Sanitize the name for a comment (no nested parens or brackets, ASCII only).
+        safe_name = sanitize_comment(name, f'part {i}')
         return f"(--- PART {i}: {safe_name} @ X{px:.4f} Y{py:.4f} ROT {rot:g} deg ---)"
 
     def _emit_phase(section_title, phase_key):
@@ -5586,10 +5929,150 @@ def add_timestamp_to_filename(filename: str) -> str:
     return f"{base_name}_{timestamp}{extension}"
 
 
+def load_cli_config(config_path: str):
+    """Load a PenguinCAM-config.yaml for a CLI run, or return None for built-in defaults.
+
+    Shared by every mode, and deliberately strict in the same way local mode is: a path
+    that does not exist, cannot be read, or is not usable is REPORTED and stops the run.
+    Falling back to Team 6238's defaults on a typo would have the machine cutting on
+    someone else's feeds without saying so.
+    """
+    if not config_path:
+        return None
+    if not os.path.isfile(config_path):
+        print(f"ERROR: config file not found: {config_path}")
+        raise SystemExit(1)
+    try:
+        with open(config_path, 'r', encoding='utf-8') as fh:
+            data = yaml.safe_load(fh.read())
+    except OSError as exc:
+        print(f"ERROR: cannot read {config_path}: {exc}")
+        raise SystemExit(1)
+    except UnicodeDecodeError:
+        print(f"ERROR: {config_path} is not UTF-8 text. Re-save it as UTF-8.")
+        raise SystemExit(1)
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {config_path} is not valid YAML: {exc}")
+        raise SystemExit(1)
+    if not isinstance(data, dict):
+        print(f"ERROR: {config_path} does not contain a PenguinCAM config.")
+        raise SystemExit(1)
+    config = TeamConfig.from_dict(data)
+    print(f"Using config {config_path}: {config.team_name} (#{config.team_number})")
+    return config
+
+
+def run_ops_file(ops_path: str, output_gcode: str, config_path: str = None,
+                 user: str = None) -> int:
+    """Run a multi-tool job described by a JSON file. Returns a process exit code.
+
+    The job file is the same shape the web UI posts to /process-multitool, with each
+    part naming a `dxf` path (relative to the job file) instead of an upload index::
+
+        {
+          "name": "gearbox",
+          "material": "aluminum",
+          "thickness": 0.25,
+          "tools": [
+            {"slot": 1, "name": "1/8 in 1-flute", "diameter": 0.125, "flutes": 1},
+            {"slot": 2, "name": "1/4 in 1-flute", "diameter": 0.25,  "flutes": 1},
+            {"slot": 3, "name": "1/2 in 90 deg V", "diameter": 0.5, "flutes": 2,
+             "type": "vbit", "included_angle": 90}
+          ],
+          "parts": [
+            {"dxf": "plate.dxf", "name": "plate", "place_x": 0, "place_y": 0,
+             "operations": [
+               {"op_type": "holes",     "tool_slot": 1, "scope": {"max_diameter": 0.3}},
+               {"op_type": "holes",     "tool_slot": 2, "scope": {"min_diameter": 0.3}},
+               {"op_type": "pockets",   "tool_slot": 2, "depth": 0.125},
+               {"op_type": "perimeter", "tool_slot": 2},
+               {"op_type": "chamfer",   "tool_slot": 3,
+                "scope": {"targets": ["perimeter"], "width": 0.02}}
+             ]}
+          ]
+        }
+
+    This is the scriptable half of local mode: no browser, no Onshape, no network.
+    """
+    import json
+    import tooling
+
+    try:
+        with open(ops_path, 'r', encoding='utf-8') as fh:
+            spec = json.load(fh)
+    except OSError as exc:
+        print(f"ERROR: cannot read job file {ops_path}: {exc}")
+        return 1
+    except ValueError as exc:
+        print(f"ERROR: {ops_path} is not valid JSON: {exc}")
+        return 1
+
+    # Part DXF paths are resolved relative to the job file, so a job folder can be
+    # copied or shared whole without every path breaking.
+    base_dir = os.path.dirname(os.path.abspath(ops_path))
+    dxf_paths = {}
+    for i, part in enumerate(spec.get('parts') or []):
+        raw = part.get('dxf') or part.get('file')
+        if not raw:
+            print(f"ERROR: part {i + 1} in {ops_path} has no \"dxf\" path")
+            return 1
+        path = raw if os.path.isabs(raw) else os.path.join(base_dir, raw)
+        if not os.path.isfile(path):
+            print(f"ERROR: part {i + 1} references {path}, which does not exist")
+            return 1
+        part['file_index'] = i
+        dxf_paths[i] = path
+
+    config = load_cli_config(config_path)
+
+    try:
+        job = tooling.job_from_dict(spec, dxf_paths, config=config, user_name=user)
+        result = tooling.generate_multitool_job(
+            job, suggested_filename=os.path.splitext(os.path.basename(output_gcode))[0])
+    except tooling.ToolingError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    if not result.success:
+        print("ERROR: Failed to generate G-code")
+        for error in result.errors:
+            print(f"  - {error}")
+        return 1
+
+    output_path = os.path.join(os.path.dirname(output_gcode) or '.', result.filename)
+    with open(output_path, 'w') as fh:
+        fh.write(result.gcode)
+
+    print(f"OUTPUT_FILE:{output_path}")
+    print(f"\nDone! G-code written to: {output_path}")
+    print(f"\nTOOLS ({result.stats['num_tools']}, "
+          f"{result.stats['tool_changes']} manual change(s)):")
+    for line in result.stats['tools']:
+        print(f"  {line}")
+    print(f"\n{result.stats['num_operations']} operation(s) across "
+          f"{result.stats['num_parts']} part(s), {result.stats['total_lines']} lines")
+    print(f"Estimated cycle time: {result.stats['cycle_time_display']}"
+          + (" (excludes time spent changing tools)"
+             if result.stats.get('excludes_tool_change_time') else ""))
+    for warning in result.warnings or []:
+        print(f"  WARNING: {warning}")
+    print("\nReview the G-code file before running on your machine.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='PenguinCAM - Team 6238 Post-Processor')
-    parser.add_argument('input_dxf', nargs='?', help='Input DXF file from Onshape (not needed for tube-facing mode)')
+    parser.add_argument('input_dxf', nargs='?', help='Input DXF file from Onshape (not needed for tube-facing or --ops-file mode)')
     parser.add_argument('output_gcode', help='Output G-code file')
+    parser.add_argument('--ops-file', type=str, default=None,
+                       help='JSON file describing a multi-tool job: the tools loaded and, '
+                            'for each part, the ordered operations and which tool cuts each. '
+                            'Replaces --tool-diameter and the single-tool modes; see '
+                            'run_ops_file for the format.')
+    parser.add_argument('--config', type=str, default=None,
+                       help='Path to a PenguinCAM-config.yaml with your team/machine '
+                            'settings, used instead of the built-in defaults. Applies to '
+                            'every mode. Local runs have no Onshape to fetch it from.')
     parser.add_argument('--mode', type=str, default='standard',
                        choices=['standard', 'tube-facing', 'tube-pattern'],
                        help='Operation mode: standard (DXF processing), tube-facing (square tube ends), or tube-pattern (DXF pattern on tube faces)')
@@ -5637,13 +6120,20 @@ def main():
     
     args = parser.parse_args()
 
+    # A multi-tool job describes its own tools and operations, so it bypasses the
+    # single-tool mode branching below entirely.
+    if args.ops_file:
+        sys.exit(run_ops_file(args.ops_file, args.output_gcode,
+                              config_path=args.config, user=args.user))
+
     # Mode branching
     if args.mode == 'tube-facing':
         # Tube facing mode - generate G-code for squaring tube ends
         if not args.output_gcode:
             parser.error("output_gcode is required for tube-facing mode")
 
-        pp = FRCPostProcessor(args.thickness, args.tool_diameter)
+        pp = FRCPostProcessor(args.thickness, args.tool_diameter,
+                              config=load_cli_config(args.config))
         pp.apply_material_preset('aluminum')  # Tube facing is always aluminum
 
         # Call API to generate G-code
@@ -5684,7 +6174,8 @@ def main():
         # Create post-processor with tube WALL thickness (not height!)
         pp = FRCPostProcessor(material_thickness=args.thickness,
                               tool_diameter=args.tool_diameter,
-                              units=args.units)
+                              units=args.units,
+                              config=load_cli_config(args.config))
 
         # Store tube height for Z-offset calculations
         pp.tube_height = args.tube_height
@@ -5755,7 +6246,8 @@ def main():
         # Create post-processor
         pp = FRCPostProcessor(material_thickness=args.thickness,
                               tool_diameter=args.tool_diameter,
-                              units=args.units)
+                              units=args.units,
+                              config=load_cli_config(args.config))
 
         # Apply material preset and user parameters (shared logic)
         pp.apply_material_preset(args.material)

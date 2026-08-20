@@ -5,6 +5,12 @@ Flask==3.0.0
 flask-limiter>=4.0.0
 PyYAML>=6.0
 requests==2.31.0
+
+# Imported directly, not just pulled in by Flask/requests. Both arrive transitively
+# today, so nothing is broken - but a direct import that relies on another package's
+# pin breaks silently the day that pin changes.
+Werkzeug>=3.0.0      # frc_cam_gui_app: middleware.proxy_fix.ProxyFix
+urllib3>=1.26.0      # onshape_integration: util.retry.Retry
 gunicorn==21.2.0
 google-auth==2.23.0
 google-auth-oauthlib==1.1.0

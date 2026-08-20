@@ -1,0 +1,268 @@
+"""Independent audit of generated G-code.
+
+    uv run python gcode_audit.py
+
+Deliberately NOT built from the same assumptions as the unit tests. It *simulates* the
+program - walking every move, tracking modal position - and checks physical claims:
+
+* does the header's ZMIN match how deep the program actually goes?
+* does any rapid traverse through material?
+* does a drilling operation ever feed sideways? (a twist drill cannot)
+* are there canned cycles? (GRBL 1.1 does not implement G81-G89)
+* do the comments obey the ASCII / no-nested-parens / no-brackets rules?
+
+This exists because the unit tests encode the same assumptions the code does, so they
+stayed green through a bug that made a drilling operation emit end-mill toolpaths. An
+audit built from different premises catches what a test written by the same hand does
+not. It found the drill-depth ZMIN under-report that the whole suite missed.
+
+Run it after any change to toolpath generation. Zero problems is the expected result;
+a finding is a real defect, not a style note.
+"""
+import io
+import math
+import re
+import sys
+import tempfile
+from contextlib import redirect_stdout
+
+import ezdxf
+
+import tooling
+from tooling import MultiToolJob, Operation, PartOps, Tool
+from team_config import TeamConfig
+
+problems = []
+checked = 0
+
+
+def fail(job_name, msg):
+    problems.append(f'{job_name}: {msg}')
+
+
+def plate(holes=(), pockets=(), size=(6, 4)):
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
+    w, h = size
+    msp.add_lwpolyline([(0, 0), (w, 0), (w, h), (0, h)], close=True)
+    for (x, y, d) in holes:
+        msp.add_circle((x, y), d / 2.0)
+    for (x0, y0, x1, y1) in pockets:
+        msp.add_lwpolyline([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], close=True)
+    p = tempfile.mktemp(suffix='.dxf')
+    doc.saveas(p)
+    return p
+
+
+def run(job):
+    with redirect_stdout(io.StringIO()):
+        return tooling.generate_multitool_job(job, timestamp='2026-08-20 18:00:00')
+
+
+NUM = re.compile(r'([XYZQRF])(-?\d*\.?\d+)')
+
+
+def simulate(gcode):
+    """Walk the program tracking modal position. Returns findings."""
+    x = y = z = 0.0
+    findings = {'lateral_feed_below_top': [], 'rapid_below_top': [], 'min_z': 1e9,
+                'drill_lateral': [], 'g83_without_g80': 0, 'spindle_on': False,
+                'unsafe_after_m0': []}
+    material_top = None
+    in_drill = False
+    pending_g80 = 0
+    just_resumed = False
+
+    for raw in gcode.splitlines():
+        line = raw.split(';')[0]
+        code = re.sub(r'\(.*?\)', '', line).strip()
+        if 'Material top:' in raw:
+            m = re.search(r'Z=(-?[\d.]+)', raw)
+            if m:
+                material_top = float(m.group(1))
+        if raw.startswith('(===== '):
+            in_drill = 'DRILLING' in raw
+        if not code:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        head = code.split()[0]
+
+        if head == 'M0':
+            just_resumed = True
+            continue
+        if head.startswith(('G0', 'G1', 'G2', 'G3', 'G83')):
+            nx, ny = words.get('X', x), words.get('Y', y)
+            nz = words.get('Z', z)
+            moved_xy = abs(nx - x) > 1e-9 or abs(ny - y) > 1e-9
+            findings['min_z'] = min(findings['min_z'], nz, z)
+
+            if head == 'G83':
+                pending_g80 += 1
+            elif in_drill and head in ('G1', 'G2', 'G3') and moved_xy:
+                findings['drill_lateral'].append(code)
+
+            if material_top is not None:
+                if head == 'G0' and moved_xy and (z < material_top - 1e-6
+                                                  and nz < material_top - 1e-6):
+                    findings['rapid_below_top'].append(code)
+                if just_resumed and head == 'G0' and moved_xy and nz < material_top:
+                    findings['unsafe_after_m0'].append(code)
+            if moved_xy or abs(nz - z) > 1e-9:
+                just_resumed = False
+            x, y, z = nx, ny, nz
+        elif head == 'G80':
+            pending_g80 = max(0, pending_g80 - 1)
+    findings['g83_without_g80'] = pending_g80
+    return findings
+
+
+def audit(name, job, expect_drill=False):
+    global checked
+    checked += 1
+    result = run(job)
+    if not result.success:
+        fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
+        return
+    g = result.gcode
+    lines = g.splitlines()
+
+    # --- comment rules (CLAUDE.md) -------------------------------------------------
+    for n, l in enumerate(lines, 1):
+        try:
+            l.encode('ascii')
+        except UnicodeEncodeError:
+            fail(name, f'line {n} non-ASCII: {l[:60]}')
+        d = m = 0
+        for c in l.split(';')[0]:
+            if c == '(':
+                d += 1
+                m = max(m, d)
+            elif c == ')':
+                d -= 1
+        if m > 1:
+            fail(name, f'line {n} nested comment: {l[:60]}')
+        inp = False
+        for c in l:
+            if c == '(':
+                inp = True
+            elif c == ')':
+                inp = False
+            elif inp and c in '[]':
+                fail(name, f'line {n} bracket in comment: {l[:60]}')
+                break
+
+    # --- no ATC codes ---------------------------------------------------------------
+    for n, l in enumerate(lines, 1):
+        code = re.sub(r'\(.*?\)', '', l).split(';')[0].strip()
+        for tok in code.split():
+            if tok in ('M6', 'M06') or tok.startswith('G43') or re.fullmatch(r'T\d+', tok):
+                fail(name, f'line {n} emits an ATC word: {tok}')
+            # GRBL 1.1 does not implement canned cycles; ASSUMPTIONS.md targets GRBL.
+            if re.fullmatch(r'G8[1-9]', tok):
+                fail(name, f'line {n} emits canned cycle {tok}, unsupported on GRBL')
+
+    # --- header claims vs reality ---------------------------------------------------
+    sim = simulate(g)
+    zmin = [l for l in lines if l.startswith('(ZMIN:')]
+    if zmin:
+        declared = float(zmin[0].split(':')[1].strip().strip('")'))
+        if declared > sim['min_z'] + 1e-6:
+            fail(name, f'header ZMIN {declared:.4f} but program reaches {sim["min_z"]:.4f}')
+    if sim['g83_without_g80']:
+        fail(name, f'{sim["g83_without_g80"]} canned cycle(s) never cancelled by G80')
+    if sim['rapid_below_top']:
+        fail(name, f'{len(sim["rapid_below_top"])} rapid(s) traverse below material top: '
+                   f'{sim["rapid_below_top"][0][:50]}')
+    if sim['unsafe_after_m0']:
+        fail(name, f'traverse below material top immediately after M0: '
+                   f'{sim["unsafe_after_m0"][0][:50]}')
+
+    # --- drilling specifics ---------------------------------------------------------
+    if expect_drill:
+        if sim['drill_lateral']:
+            fail(name, f'DRILL MADE {len(sim["drill_lateral"])} LATERAL CUT(S): '
+                       f'{sim["drill_lateral"][0][:50]}')
+        if 'Peck 1 of' not in g:
+            fail(name, 'drill operation emitted no pecking moves')
+        if 'No straight plunges' in g:
+            fail(name, 'header claims "No straight plunges" on a drilling program')
+
+    # --- program structure ----------------------------------------------------------
+    if not g.rstrip().endswith('M30  ; Program end'):
+        fail(name, 'program does not end with M30')
+    if g.count('M0') != g.count('=== TOOL CHANGE') + g.count('PAUSE FOR FIXTURING'):
+        fail(name, f'M0 count {g.count("M0")} does not match pauses '
+                   f'({g.count("=== TOOL CHANGE")} changes + '
+                   f'{g.count("PAUSE FOR FIXTURING")} fixturing)')
+    for i, l in enumerate(lines):
+        if l.startswith('M0'):
+            after = '\n'.join(lines[i:i + 12])
+            if 'M3' not in after:
+                fail(name, 'spindle not restarted after a pause')
+            break
+
+
+def main():
+    HOLES = [(1, 1, 0.196), (5, 1, 0.196), (1, 3, 0.196), (5, 3, 0.196)]
+    BORE = [(3, 2, 0.75)]
+    POCKET = [(2.2, 2.4, 3.8, 3.2)]
+
+    mill = [Tool(1, '1/8 endmill', 0.125, 1), Tool(2, '1/4 endmill', 0.25, 2),
+            Tool(3, '1/2 V-bit', 0.5, 2, type='vbit', included_angle=90)]
+    drill_set = [Tool(1, '#10 drill', 0.1935, 2, type='drill'),
+                 Tool(2, '1/4 endmill', 0.25, 2),
+                 Tool(3, '1/2 V-bit', 0.5, 2, type='vbit', included_angle=90)]
+
+    for material in ('plywood', 'aluminum', 'polycarbonate'):
+        for thickness in (0.125, 0.25, 0.5):
+            dxf = plate(HOLES + BORE, POCKET)
+            audit(f'mill/{material}/{thickness}', MultiToolJob(
+                material=material, thickness=thickness, tools=mill, machine_id='omio_x8',
+                parts=[PartOps(dxf_path=dxf, name='p', operations=[
+                    Operation('holes', 1, scope={'max_diameter': 0.4}),
+                    Operation('holes', 2, scope={'min_diameter': 0.4}),
+                    Operation('pockets', 2), Operation('perimeter', 2),
+                    Operation('chamfer', 3, scope={'targets': ['perimeter'], 'width': 0.02})])]))
+
+            audit(f'drill/{material}/{thickness}', MultiToolJob(
+                material=material, thickness=thickness, tools=drill_set, machine_id='omio_x8',
+                parts=[PartOps(dxf_path=dxf, name='p', operations=[
+                    Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+                    Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+                    Operation('pockets', 2), Operation('perimeter', 2)])]),
+                  expect_drill=True)
+
+    # multi-part, with the fixturing pause on
+    pause_cfg = TeamConfig({'machining': {'fixturing': {'pause_before_perimeter': True}}})
+    dxf = plate(HOLES + BORE, POCKET)
+    audit('multipart+pause', MultiToolJob(
+        material='plywood', thickness=0.25, tools=drill_set, config=pause_cfg,
+        machine_id='omio_x8', parts=[
+            PartOps(dxf_path=dxf, name='a', place_x=0, operations=[
+                Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+                Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+                Operation('pockets', 2), Operation('perimeter', 2)]),
+            PartOps(dxf_path=dxf, name='b', place_x=7, operations=[
+                Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+                Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+                Operation('pockets', 2), Operation('perimeter', 2)])]),
+          expect_drill=True)
+
+    # park position configured -> G53 should appear and be the only machine motion
+    park_cfg = TeamConfig({'machine': {'park_position': {'x': 0.5, 'y': 19.0, 'z': -0.5}}})
+    audit('with-park', MultiToolJob(
+        material='plywood', thickness=0.25, tools=mill, config=park_cfg, machine_id='omio_x8',
+        parts=[PartOps(dxf_path=plate(HOLES + BORE, POCKET), name='p', operations=[
+            Operation('holes', 1, scope={'max_diameter': 0.4}),
+            Operation('holes', 2, scope={'min_diameter': 0.4}),
+            Operation('pockets', 2), Operation('perimeter', 2)])]))
+
+    print(f'audited {checked} generated programs')
+    print(f'{len(problems)} problem(s)')
+    for p in problems:
+        print('  *', p)
+    sys.exit(1 if problems else 0)
+
+
+if __name__ == '__main__':
+    main()

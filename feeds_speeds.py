@@ -29,6 +29,8 @@ Constants are seeded from published tooling references and validated against the
 existing PenguinCAM presets by ``validate_feeds_speeds.py`` (they land within ~10%).
 """
 
+import math
+
 # --- Reference tool the material chipload constants are quoted for --------------
 REFERENCE_TOOL = {'diameter': 0.157, 'flutes': 1}   # 4mm single-flute
 
@@ -43,32 +45,72 @@ RIGIDITY_FACTOR = {'light': 0.85, 'medium': 1.00, 'heavy': 1.10}
 FULL_SLOT_OPERATIONS = {'profile', 'slot'}
 
 
+# Fraction of a spindle's plate rating that is actually available at the cutter. Router
+# spindles are rated optimistically, lose output under load, and drive through a belt or
+# a collet that slips before the motor stalls. 70% is the usual working assumption.
+USABLE_POWER_FRACTION = 0.70
+KW_TO_HP = 1.341
+
 MACHINES = {
     'omio_x8': {
         'name': 'Omio X8-2200',
         'rpm_min': 6000, 'rpm_max': 24000,
         'xy_feed_max': 150.0, 'z_feed_max': 60.0,
         'rigidity': 'medium',
+        'spindle_kw': 2.2,
     },
     'avid_pro2424': {
         'name': 'Avid CNC Pro2424',
         'rpm_min': 6000, 'rpm_max': 24000,
         'xy_feed_max': 400.0, 'z_feed_max': 100.0,
         'rigidity': 'heavy',
+        'spindle_kw': 2.2,
     },
     'generic_light_router': {
         'name': 'Generic light router',
         'rpm_min': 8000, 'rpm_max': 30000,
         'xy_feed_max': 100.0, 'z_feed_max': 40.0,
         'rigidity': 'light',
+        'spindle_kw': 1.25,
     },
 }
+
+
+def usable_horsepower(machine):
+    """Horsepower actually available at the cutter, or None if the spindle is unrated."""
+    kw = _resolve(machine, MACHINES, 'machine').get('spindle_kw')
+    return kw * KW_TO_HP * USABLE_POWER_FRACTION if kw else None
+
+
+def max_depth_for_power(machine, material, diameter, feed, radial_engagement=None):
+    """Deepest axial cut this spindle can drive, in inches, or None if unlimited.
+
+    Cutting power is roughly ``MRR x unit_power``, and MRR is ``axial x radial x feed`` -
+    so for a given cutter and feed there is a depth beyond which the spindle simply bogs.
+    On a router that is not a graceful failure: the cutter grabs, the tool deflects, and
+    an end mill snaps. It is the binding limit in aluminium with a large cutter, and it
+    is invisible to a chipload model, which only ever looks at one tooth at a time.
+
+    `radial_engagement` defaults to the full diameter - a profile cut is a slot, with the
+    part on one side and the offcut on the other, and that is the worst case the same
+    depth setting has to survive.
+    """
+    unit_power = _resolve(material, MATERIALS, 'material').get('unit_power_hp')
+    available = usable_horsepower(machine)
+    if not unit_power or not available or feed <= 0:
+        return None
+    radial = radial_engagement or diameter
+    if radial <= 0:
+        return None
+    max_mrr = available / unit_power
+    return max_mrr / (radial * feed)
 
 
 # chipload_ref values are in/tooth for the REFERENCE_TOOL (4mm 1F). slotting_multiplier
 # derates them for full-width slotting; the product is what reproduces the presets.
 MATERIALS = {
     'plywood': {
+        'unit_power_hp': 0.05,
         'name': 'Plywood',
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0020, 'chipload_max': 0.0090,
@@ -78,6 +120,7 @@ MATERIALS = {
         'max_flutes_soft': 2,
     },
     'polycarbonate': {
+        'unit_power_hp': 0.08,
         'name': 'Polycarbonate',
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0025, 'chipload_max': 0.0090,
@@ -87,6 +130,7 @@ MATERIALS = {
         'max_flutes_soft': 1,
     },
     'hdpe': {
+        'unit_power_hp': 0.05,
         'name': 'HDPE',
         'preferred_rpm': 18000,
         'chipload_ref': 0.0060, 'chipload_min': 0.0030, 'chipload_max': 0.0110,
@@ -96,6 +140,7 @@ MATERIALS = {
         'max_flutes_soft': 1,
     },
     'srpp': {
+        'unit_power_hp': 0.06,
         'name': 'SRPP (polypropylene composite)',
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0025, 'chipload_max': 0.0090,
@@ -105,6 +150,7 @@ MATERIALS = {
         'max_flutes_soft': 1,
     },
     'aluminum_6061': {
+        'unit_power_hp': 0.3,
         'name': '6061 Aluminum',
         'preferred_rpm': 18000,
         'chipload_ref': 0.0032, 'chipload_min': 0.0015, 'chipload_max': 0.0050,
@@ -114,6 +160,87 @@ MATERIALS = {
         'max_flutes_soft': 3,
     },
 }
+
+
+# --- Twist drilling -------------------------------------------------------------
+# Drilling is quoted differently from milling, and the milling model above does not
+# transfer: there is no chipload per tooth to speak of, no radial engagement, and the
+# only motion is axial. The two numbers that matter are surface speed (which sets RPM
+# for a given diameter) and feed per revolution (which sets the plunge rate).
+#
+# `sfm` is a conservative HSS figure - carbide will take more, but a twist drill in a
+# team's tool crib is usually HSS and running one too fast is how it gets burned.
+# `ipr_ref` is feed per revolution at the reference diameter; it scales with the square
+# root of diameter, since a bigger drill takes a proportionally lighter cut per unit of
+# its own size.
+DRILL_REFERENCE_DIAMETER = 0.25
+
+DRILLING = {
+    'plywood':       {'sfm': 300, 'ipr_ref': 0.006},
+    'polycarbonate': {'sfm': 200, 'ipr_ref': 0.004},   # melts if it rubs
+    'hdpe':          {'sfm': 300, 'ipr_ref': 0.007},
+    'srpp':          {'sfm': 250, 'ipr_ref': 0.005},
+    'aluminum_6061': {'sfm': 250, 'ipr_ref': 0.004},
+}
+
+DRILL_IPR_EXPONENT = 0.5
+
+
+def calculate_drill_feeds(machine, material, tool):
+    """RPM and plunge feed for a twist drill.
+
+    Returns the same shape as `calculate_feeds` for the fields a drilling operation
+    needs (``rpm``, ``plunge_feed``, ``warnings``), plus the derived figures so the
+    numbers can be explained rather than just asserted.
+
+    The warning that matters on a router: the ideal drilling RPM for anything but a very
+    small drill is below what a 2.2 kW router spindle will turn. Clamping up to the
+    spindle minimum is the only option, and the operator should know the drill is being
+    run fast so they can slow the feed or accept a shorter tool life.
+    """
+    m = _resolve(machine, MACHINES, 'machine')
+    mat_key = material if isinstance(material, str) else None
+    drill = DRILLING.get(mat_key) or DRILLING['plywood']
+
+    diameter = float(tool['diameter'])
+    if diameter <= 0:
+        raise ValueError("drill diameter must be positive")
+
+    warnings = []
+
+    ideal_rpm = (drill['sfm'] * 12.0) / (math.pi * diameter)
+    rpm = _clamp(ideal_rpm, m['rpm_min'], m['rpm_max'])
+    if rpm > ideal_rpm * 1.05:
+        warnings.append(
+            f"Drilling {diameter:.3f} in wants about {ideal_rpm:.0f} RPM "
+            f"({drill['sfm']} SFM), but the spindle floor is {m['rpm_min']:.0f} RPM. "
+            f"The drill will run hot - peck often, and expect reduced tool life.")
+    elif rpm < ideal_rpm * 0.95:
+        warnings.append(
+            f"Drilling {diameter:.3f} in wants about {ideal_rpm:.0f} RPM, above the "
+            f"spindle's {m['rpm_max']:.0f} RPM ceiling; feed reduced to match.")
+
+    ipr = drill['ipr_ref'] * (diameter / DRILL_REFERENCE_DIAMETER) ** DRILL_IPR_EXPONENT
+    plunge_raw = rpm * ipr
+    plunge = min(plunge_raw, m['z_feed_max'])
+    if plunge_raw > m['z_feed_max']:
+        warnings.append(
+            f"Drill plunge clamped by the machine's Z limit: wanted {plunge_raw:.1f} IPM, "
+            f"max is {m['z_feed_max']:.0f} IPM.")
+
+    return {
+        'rpm': round(rpm),
+        'plunge_feed': round(plunge, 1),
+        'ideal_rpm': round(ideal_rpm),
+        'ipr': round(ipr, 5),
+        'sfm': drill['sfm'],
+        'warnings': warnings,
+        'formulas': [
+            "rpm   = clamp(SFM * 12 / (pi * D), machine rpm range)",
+            f"ipr   = ipr_ref * (D / {DRILL_REFERENCE_DIAMETER})^{DRILL_IPR_EXPONENT}",
+            "plunge = min(rpm * ipr, machine z_feed_max)",
+        ],
+    }
 
 
 TOOL_PRESETS = {

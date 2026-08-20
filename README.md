@@ -11,6 +11,8 @@ A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout �
 - **Multi-part job layout:** arrange several parts on one sheet → one G-code program. The parts' combined bounding box *is* the stock (machine size is a constraint; G54 origin = bbox lower-left). Drag to move, drag-handle rotate (45° snap), multi-select group move/rotate, flip (mirror), zoom.
 - **2.5D fixes:** correct handling of islands / enclosed features (N-boundary polygon nesting) and stock thickness derived from the CAD layers.
 - **Onshape embedding:** popup OAuth with `SameSite=None; Secure` cookies, continuous face-selection, light/dark theme tied to Onshape's `?theme=`.
+- **Multi-tool operations:** an ordered operation list per part, each operation with its own tool and its own scope (small holes on the 1/8", pockets and profile on the 1/4", edge break on a V-bit). The job groups the work by tool and pauses for a manual tool change at each switch. See [docs/MULTI_TOOL_GUIDE.md](docs/MULTI_TOOL_GUIDE.md).
+- **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
 - **Save:** split "Download Program / Send to Google Drive" button (Drive gated by config, remembers last choice).
 - The wizard is the whole app: `/` (and `/app`) serve it full-screen in DXF-upload mode; the Onshape panel serves the same wizard with face-selection as the source.
 
@@ -133,6 +135,24 @@ Designed to feel like 3D printer slicers or laser cutter software. Get the desig
 4. **Orient & generate** - Same as above
 5. **Download or save to Drive**
 
+### Method 3: Local install (no Onshape, no internet)
+
+**For a laptop next to the machine:**
+1. **Install once:** `make install`
+2. **Run:** `make local` — a browser opens on `localhost`, no sign-in
+3. **Drop in a DXF**, orient, generate, download
+
+Same wizard, same G-code. See [Local Mode](docs/LOCAL_MODE.md).
+
+### Using more than one tool
+
+Tick **Use several tools** on the Setup step to plan an operation list per part — drill
+the small holes with a small cutter, clear pockets and profile with a big one, break the
+edges with a V-bit. The program stops and tells you what to swap at each change.
+
+**At every tool change: swap the tool, re-zero Z to the sacrifice board, and leave X and Y
+alone.** See [Multi-Tool Operations](docs/MULTI_TOOL_GUIDE.md).
+
 ### Running on the CNC
 
 - Load G-code into your CNC controller
@@ -172,6 +192,8 @@ For teams self-hosting PenguinCAM, it's can be deployed on Railway (server-based
 
 **Technical references:**
 - [Z-Coordinate System](docs/Z_COORDINATE_SYSTEM.md) - Sacrifice board zeroing explained
+- [Multi-Tool Operations](docs/MULTI_TOOL_GUIDE.md) - Several tools per part, tool changes, chamfering
+- [Local Mode](docs/LOCAL_MODE.md) - Running without Onshape or a network
 
 **Planning:**
 - [Roadmap](ROADMAP.md) - Future features and improvements
@@ -315,9 +337,15 @@ penguincam/
 │   ├── INTEGRATIONS_GUIDE.md          # Onshape & Drive
 │   ├── quick-reference-card.md        # Quick start
 │   ├── TOOL_COMPENSATION_GUIDE.md     # Technical reference
+│   ├── MULTI_TOOL_GUIDE.md            # Several tools per part
+│   ├── LOCAL_MODE.md                  # Running without Onshape
 │   └── Z_COORDINATE_SYSTEM.md         # Zeroing guide
 │
+├── examples/                          # Sample inputs
+│   └── multitool_job.json             # CLI multi-tool job file
+│
 ├── static/                            # Static assets
+│   ├── multitool.js                   # Tools & Operations editor
 │   └── popcornlogo.png                # Team logo
 │
 ├── templates/                         # HTML templates
@@ -325,6 +353,9 @@ penguincam/
 │
 ├── frc_cam_gui_app.py                # Flask web server
 ├── frc_cam_postprocessor.py          # G-code generator
+├── tooling.py                         # Multi-tool operations model
+├── penguincam_local.py               # Local (no-Onshape) launcher
+├── local_mode.py                     # Local-mode flag & config loading
 ├── team_config.py                     # Team configuration management
 ├── onshape_integration.py            # Onshape API
 ├── google_drive_integration.py       # Drive uploads
@@ -368,8 +399,13 @@ We use [uv](https://docs.astral.sh/uv/) for fast Python dependency management. T
    export AUTH_ENABLED=false  # Skip auth for local testing
    ```
 
+   Skip this entirely if you only want the local (no-Onshape) app: `make local` needs
+   none of it.
+
 5. **Run locally:**
    ```bash
+   make local                         # no Onshape, no cloud, opens a browser
+   # or, with the cloud integrations wired up as above:
    uv run python frc_cam_gui_app.py
    ```
 

@@ -21,15 +21,27 @@
                     {% else %}
                     {{ session.get('team_config').get('team_number') }} ({{ session.get('team_config').get('team_name', 'Unknown') }})
                     {% endif %}
-                    <a href="/config/refresh" class="config-refresh" title="Reload team configuration from Onshape" aria-label="Reload team configuration">&#8635;</a>
+                    <a href="/config/refresh" class="config-refresh"
+                       title="{% if local_mode %}Re-read PenguinCAM-config.yaml from disk{% else %}Reload team configuration from Onshape{% endif %}"
+                       aria-label="Reload team configuration">&#8635;</a>
                 </p>
                 {% else %}
-                <p class="config-status config-status-default">Using default configuration</p>
+                {# The reload control belongs here too, not only in the success branch:
+                   "using defaults" is exactly the state you need to escape after dropping
+                   a config file in next to the app. #}
+                <p class="config-status config-status-default">Using default configuration
+                    {% if local_mode %}
+                    <a href="/config/refresh" class="config-refresh"
+                       title="Re-read PenguinCAM-config.yaml from disk"
+                       aria-label="Reload team configuration">&#8635;</a>
+                    {% endif %}
+                </p>
                 {% endif %}
             </div>
             <ol id="stepbar" aria-label="Steps">
                 <li data-step="setup" data-num="1" class="active" role="button" tabindex="0">Setup</li>
                 <li data-step="parts" data-num="2" role="button" tabindex="0">Parts</li>
+                <li data-step="tools" data-num="3" role="button" tabindex="0" hidden>Tools &amp; Ops</li>
                 <li data-step="layout" data-num="3" role="button" tabindex="0">Layout</li>
                 <li data-step="preview" data-num="4" role="button" tabindex="0">Preview</li>
             </ol>
@@ -61,7 +73,16 @@
                     <label class="radio"><input type="radio" name="mode" value="tubing"> Tubing — machine both faces of a tube</label>
                 </fieldset>
 
-                <label class="field">
+                <label class="field inline" id="multitool-toggle">
+                    <input type="checkbox" id="f-multitool">
+                    <span>Use several tools &mdash; plan an operation list per part</span>
+                </label>
+                <p class="hint" id="multitool-note" style="display:none">
+                    The Tools &amp; Ops step replaces the single tool below. The program
+                    pauses for a manual tool change, and you re-zero Z, at every switch.
+                </p>
+
+                <label class="field" id="tool-field">
                     <span>Tool diameter (in or mm)</span>
                     <input type="text" id="f-tool" inputmode="text" autocomplete="off" spellcheck="false"
                            placeholder='e.g. 0.157" or 4mm' value="{{ default_tool_diameter_text }}">
@@ -118,6 +139,43 @@
                 </div>
                 <p class="hint" id="parts-mode-note"></p>
                 <ul id="parts-list" aria-live="polite"></ul>
+            </section>
+
+            <!-- ===== TOOLS & OPERATIONS ===== -->
+            <!-- Only in the flow when "Use several tools" is checked (2D mode); see
+                 static/multitool.js, which owns everything inside this section. -->
+            <section class="step" data-step="tools" hidden>
+                <h2>Tools &amp; Operations</h2>
+                <p class="hint">
+                    List the tools you will load, then say what each one cuts. Operations run
+                    in the order shown; the program groups them by tool across parts without
+                    reordering any part&rsquo;s own list.
+                </p>
+
+                <h3 class="mt-heading">Tools</h3>
+                <table id="mt-tools">
+                    <thead>
+                        <tr>
+                            <th scope="col">Slot</th><th scope="col">Name</th>
+                            <th scope="col">Diameter</th><th scope="col">Flutes</th>
+                            <th scope="col">Type</th><th scope="col">V angle</th>
+                            <th scope="col"><span class="sr-only">Remove</span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="mt-tools-body"></tbody>
+                </table>
+                <div class="mt-add">
+                    <select id="mt-tool-preset" aria-label="Tool to add"></select>
+                    <button type="button" class="btn small" id="mt-add-tool">Add tool</button>
+                </div>
+
+                <h3 class="mt-heading">Operations</h3>
+                <!-- The order the program will actually run in, and what it costs in
+                     tool changes - visible before generating rather than discovered in
+                     the G-code header afterwards. Filled by static/multitool.js. -->
+                <div id="mt-runorder"></div>
+                <div id="mt-parts"></div>
+                <div id="mt-errors" class="errors" aria-live="polite"></div>
             </section>
 
             <!-- ===== LAYOUT ===== -->
@@ -219,6 +277,8 @@
         defaultTool: {{ default_tool_diameter|tojson }},
         defaultToolText: {{ (default_tool_diameter_text if default_tool_diameter_text is defined else '4mm')|tojson }},
         driveEnabled: {{ (drive_enabled if drive_enabled is defined else False)|tojson }},
+        localMode: {{ (local_mode if local_mode is defined else False)|tojson }},
+        toolLibrary: {{ (tool_library if tool_library is defined else {})|tojson }},
       };
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -227,6 +287,7 @@
     {% if source == 'onshape' %}
     <script src="{{ url_for('static', filename='source_onshape.js') }}"></script>
     {% endif %}
+    <script src="{{ url_for('static', filename='multitool.js') }}"></script>
     <script src="{{ url_for('static', filename='wizard.js') }}"></script>
 </body>
 </html>

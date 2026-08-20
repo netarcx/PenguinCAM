@@ -379,3 +379,158 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   z-index: 9999;
 }
 #debug-overlay pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
+
+/* ---- Tools & Operations step (multi-tool jobs) -----------------------------
+   The tool table and the per-part operation lists. Rows are dense on purpose:
+   a plan is easiest to check when the whole thing fits on one screen, which in
+   full-page grid mode means one column of a five-quadrant layout. */
+.mt-heading { margin: 16px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.mt-heading:first-of-type { margin-top: 8px; }
+
+#mt-tools { width: 100%; border-collapse: collapse; font-size: 12px; }
+#mt-tools th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0 6px 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+#mt-tools td { padding: 3px 6px 3px 0; vertical-align: middle; }
+#mt-tools input, #mt-tools select { width: 100%; }
+#mt-tools .mt-slot { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mt-narrow { width: 74px !important; }
+.mt-dim { color: var(--muted); font-size: 12px; }
+
+.mt-add { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.mt-add select { flex: 1; min-width: 0; }
+
+.mt-remove {
+  background: none;
+  border: none;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.mt-part { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+.mt-part-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+.mt-part-actions { display: flex; gap: 6px; margin-top: 6px; }
+
+.mt-ops { list-style: none; margin: 0; padding: 0; }
+.mt-op {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 0;
+  border-top: 1px solid var(--line);
+}
+.mt-op:first-child { border-top: none; }
+.mt-op > select { flex: 0 1 auto; min-width: 0; }
+.mt-step {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 16px;
+  text-align: right;
+}
+.mt-scope { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1 1 180px; }
+.mt-check { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); }
+.mt-check input { margin: 0; }
+.mt-move { display: flex; gap: 2px; margin-left: auto; }
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Full-page grid mode with the extra step: three columns, with Tools & Ops given
+   the tall middle one because an operation list is the longest thing on screen. */
+#wizard.grid.has-tools #wiz-body { grid-template-columns: 1fr 1.3fr 1fr; }
+#wizard.grid.has-tools .step[data-step="setup"]   { grid-column: 1; grid-row: 1; }
+#wizard.grid.has-tools .step[data-step="parts"]   { grid-column: 1; grid-row: 2; }
+#wizard.grid.has-tools .step[data-step="tools"]   { grid-column: 2; grid-row: 1 / span 2; }
+#wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 3; grid-row: 1; }
+#wizard.grid.has-tools .step[data-step="preview"] { grid-column: 3; grid-row: 2; }
+@media (max-width: 1200px) {
+  #wizard.grid.has-tools #wiz-body {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr minmax(220px, auto);
+    overflow-y: auto;              /* the third row can exceed the viewport */
+  }
+  #wizard.grid.has-tools .step[data-step="tools"] { grid-column: 1 / span 2; grid-row: 3; }
+  #wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 2; grid-row: 1; }
+  #wizard.grid.has-tools .step[data-step="preview"] { grid-column: 2; grid-row: 2; }
+}
+@media (max-width: 900px) {
+  /* #wiz-body has to be restated here, not left to the plain `.grid` single-column rule
+     below 900px: that rule is `#wizard.grid #wiz-body` (2 ids + 1 class) and loses to the
+     two-column `#wizard.grid.has-tools #wiz-body` (2 ids + 2 classes) from the 1200px
+     block above, which still matches. The result was all five panels stacked in the left
+     half with the right half of the viewport permanently blank. */
+  #wizard.grid.has-tools #wiz-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: minmax(220px, auto);
+    overflow-y: auto;
+  }
+  #wizard.grid.has-tools .step[data-step] { grid-column: 1; grid-row: auto; }
+}
+
+/* What a part needs, and the button that supplies it. Sits ABOVE the operation list:
+   you cannot plan a part with tools you have not chosen yet. */
+.mt-drills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.mt-drills .btn { margin-left: auto; }
+.mt-have { color: var(--ok); }
+.mt-have::before { content: "¹3 "; }
+.mt-need { color: var(--accent); }
+.mt-need::before { content: "+ "; }
+.mt-warn { color: var(--danger); }
+
+/* The order the program actually runs in, and what it costs in tool changes. */
+.mt-runorder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.mt-runorder .mt-chip {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+.mt-runorder .mt-step-name { color: var(--ink); }
+.mt-runorder .mt-arrow { opacity: 0.5; }
+.mt-runorder .mt-changes { margin-left: auto; white-space: nowrap; }
+
+/* What an operation will cut, shown on its own row. */
+.mt-effect {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: 11px;
+  padding-left: 22px;
+}

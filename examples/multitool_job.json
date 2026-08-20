@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "Example multi-tool job for the offline CLI:",
+    "    uv run python frc_cam_postprocessor.py --ops-file examples/multitool_job.json out.nc",
+    "Part 'dxf' paths are resolved relative to THIS file. Every operation names the tool",
+    "slot that cuts it; the program groups the work by tool and pauses for a manual change",
+    "at each switch. See docs/MULTI_TOOL_GUIDE.md."
+  ],
+
+  "name": "gearbox_plate",
+  "material": "plywood",
+  "thickness": 0.25,
+
+  "tools": [
+    { "slot": 1, "name": "1/8 in 1-flute endmill", "diameter": 0.125, "flutes": 1 },
+    { "slot": 2, "name": "1/4 in 1-flute endmill", "diameter": 0.250, "flutes": 1 },
+    { "slot": 3, "name": "1/2 in 90 deg V-bit", "diameter": 0.500, "flutes": 2,
+      "type": "vbit", "included_angle": 90 }
+  ],
+
+  "parts": [
+    {
+      "dxf": "../sample_part.dxf",
+      "name": "plate",
+      "place_x": 0,
+      "place_y": 0,
+      "rotation": 0,
+      "operations": [
+        { "op_type": "holes", "tool_slot": 1, "name": "Small holes",
+          "scope": { "max_diameter": 0.3 } },
+        { "op_type": "holes", "tool_slot": 2, "name": "Large bores",
+          "scope": { "min_diameter": 0.3 } },
+        { "op_type": "pockets", "tool_slot": 2, "name": "Lightening pockets",
+          "depth": 0.125 },
+        { "op_type": "perimeter", "tool_slot": 2, "name": "Profile" },
+        { "op_type": "chamfer", "tool_slot": 3, "name": "Edge break",
+          "scope": { "targets": ["perimeter"], "width": 0.02 } }
+      ]
+    }
+  ]
+}

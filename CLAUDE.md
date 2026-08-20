@@ -19,14 +19,24 @@ make install
 # Run development server (opens http://localhost:6238)
 uv run python frc_cam_gui_app.py
 
-# Run G-code comparison tests
+# Run locally with no Onshape sign-in and no cloud services (see docs/LOCAL_MODE.md)
+make local
+
+# Run every check: unit tests, G-code comparison, the independent audit, and JS integrity
 make test
+
+# On Windows, prefix test runs with this or a FAILING test aborts the run with the real
+# message hidden (the post-processor prints emoji; unittest's reporting dies on cp1252):
+#   PYTHONIOENCODING=utf-8 make test
 
 # Run postprocessor directly (CLI)
 uv run python frc_cam_postprocessor.py INPUT.dxf OUTPUT.nc \
   --material plywood \
   --thickness 0.25 \
   --tool-diameter 0.157
+
+# Run a multi-tool job from a JSON file, fully offline (see docs/MULTI_TOOL_GUIDE.md)
+uv run python frc_cam_postprocessor.py --ops-file examples/multitool_job.json OUTPUT.nc
 
 # Test any Python module import
 uv run python -c "from frc_cam_gui_app import app; print('OK')"
@@ -61,6 +71,8 @@ uv pip install -r requirements.txt
 - ✅ Good: `(Outer comment, nested text, more text)`
 - CNC controllers will fail or produce unpredictable behavior with nested comments
 - There is a unit test (`test_no_nested_comments`) but it doesn't catch every case since some G-code is conditional
+- **Square brackets are also forbidden inside comments** (`test_no_square_brackets_in_comments`) - some controllers read them as expressions
+- For any text that came from a user, a tool name, or CAD (part names especially), run it through `sanitize_comment()` in `frc_cam_postprocessor.py` rather than hand-rolling a replacement - it handles all three rules at once
 
 ### Unicode Characters - FORBIDDEN
 - **All G-code must be pure ASCII** - no unicode characters
@@ -94,6 +106,14 @@ G-code Generator (frc_cam_postprocessor.py)
 **Key files:**
 - `frc_cam_gui_app.py` - Flask routes, Onshape OAuth, Drive integration
 - `frc_cam_postprocessor.py` - Core G-code generation (`FRCPostProcessor` class)
+- `tooling.py` - Multi-tool jobs: one post-processor per operation, stitched with manual tool changes
+- `drill_sizes.py` - Standard drill index, tap drills, and picking a drill for a hole
+- `gcode_audit.py` - Simulates generated programs and checks physical claims. Built on
+  DIFFERENT premises from the unit tests on purpose - it has caught bugs the whole suite
+  passed. Run it after any toolpath change.
+- `check_js.py` - Static integrity check for `static/*.js`. There is no Node here, so this
+  is the only thing standing between a JS syntax error and a wizard that will not start.
+- `local_mode.py` + `penguincam_local.py` - Local (no-Onshape) deployment and its launcher
 - `templates/wizard.html` - Multi-part wizard UI (the whole app; served at `/`, `/app`, and the Onshape panel), with `static/wizard.js` + `static/gcode_viewer.js` (Three.js 3D visualization)
 - `onshape_integration.py` - Onshape API client for one-click export
 - `penguincam_auth.py` - Google Workspace OAuth (optional)
@@ -105,6 +125,9 @@ Detailed documentation lives in the `docs/` directory. **Read these before modif
 
 | File | When to Read |
 |------|--------------|
+| `MULTI_TOOL_STATUS.md` | **Read first when resuming multi-tool work** - what is unverified and what is left |
+| `MULTI_TOOL_GUIDE.md` | Changing `tooling.py`, the multi-tool routes, `static/multitool.js`, drilling or the chamfer code |
+| `LOCAL_MODE.md` | Changing `local_mode.py`, `penguincam_local.py`, or any authentication gate |
 | `Z_COORDINATE_SYSTEM.md` | Modifying Z-axis calculations, safe heights, cut depths, or plunge moves |
 | `TOOL_COMPENSATION_GUIDE.md` | Changing offset logic for perimeters, pockets, or holes |
 | `ASSUMPTIONS.md` | Adding/changing G-code output; lists controller compatibility requirements |

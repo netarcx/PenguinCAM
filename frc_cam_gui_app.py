@@ -71,6 +71,18 @@ from frc_cam_postprocessor import (
 # Import team config management
 from team_config import TeamConfig, DEFAULT_TOOL_DIAMETER_IN
 
+# Multi-tool operations (several tools per part, with manual tool changes)
+import drill_sizes
+import tooling
+from tooling import ToolingError
+
+# Local (offline, no-Onshape) mode. Reading the flag once at import keeps every gate
+# consistent for the life of the process.
+import local_mode
+LOCAL_MODE = local_mode.is_local_mode()
+if LOCAL_MODE:
+    log("🐧 PenguinCAM running in LOCAL mode - Onshape sign-in is not required")
+
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
 # ============================================================================
@@ -357,6 +369,42 @@ def _load_team_config_into_session(client):
     return team_config
 
 
+def _ensure_local_team_config(force=False):
+    """In local mode, seed the session from a team config file on disk (the same
+    PenguinCAM-config.yaml teams keep in Onshape) instead of fetching it from Onshape.
+
+    Re-reads whenever the file on disk changes identity - edited, newly added, or removed
+    (see local_mode.config_fingerprint). Caching on "have we loaded anything yet?" was a
+    trap with three parts: the no-config branch stores {} which is not None, so it never
+    re-read; the reload glyph that would force it is hidden precisely in the
+    using-default-config state; and the launcher pins a fixed FLASK_SECRET_KEY, so the
+    stale cookie survived a server restart too. Net effect: drop a config in after first
+    launch and the machine keeps running on built-in defaults with no way to fix it from
+    the UI. One stat() per render is a cheap price for not doing that."""
+    if not LOCAL_MODE:
+        return
+    fingerprint = local_mode.config_fingerprint()
+    if (not force
+            and 'team_config_data' in session
+            and session.get('local_config_fingerprint') == fingerprint):
+        return
+    config, path = local_mode.load_local_team_config()
+    if config is None:
+        config = TeamConfig()
+        session['team_config_data'] = {}
+        session['using_default_config'] = True
+        session.pop('team_config_url', None)
+    else:
+        session['team_config_data'] = config._data
+        session['using_default_config'] = False
+        session['team_config_url'] = None
+    session['team_config'] = config.to_dict()
+    session['team_number'] = config.team_number
+    session['team_config_fetched_at'] = time.time()
+    session['local_config_path'] = path
+    session['local_config_fingerprint'] = fingerprint
+
+
 def _maybe_refresh_team_config():
     """Best-effort TTL refresh of the cached team config (see TEAM_CONFIG_TTL_SECONDS).
     Runs on every page render but only actually re-fetches once the cached copy goes stale.
@@ -380,6 +428,7 @@ def _maybe_refresh_team_config():
 def _app_template_context():
     """Build the shared template context (machines, materials, tool, bed size) used by
     both the legacy single-part page and the multi-part wizard."""
+    _ensure_local_team_config()   # local mode: config comes from a file, not from Onshape
     _maybe_refresh_team_config()  # opportunistic TTL refresh before we read the cached copy
     user_name = session.get('user_name')
     team_name = session.get('team_name')
@@ -391,7 +440,9 @@ def _app_template_context():
     current_machine_id = session.get('machine_id', team_config.default_machine_id)
 
     team_config_dict = team_config.to_dict(current_machine_id)
-    drive_enabled = team_config_dict.get('google_drive_enabled', False)
+    # Drive needs a Google sign-in that local mode does not have, so a downloaded config
+    # with google_drive_enabled: true would otherwise render a button that 500s on click.
+    drive_enabled = (not LOCAL_MODE) and team_config_dict.get('google_drive_enabled', False)
     # Use `or` (not .get default) so an explicit None in the config doesn't render as
     # the string "None" into a numeric <input value="...">.
     default_tool_diameter = team_config_dict.get('default_tool_diameter') or DEFAULT_TOOL_DIAMETER_IN
@@ -443,12 +494,19 @@ def _app_template_context():
         'materials': available_materials,
         'incomplete_materials': incomplete_materials,
         'detected_thickness': None,
+        'local_mode': LOCAL_MODE,
+        'tool_library': tooling.TOOL_LIBRARY,
     }
 
 
 def _require_onshape_auth():
     """Apply the Onshape OAuth gate. Returns a redirect response if unauthenticated,
-    else None. Shared by the app pages."""
+    else None. Shared by the app pages.
+
+    Local mode has no gate: there is no Onshape to sign in to, and the app is bound to
+    localhost by its launcher, so the user at the keyboard is the only user."""
+    if LOCAL_MODE:
+        return None
     if ONSHAPE_AVAILABLE:
         user_id = get_current_user_id()
         client = session_manager.get_client(user_id)
@@ -580,7 +638,9 @@ def refresh_config():
     """Force an immediate re-fetch of the team config from Onshape (the subtle reload glyph
     next to the config link). Same fetch-and-store as login and the TTL refresh; returns
     the user to wherever they were."""
-    if ONSHAPE_AVAILABLE:
+    if LOCAL_MODE:
+        _ensure_local_team_config(force=True)
+    elif ONSHAPE_AVAILABLE:
         client = session_manager.get_client(get_current_user_id())
         if client:
             try:
@@ -1113,6 +1173,296 @@ def process_job():
             'parts': response_parts,
         })
 
+    except ValueError as e:
+        return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
+    except Exception as e:
+        log(traceback.format_exc())
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+    finally:
+        if job_dir:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+
+# ============================================================================
+# Multi-tool operations
+# ----------------------------------------------------------------------------
+# The routes above cover the common flat-plate job, where one cutter does the whole
+# part. These cover the case where a part needs several: /part-features reports what
+# a DXF contains so each operation can be scoped to a subset of it, and
+# /process-multitool runs the whole ordered operation list into one program with a
+# manual tool-change pause at every switch. See tooling.py for the model.
+# ============================================================================
+
+@app.route('/api/drill-sizes')
+def drill_size_lookup():
+    """Standard drill sizes, and the drill for a given hole.
+
+    ?diameter=0.1935 returns the recommended drill for that hole; with no query it
+    returns the whole index (fractional, number and letter series).
+    """
+    raw = request.args.get('diameter')
+    if raw:
+        try:
+            diameter = float(raw)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'diameter must be a number'}), 400
+        match = drill_sizes.nearest_drill(diameter)
+        return jsonify({
+            'diameter': diameter,
+            'drill': match.to_dict() if match else None,
+            'advice': drill_sizes.describe_suggestion(diameter),
+        })
+    return jsonify({'drills': [d.to_dict() for d in drill_sizes.DRILL_INDEX]})
+
+
+@app.route('/api/tooling/presets')
+def tooling_presets():
+    """Tool library and operation vocabulary for the multi-tool UI."""
+    return jsonify({
+        'tools': tooling.TOOL_LIBRARY,
+        'op_types': list(tooling.OP_TYPES),
+        'op_labels': tooling.OP_LABELS,
+        'tool_types': list(tooling.TOOL_TYPES),
+    })
+
+
+def _multitool_job_from_request(spec, saved_paths):
+    """Build a MultiToolJob from a posted job spec plus the DXFs already saved to disk."""
+    # Checked here, not only in job_from_dict: the dict() copy below runs first, and on a
+    # posted JSON array it raises TypeError before job_from_dict's own guard is reached -
+    # turning "your job should be an object" into an HTTP 500.
+    if not isinstance(spec, dict):
+        raise ToolingError(f"The job specification must be an object, got "
+                           f"{type(spec).__name__}")
+    spec = dict(spec)
+    spec['material'] = normalize_material(spec.get('material', 'plywood'))
+    return tooling.job_from_dict(
+        spec, saved_paths,
+        config=TeamConfig.from_dict(session.get('team_config_data', {})),
+        user_name=session.get('user_name'),
+    )
+
+
+def _save_job_dxfs(job_dir):
+    """Save every uploaded file_N DXF into job_dir, keyed by N. Raises ValueError with a
+    user-facing message if something other than a DXF was uploaded."""
+    saved_paths = {}
+    for key in list(request.files.keys()):
+        if not key.startswith('file_'):
+            continue
+        f = request.files[key]
+        if not f.filename.lower().endswith('.dxf'):
+            raise ValueError(f'{f.filename} is not a DXF file')
+        try:
+            idx = int(key.split('_', 1)[1])
+        except (ValueError, IndexError):
+            continue
+        path = os.path.join(job_dir, f'part_{idx}.dxf')
+        f.save(path)
+        saved_paths[idx] = path
+    return saved_paths
+
+
+@app.route('/part-features', methods=['POST'])
+@limiter.limit("30 per minute")
+def part_features():
+    """Survey one DXF so the operations editor knows what there is to cut.
+
+    Body (multipart/form-data): file, plus form fields thickness, material, machine_id,
+    rotation, mirror, and a JSON `tools` array. The survey needs the tool list because a
+    hole only counts as machinable if some tool in the job can make it; the smallest one
+    is loaded, so nothing a later small-tool operation could drill is hidden here.
+
+    Response: {success, features:{holes, hole_sizes, pockets, has_perimeter, errors},
+               suggested_operations:[...]}.
+    """
+    job_dir = None
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        upload = request.files['file']
+        if not upload.filename.lower().endswith('.dxf'):
+            return jsonify({'error': 'File must be a DXF'}), 400
+
+        try:
+            tools_raw = json.loads(request.form.get('tools') or '[]')
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid tools JSON'}), 400
+        if not isinstance(tools_raw, list):
+            return jsonify({'error': 'tools must be a list of tool objects'}), 400
+        if not all(isinstance(t, dict) for t in tools_raw):
+            return jsonify({'error': 'each tool must be an object'}), 400
+        if not tools_raw:
+            tools_raw = [dict(tooling.TOOL_LIBRARY['4mm_1f'], slot=1)]
+        first_tool = tools_raw[0]
+
+        job_dir = tempfile.mkdtemp(prefix='feat_', dir=UPLOAD_FOLDER)
+        dxf_path = os.path.join(job_dir, 'part.dxf')
+        upload.save(dxf_path)
+
+        first_slot = first_tool.get('slot', 1) if isinstance(first_tool, dict) else 1
+        spec = {
+            'material': request.form.get('material', 'plywood'),
+            'thickness': float(request.form.get('thickness', 0.25)),
+            'machine_id': request.form.get('machine_id') or None,
+            'tools': tools_raw,
+            'parts': [{
+                'file_index': 0,
+                'name': request.form.get('name') or Path(upload.filename).stem,
+                'rotation': float(request.form.get('rotation', 0)),
+                'mirror': request.form.get('mirror') in ('1', 'true', 'True'),
+                # A survey needs no operations, but MultiToolJob insists every part has
+                # one - it validates jobs that will actually be cut. survey_part never
+                # reads the operation list, so a placeholder is enough.
+                'operations': [{'op_type': 'perimeter', 'tool_slot': first_slot}],
+            }],
+        }
+        job = _multitool_job_from_request(spec, {0: dxf_path})
+        features = tooling.survey_part(job, job.parts[0])
+        suggested = tooling.default_operations(features, job.tools)
+        try:
+            mill = float(request.form.get('mill_diameter') or 0) or None
+        except (TypeError, ValueError):
+            mill = None
+        plan = tooling.suggest_tooling(features, mill_diameter=mill,
+                                       include_chamfer=request.form.get('chamfer') == '1')
+
+        def _public(feature):
+            return {k: v for k, v in feature.items() if k != 'key'}
+
+        return jsonify({
+            'success': True,
+            'features': {
+                'holes': [_public(h) for h in features['holes']],
+                'hole_sizes': features['hole_sizes'],
+                'pockets': [_public(p) for p in features['pockets']],
+                'has_perimeter': features['has_perimeter'],
+                'errors': features['errors'],
+            },
+            'suggested_operations': [o.to_dict() for o in suggested],
+            # A COMPLETE starting plan - the tools to load as well as the operations to
+            # run. Without this the user is asked to plan a part with tools they have not
+            # chosen yet, and only told what the part needs afterwards.
+            'suggested_plan': {
+                'tools': [t.to_dict() for t in plan['tools']],
+                'operations': [o.to_dict() for o in plan['operations']],
+                'notes': plan['notes'],
+            },
+            # Which twist drills this part's holes actually call for. CAD nearly always
+            # draws holes at real drill sizes, so this is usually an exact answer, and it
+            # is the difference between loading a #10 and loading a 5/32 that cannot make
+            # the hole at all.
+            'drill_suggestions': drill_sizes.suggest_drills(
+                [h['diameter'] for h in features['holes']]),
+        })
+    except ToolingError as e:
+        return jsonify({'error': str(e)}), 400
+    except ValueError as e:
+        return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
+    except Exception as e:
+        log(traceback.format_exc())
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+    finally:
+        if job_dir:
+            shutil.rmtree(job_dir, ignore_errors=True)
+
+
+@app.route('/process-multitool', methods=['POST'])
+@limiter.limit("10 per minute")  # CPU intensive
+def process_multitool():
+    """Generate one program covering every part's ordered, multi-tool operation list.
+
+    Request (multipart/form-data):
+      - file_0, file_1, ... : one DXF per distinct part
+      - job : JSON {material, thickness, machine_id, tab_spacing, name,
+                    tools:[{slot, name, diameter, flutes, type, included_angle}],
+                    parts:[{file_index, name, place_x, place_y, rotation, mirror,
+                            operations:[{op_type, tool_slot, name, depth, scope}]}]}
+      - timestamp : client-local timestamp string
+
+    Response: {success, filename(token), gcode, cycle_time, tools, tool_changes, stock,
+               parts:[...]} or {success:false, part_errors:[{error}]}.
+    """
+    job_dir = None
+    try:
+        job_raw = request.form.get('job')
+        if not job_raw:
+            return jsonify({'error': 'Missing job specification'}), 400
+        try:
+            spec = json.loads(job_raw)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid job JSON'}), 400
+
+        job_dir = tempfile.mkdtemp(prefix='mtjob_', dir=UPLOAD_FOLDER)
+        saved_paths = _save_job_dxfs(job_dir)
+        job = _multitool_job_from_request(spec, saved_paths)
+
+        log(f"[MULTITOOL] {len(job.parts)} part(s), {len(job.used_tools)} tool(s), "
+            f"material {job.material}, thickness {job.thickness}")
+
+        # Layout is checked against the LARGEST tool in the job, not the one the profile
+        # happens to use: a wide V-tool riding the edge of one part reaches further into
+        # its neighbour than the profile cutter does.
+        kerf = max(t.diameter for t in job.used_tools)
+        placed = []
+        for part in job.parts:
+            pp = tooling.build_part_postprocessor(job, part, kerf)
+            placed.append({'name': part.name, 'bbox': pp.bounding_box(),
+                           'polygon': pp.placed_polygon()})
+        layout_errors = validate_job_layout(placed, job.config.machine_x_max,
+                                            job.config.machine_y_max, min_gap=kerf)
+        if layout_errors:
+            log(f"[MULTITOOL] layout invalid: {layout_errors}")
+            return jsonify({'success': False, 'part_errors': layout_errors}), 400
+
+        result = tooling.generate_multitool_job(
+            job,
+            timestamp=request.form.get('timestamp') or None,
+            suggested_filename=spec.get('name') or job.name,
+        )
+        if not result.success:
+            return jsonify({'success': False,
+                            'part_errors': [{'error': e} for e in result.errors]}), 400
+
+        output_path = os.path.join(OUTPUT_FOLDER, result.filename)
+        with open(output_path, 'w') as fh:
+            fh.write(result.gcode)
+        output_token = file_token_manager.register_file(output_path, result.filename)
+
+        boxes = [p['bbox'] for p in placed if p.get('bbox')]
+        stock_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) if boxes else 0.0
+        stock_h = (max(b[3] for b in boxes) - min(b[1] for b in boxes)) if boxes else 0.0
+
+        log(f"[MULTITOOL] {result.stats['num_operations']} operations, "
+            f"{result.stats['tool_changes']} tool changes, "
+            f"{result.stats['total_lines']} lines, {result.stats['cycle_time_display']}")
+
+        metrics.log_event('multitool_job_generated',
+                          team_number=session.get('team_number'),
+                          user_email=session.get('user_email'),
+                          metadata={'material': job.material,
+                                    'num_parts': len(job.parts),
+                                    'num_tools': result.stats['num_tools']})
+
+        return jsonify({
+            'success': True,
+            'filename': output_token,
+            'gcode': result.gcode,
+            'cycle_time': result.stats.get('cycle_time_display'),
+            'cycle_time_seconds': result.stats.get('cycle_time_seconds'),
+            'excludes_tool_change_time': result.stats.get('excludes_tool_change_time'),
+            'tools': result.stats.get('tools'),
+            'tool_changes': result.stats.get('tool_changes'),
+            'num_operations': result.stats.get('num_operations'),
+            'warnings': result.warnings,
+            'stock': {'width': round(stock_w, 4), 'height': round(stock_h, 4)},
+            'parts': [{'index': i, 'name': p.name, 'place_x': p.place_x,
+                       'place_y': p.place_y, 'rotation': p.rotation}
+                      for i, p in enumerate(job.parts)],
+        })
+
+    except ToolingError as e:
+        return jsonify({'success': False, 'part_errors': [{'error': str(e)}]}), 400
     except ValueError as e:
         return jsonify({'error': f'Invalid parameter value: {str(e)}'}), 400
     except Exception as e:

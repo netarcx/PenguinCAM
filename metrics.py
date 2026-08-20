@@ -11,13 +11,18 @@ Design philosophy:
 import os
 import sqlite3
 import json
+import tempfile
 import threading
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 
-# Database path from Railway volume mount (falls back to /tmp for local dev)
-DB_PATH = os.path.join(os.getenv('RAILWAY_VOLUME_MOUNT_PATH', '/tmp'), 'metrics.db')
+# Database path from the Railway volume mount, falling back to the platform temp
+# directory for local dev. Hard-coding /tmp meant every start on a Windows machine
+# printed an initialization failure and silently disabled metrics - harmless on the
+# deployed app, but local mode (docs/LOCAL_MODE.md) runs on exactly those machines.
+DB_PATH = os.path.join(os.getenv('RAILWAY_VOLUME_MOUNT_PATH') or tempfile.gettempdir(),
+                       'metrics.db')
 
 # Global flag to track if DB is available
 _db_available = True

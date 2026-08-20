@@ -704,11 +704,19 @@ class TestHoleClassification(unittest.TestCase):
 
     def test_tool_sized_hole_gcode_is_pure_drill_no_degenerate_arc(self):
         """The G-code for a tool-sized hole peck-drills straight down and emits no
-        zero-radius (I0 J0) arc, which many controllers reject."""
+        zero-radius (I0 J0) arc, which many controllers reject.
+
+        The pecking is written out as explicit G0/G1 moves rather than a G83 canned
+        cycle: G81-G89 are not implemented in GRBL 1.1, which ASSUMPTIONS.md lists as a
+        target controller, and the cycle-time estimator, 3D preview and heightmap
+        simulator all parse only G0-G3 - so a canned cycle was invisible to every one of
+        them at once. See FRCPostProcessor._emit_peck_cycle."""
         self.pp.apply_material_preset('aluminum')   # sets peck_drill_depth
         g = '\n'.join(self.pp._generate_hole_gcode(1.0, 1.0, self.pp.tool_diameter,
                                                    needs_peck_drill=True))
-        self.assertIn('G83', g)                     # peck drill happens
+        self.assertIn('Peck 1 of', g)               # peck drill happens
+        self.assertNotIn('G83', g)                  # ...but not as a canned cycle
+        self.assertNotIn('G80', g)
         self.assertNotIn('I0.0000 J0', g)           # no degenerate finishing arc
         self.assertIn('no lateral clearing', g)     # pure straight drill path taken
 
