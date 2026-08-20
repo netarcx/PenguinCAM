@@ -89,7 +89,20 @@ When generating G-code comments:
 
 ## Git Operations
 
-**DO NOT run any git commands** (git add, git commit, git push, etc.). The user prefers to handle all git operations themselves. Focus on making code changes and let the user manage version control.
+**NEVER open a pull request.** Not to upstream, not on this fork, not as a draft, and not
+because a `git push` printed the "Create a pull request" hint. Pushing a branch is the end
+of the job — report the branch URL and stop. Do not suggest opening one, do not offer it
+as a next step, and do not mention `gh pr create` as a convenience. Opening a PR puts the
+work in front of other people and starts a conversation whose timing is the maintainer's
+call, not the assistant's. If a PR is wanted, it will be asked for explicitly.
+
+Committing, pushing and forking are fine **when asked**. Anything else outward-facing —
+making a repo public, changing visibility, pushing to upstream rather than a fork — needs
+confirming first, because it is hard to undo.
+
+Always check for secrets before a push. `PenguinCAM-config-2129.yaml` is deliberately
+tracked (machine specs and feeds, nothing private); every other `PenguinCAM-config-*.yaml`
+stays gitignored so another team's config cannot be committed by accident.
 
 ## Architecture
 
