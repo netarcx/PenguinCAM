@@ -1895,6 +1895,53 @@ class TestLocalMode(unittest.TestCase):
             os.environ[self.local_mode.LOCAL_ENV_VAR] = value
             self.assertEqual(self.local_mode.is_local_mode(), expected, value)
 
+    def test_a_team_suffixed_config_is_discovered(self):
+        """Teams rename the file to say whose it is - PenguinCAM-config-2129.yaml. Before
+        the pattern match, renaming it silently disabled discovery and the machine ran on
+        built-in defaults with nothing on screen to say so."""
+        import glob
+        import os
+        import tempfile
+        original = os.getcwd()
+        workdir = tempfile.mkdtemp()
+        try:
+            os.chdir(workdir)
+            with open('PenguinCAM-config-2129.yaml', 'w', encoding='utf-8') as fh:
+                fh.write('team:\n  number: 2129\n  name: "Ultraviolet"\n')
+            found = self.local_mode.find_local_config_path()
+            self.assertTrue(found.endswith('PenguinCAM-config-2129.yaml'), found)
+            with self.assertLogs('penguincam', level='INFO'):
+                config, _ = self.local_mode.load_local_team_config()
+            self.assertEqual(config.team_number, 2129)
+            self.assertEqual(config.team_name, 'Ultraviolet')
+        finally:
+            os.chdir(original)
+            for leftover in glob.glob(os.path.join(workdir, '*')):
+                os.remove(leftover)
+            os.rmdir(workdir)
+
+    def test_the_plain_filename_still_wins_over_a_suffixed_one(self):
+        """Precedence has to be stable, or which team's feeds you get depends on
+        directory listing order."""
+        import glob
+        import os
+        import tempfile
+        original = os.getcwd()
+        workdir = tempfile.mkdtemp()
+        try:
+            os.chdir(workdir)
+            for name, number in (('PenguinCAM-config.yaml', 1111),
+                                 ('PenguinCAM-config-2129.yaml', 2129)):
+                with open(name, 'w', encoding='utf-8') as fh:
+                    fh.write(f'team:\n  number: {number}\n  name: "T"\n')
+            self.assertTrue(self.local_mode.find_local_config_path()
+                            .endswith('PenguinCAM-config.yaml'))
+        finally:
+            os.chdir(original)
+            for leftover in glob.glob(os.path.join(workdir, '*')):
+                os.remove(leftover)
+            os.rmdir(workdir)
+
     def test_missing_explicit_config_is_reported_not_silently_ignored(self):
         """Falling back to defaults on a typo'd path would run the machine on someone
         else's feeds without saying so."""

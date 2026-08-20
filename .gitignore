@@ -26,7 +26,14 @@ onshape_config.json
 *-creds.txt
 
 # Working team configs (keep the committed template, not local overrides)
+# Team configs are local machine settings, never committed. A PATTERN, not a literal
+# name: teams keep per-machine or per-team variants (PenguinCAM-config-2129.yaml),
+# and those were not covered before, so a renamed config could be committed by
+# accident along with whatever feeds and machine limits it holds.
 PenguinCAM-config.yaml
+PenguinCAM-config-*.yaml
+PenguinCAM-config.yml
+PenguinCAM-config-*.yml
 new-config.yaml
 
 # Generated G-code and DXF debug/test artifacts

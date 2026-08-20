@@ -17,6 +17,7 @@ the app should still be bound to localhost (which the launcher does), because li
 gate means anyone who can reach the port can use it.
 """
 
+import glob
 import os
 
 from logging_config import log
@@ -24,10 +25,14 @@ from logging_config import log
 #: Environment variable that turns local mode on.
 LOCAL_ENV_VAR = 'PENGUINCAM_LOCAL'
 
-#: Where to look for a team config when none is given explicitly, relative to the working
-#: directory. Same filename teams already keep in their Onshape classroom, so a team can
-#: download theirs and drop it next to the app.
-DEFAULT_CONFIG_FILENAMES = ('PenguinCAM-config.yaml', 'PenguinCAM-config.yml')
+#: Filename patterns searched when no config is given explicitly. The bare
+#: `PenguinCAM-config.yaml` is the name teams already keep in their Onshape classroom, and
+#: the suffixed forms let a shop keep several side by side and still have them found
+#: automatically - `PenguinCAM-config-2129.yaml`, `PenguinCAM-config-omio.yaml`. Without
+#: the wildcard, renaming the file to something recognisable silently disabled discovery
+#: and the machine quietly ran on built-in defaults.
+DEFAULT_CONFIG_PATTERNS = ('PenguinCAM-config.yaml', 'PenguinCAM-config.yml',
+                           'PenguinCAM-config-*.yaml', 'PenguinCAM-config-*.yml')
 
 CONFIG_ENV_VAR = 'PENGUINCAM_CONFIG'
 
@@ -56,10 +61,19 @@ def find_local_config_path() -> str:
     # the config but launching the same app from anywhere else silently did not, and the
     # only symptom was the machine quietly running on built-in defaults.
     for directory in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
-        for name in DEFAULT_CONFIG_FILENAMES:
-            candidate = os.path.join(directory, name)
-            if os.path.isfile(candidate):
-                return os.path.abspath(candidate)
+        for pattern in DEFAULT_CONFIG_PATTERNS:
+            # Sorted so a directory holding several configs picks the same one every
+            # time. Ambiguity is reported rather than resolved silently: running on a
+            # different team's feeds because two files were present would be worse than
+            # a line of output.
+            matches = sorted(glob.glob(os.path.join(directory, pattern)))
+            matches = [m for m in matches if os.path.isfile(m)]
+            if not matches:
+                continue
+            if len(matches) > 1:
+                log(f"[LOCAL] {len(matches)} configs match {pattern} in {directory}; "
+                    f"using {os.path.basename(matches[0])}. Pass --config to choose.")
+            return os.path.abspath(matches[0])
     return ''
 
 
