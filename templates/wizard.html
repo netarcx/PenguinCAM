@@ -127,6 +127,7 @@
                             <option value="none">From my DXF</option>
                             <option value="holes">Mounting holes - drilled, #10 clearance on 1/2" centres</option>
                             <option value="lightening">Lightening - triangular truss pockets</option>
+                            <option value="custom">Custom - place holes and pockets yourself</option>
                         </select>
                     </label>
                     <!-- Pre-designed pattern only: with no DXF there is nothing to measure
@@ -166,6 +167,33 @@
                     <p class="hint">Pick a planar face in the model — it imports automatically, then you can pick another.</p>
                 </div>
                 <p class="hint" id="parts-mode-note"></p>
+
+                <!-- The custom tube designer. It lives in the Parts quadrant because
+                     that quadrant is idle for a generated tube pattern - there is no
+                     part file to add. static/tube_designer.js owns everything inside
+                     it; the Layout canvas is where features are actually placed. -->
+                <div id="tube-designer" hidden>
+                    <div class="td-palette">
+                        <label class="field">
+                            <span>Place</span>
+                            <select id="td-kind" autocomplete="off"></select>
+                        </label>
+                        <label class="field" id="td-size-field">
+                            <span>Size</span>
+                            <select id="td-size" autocomplete="off"></select>
+                        </label>
+                        <label class="field" id="td-diameter-field" hidden>
+                            <span>Diameter (in)</span>
+                            <input type="number" id="td-diameter" step="0.001" value="0.25"
+                                   autocomplete="off" spellcheck="false">
+                        </label>
+                    </div>
+                    <p class="hint" id="td-note"></p>
+                    <ul id="td-list"></ul>
+                    <div id="td-props" class="td-props" hidden></div>
+                    <div id="td-errors" class="errors" aria-live="polite"></div>
+                </div>
+
                 <ul id="parts-list" aria-live="polite"></ul>
             </section>
 
@@ -321,6 +349,7 @@
         driveEnabled: {{ (drive_enabled if drive_enabled is defined else False)|tojson }},
         localMode: {{ (local_mode if local_mode is defined else False)|tojson }},
         toolLibrary: {{ (tool_library if tool_library is defined else {})|tojson }},
+        tubeDesigner: {{ (tube_designer_cfg if tube_designer_cfg is defined else {})|tojson }},
       };
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -330,6 +359,7 @@
     <script src="{{ url_for('static', filename='source_onshape.js') }}"></script>
     {% endif %}
     <script src="{{ url_for('static', filename='multitool.js') }}"></script>
+    <script src="{{ url_for('static', filename='tube_designer.js') }}"></script>
     <script src="{{ url_for('static', filename='wizard.js') }}"></script>
 </body>
 </html>

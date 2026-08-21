@@ -50,9 +50,12 @@ BEARING_BORES = {'flanged-hex-bearing': 1.125}   # FRC 0.5in hex bearing OD
 #: Which bore a {'type': 'bearing'} feature means when it does not say.
 DEFAULT_BEARING = 'flanged-hex-bearing'
 
-#: The grid the editor snaps to. Half the minimum web, so two snapped features can never
-#: land closer together than a check below would refuse for a reason the user cannot see.
-GRID_SNAP = MIN_WEB / 2.0
+#: The grid the editor snaps to: the minimum web itself, an eighth of an inch. Coarse on
+#: purpose - it is the smallest step that can change whether two features are legally
+#: spaced, so nudging by one snap always makes a difference the checks below can see.
+#: (The plan called this "0.125 (half-web)"; half of MIN_WEB is 0.0625, and 0.125 - the
+#: number it actually asked for - is MIN_WEB. The number won.)
+GRID_SNAP = MIN_WEB
 
 #: What a design may contain. Caps, not opinions: the resolver is O(n^2) in resolved
 #: holes for the spacing check, and a runaway `count` on a hole run is one typo away.

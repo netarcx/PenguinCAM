@@ -628,3 +628,50 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   font-size: 11px;
   padding-left: 22px;
 }
+
+/* ---------------------------------------------------------------------------
+   Custom tube designer (static/tube_designer.js)
+   Lives in the Parts quadrant, which is otherwise idle for a generated tube
+   pattern. Dense like the operations editor, for the same reason: the whole
+   design should be checkable without scrolling. */
+.td-palette { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.td-palette .field { flex: 1 1 140px; min-width: 0; margin: 0; }
+
+#td-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
+.td-item {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 6px;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+.td-item:first-child { border-top: none; }
+.td-item-label { flex: 1 1 auto; min-width: 0; }
+.td-item.selected { background: var(--panel); outline: 1px solid var(--accent); border-radius: 5px; }
+/* Refused by the SERVER, not by anything in the browser - the message sits in
+   #td-errors and the feature is drawn dashed on the canvas. */
+.td-item.bad .td-item-label { color: var(--danger); }
+.td-empty { color: var(--muted); padding: 6px 0; }
+.td-remove {
+  background: none;
+  border: none;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.td-props {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.td-prop { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
+.td-prop input, .td-prop select { width: 92px; font-size: 12px; }

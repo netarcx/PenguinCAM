@@ -50,6 +50,9 @@
     tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
     tubePatternLength: 0,
     tubePatternLength_text: '',
+    // The custom design, when tubePattern === 'custom'. Owned by static/tube_designer.js;
+    // sent verbatim to /process, which resolves and validates it server-side.
+    tubeDesign: { version: 1, features: [] },
     // The machine envelope is a read-only constraint; the parts' combined bounding box
     // is the stock (G54 origin = its lower-left).
     machine: { width: CFG.bed.width || 24, height: CFG.bed.height || 24, name: CFG.machineName || 'Machine' },
@@ -338,8 +341,13 @@
       chips.push('Aluminum Tube');
       chips.push(state.thickness_text + ' wall');
       chips.push('tube ' + state.tubeHeight_text + ' tall');
-      if (tubePatternOn()) chips.push(state.tubePattern === 'holes'
-        ? 'drilled pattern' : 'truss lightening');
+      if (tubePatternOn()) {
+        chips.push(state.tubePattern === 'holes' ? 'drilled pattern'
+          : state.tubePattern === 'custom'
+            ? ('custom design: ' + (tubePatternGeom ? tubePatternGeom.summary
+                                                    : 'nothing yet'))
+            : 'truss lightening');
+      }
     } else {
       var msel = $('#f-material');
       chips.push(msel && msel.options[msel.selectedIndex] ? msel.options[msel.selectedIndex].text : state.material);
@@ -678,6 +686,13 @@
     return state.mode === 'tubing' && state.tubePattern !== 'none';
   }
 
+  /* True for the one generated pattern the USER authors: the custom designer. It is a
+     tube pattern in every other respect - no DXF, a stated length, the same preview -
+     so it goes through tubePatternOn() everywhere except where the editor is involved. */
+  function tubeDesignOn() {
+    return state.mode === 'tubing' && state.tubePattern === 'custom';
+  }
+
   /* Mirror the pattern controls, and say up front how many holes the tube will get -
      the count follows from the length, and an operator who typed the wrong length would
      otherwise not find out until they read the program. */
@@ -703,7 +718,25 @@
   var tubePatternGeom = null;
   var tubePatternToken = 0;
 
+  /* One place that takes a resolved pattern - generated or custom - and makes the whole
+     UI agree with it. Shared so the custom path cannot drift into updating one panel and
+     not another. */
+  function adoptTubeGeometry(g) {
+    tubePatternGeom = g;
+    applyTubePatternUI();
+    updateLayoutInfo();
+    refitView();
+    drawLayout();
+  }
+
   function refreshTubePatternGeometry() {
+    // A custom design is resolved by POSTing the design itself; the editor owns that
+    // request (and its debounce) and hands the answer back through adoptTubeGeometry.
+    if (tubeDesignOn()) {
+      if (window.PCTubeDesigner) window.PCTubeDesigner.refresh();
+      else adoptTubeGeometry(null);
+      return;
+    }
     if (!tubePatternOn() || !(state.tubePatternLength > 0)) {
       tubePatternGeom = null;
       drawLayout();
@@ -718,11 +751,7 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (token !== tubePatternToken) return;   // a later edit already superseded this
-        tubePatternGeom = j && !j.error ? j : null;
-        applyTubePatternUI();
-        updateLayoutInfo();
-        refitView();
-        drawLayout();
+        adoptTubeGeometry(j && !j.error ? j : null);
       })
       .catch(function () { /* the note falls back to its own arithmetic */ });
   }
@@ -730,11 +759,22 @@
   function applyTubePatternUI() {
     var box = $('#tube-pattern-fields');
     if (box) box.hidden = !tubePatternOn();
+    if (window.PCTubeDesigner) window.PCTubeDesigner.render();
     var note = $('#tube-pattern-note');
     if (!note) return;
     if (!tubePatternOn()) { note.textContent = ''; return; }
     var len = state.tubePatternLength;
     if (!(len > 0)) { note.textContent = 'Enter the tube length to see what will be cut.'; return; }
+    if (state.tubePattern === 'custom') {
+      // The count comes from the server or not at all: this panel has no idea what a
+      // named size is, and inventing an answer here is exactly how the fixed-pattern
+      // note drifted from the program it was describing.
+      note.textContent = tubePatternGeom
+        ? 'Custom design: ' + tubePatternGeom.summary + ' per face. Place them on the '
+          + 'tube in the Layout panel.'
+        : 'Place features on the tube in the Layout panel.';
+      return;
+    }
     if (tubePatternGeom && tubePatternGeom.length === state.tubePatternLength) {
       // Counts straight from the generator, so the note cannot drift from the program.
       var gh = tubePatternGeom.holes.length, gp = tubePatternGeom.pockets.length;
@@ -855,6 +895,9 @@
     if (!note) return;
     if (state.mode === '2.5d') {
       note.textContent = '2.5D mode: one part per job (thickness comes from the CAD layers).';
+    } else if (tubeDesignOn()) {
+      note.textContent = 'Place features on the tube in the Layout panel: choose what to '
+        + 'place, then click the tube. Both walls get the design (face 2 is mirrored).';
     } else if (tubePatternOn()) {
       // Silence here meant a student uploaded a DXF, saw it accepted and listed, and got
       // a program generated from the tube length that ignored it completely.
@@ -864,6 +907,12 @@
       note.textContent = 'Tubing: add 1 face (mirrored onto the opposite side) or 2 faces (a distinct pattern per side).';
     } else {
       note.textContent = 'Add as many parts as fit on the sheet.';
+    }
+    // A custom design has nowhere to put a DXF: the geometry is the design. Leaving the
+    // dropzone live invited a student to add one and watch it be ignored.
+    if (state.source === 'upload') {
+      var dz = $('#upload-source');
+      if (dz) dz.hidden = tubeDesignOn();
     }
     if (partsOverCap()) {
       note.textContent += '  ** ' + state.parts.length + ' loaded but only '
@@ -1136,6 +1185,36 @@
       ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     });
 
+    // A custom design gets two more layers on top: whatever the server REFUSED, in the
+    // danger colour (its geometry is not in the lists above, so this is the only way it
+    // is visible at all), and the selected feature outlined. The browser decides neither
+    // - `ok` and the message both come from the server.
+    if (tubeDesignOn() && geom.features) {
+      var sel = window.PCTubeDesigner ? window.PCTubeDesigner.selectedIndex() : -1;
+      geom.features.forEach(function (f) {
+        var bad = !f.ok, chosen = f.index === sel;
+        if (!bad && !chosen) return;
+        ctx.save();
+        ctx.strokeStyle = bad ? col.danger : col.ok;
+        ctx.lineWidth = 2;
+        if (bad) ctx.setLineDash([4, 3]);
+        (f.pockets || []).forEach(function (ring) {
+          ctx.beginPath();
+          ring.forEach(function (pt, i) {
+            var p = worldToCanvas(pt[0], pt[1]);
+            if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]);
+          });
+          ctx.closePath(); ctx.stroke();
+        });
+        (f.holes || []).forEach(function (h) {
+          var c = worldToCanvas(h.x, h.y);
+          var r = Math.max(2, (h.d / 2) * canvasState.scale);
+          ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.stroke();
+        });
+        ctx.restore();
+      });
+    }
+
     // The jig origin, which is what the operator actually sets.
     var o = worldToCanvas(0, 0);
     ctx.fillStyle = col.ok;
@@ -1287,8 +1366,26 @@
       return [(t.clientX - rect.left) * (canvas.width / rect.width),
               (t.clientY - rect.top) * (canvas.height / rect.height)];
     }
+    /* The custom designer takes the canvas over: there are no parts to nest, so a click
+       either picks up a feature or places a new one. */
+    function designDown(w, e) {
+      var TD = window.PCTubeDesigner;
+      var hit = TD.hitTest(w[0], w[1]);
+      if (hit >= 0) {
+        TD.select(hit);
+        var at = TD.selectedPosition();
+        canvasState.action = { type: 'design-drag',
+                               grab: at ? [at.x - w[0], at.y - w[1]] : [0, 0] };
+      } else {
+        TD.placeAt(w[0], w[1]);
+      }
+      drawLayout();
+      e.preventDefault();
+    }
+
     function down(e) {
       var c = evtCanvas(e), w = canvasToWorld(c[0], c[1]);
+      if (tubeDesignOn() && window.PCTubeDesigner) { designDown(w, e); return; }
       var shift = e.shiftKey;
       var selBox = combinedBBox(selectedParts());
       // Rotation handle rotates the whole selection about its center.
@@ -1332,6 +1429,14 @@
       var act = canvasState.action;
       if (!act) return;
       var c = evtCanvas(e), w = canvasToWorld(c[0], c[1]);
+      if (act.type === 'design-drag') {
+        if (window.PCTubeDesigner) {
+          window.PCTubeDesigner.moveSelected(w[0] + act.grab[0], w[1] + act.grab[1]);
+        }
+        drawLayout();
+        e.preventDefault();
+        return;
+      }
       if (act.type === 'drag') {
         var dx = w[0] - act.startWorld[0], dy = w[1] - act.startWorld[1];
         act.snap.forEach(function (s) { s.p.cx = s.cx + dx; s.p.cy = s.cy + dy; });
@@ -1380,6 +1485,22 @@
     canvas.addEventListener('touchmove', move, { passive: false });
     canvas.addEventListener('touchend', up);
 
+    /* Keyboard editing for the designer: nudge by one snap, and delete. Ignored while a
+       form control has focus, so typing 0.5 into a properties box does not also move the
+       feature it belongs to. */
+    window.addEventListener('keydown', function (e) {
+      if (!tubeDesignOn() || !window.PCTubeDesigner) return;
+      var t = e.target, tag = t && t.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      var TD = window.PCTubeDesigner, handled = false;
+      if (e.key === 'Delete' || e.key === 'Backspace') handled = TD.removeSelected();
+      else if (e.key === 'ArrowLeft') handled = TD.nudge(-1, 0);
+      else if (e.key === 'ArrowRight') handled = TD.nudge(1, 0);
+      else if (e.key === 'ArrowUp') handled = TD.nudge(0, 1);
+      else if (e.key === 'ArrowDown') handled = TD.nudge(0, -1);
+      if (handled) { e.preventDefault(); drawLayout(); }
+    });
+
     $('#btn-flip').addEventListener('click', function () {
       if (state.mode === '2.5d' || state.mode === 'tubing') return;  // flip not allowed in 2.5D/tubing
       selectedParts().forEach(function (p) { p.flipped = !p.flipped; });
@@ -1409,7 +1530,12 @@
   function updateLayoutHint() {
     var el = $('#layout-hint');
     if (!el) return;
-    if (state.mode === 'tubing') {
+    if (tubeDesignOn()) {
+      el.textContent = 'Click the tube to place the feature chosen in the Parts panel; '
+        + 'click one to select it, drag to move, arrow keys nudge by '
+        + ((CFG.tubeDesigner && CFG.tubeDesigner.grid) || 0.125) + '", Delete removes. '
+        + 'The design is mirrored onto the opposite wall.';
+    } else if (state.mode === 'tubing') {
       el.textContent = 'Drag the round handle to rotate the tube in 90 deg steps. ' +
         'Orient each face so the tube runs vertically (the Y axis) — that is the axis of the ' +
         'tube jig on the machine. Both faces rotate together.';
@@ -1486,6 +1612,9 @@
     fd.append('tube_size', state.tubeSize);
     fd.append('tube_pattern', state.tubePattern);
     if (generated) fd.append('tube_pattern_length', state.tubePatternLength);
+    // The design itself. The server resolves the named sizes and validates every
+    // feature again - this is a request, not an instruction.
+    if (tubeDesignOn()) fd.append('tube_design', JSON.stringify(state.tubeDesign));
     fd.append('timestamp', timestamp());
     if (p) fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'tube');
@@ -1614,9 +1743,15 @@
         if (!holes && !pockets) {
           note.textContent = 'This tube pattern cut nothing - see the warnings above.';
         } else {
-          note.textContent = holes
-            ? holes + ' holes per face, drilled.'
-            : pockets + ' triangles per face, milled.';
+          // What the PROGRAM contains, and which tool made it. Saying "drilled" for
+          // every pattern with holes in it was wrong the moment a custom design could
+          // mix a 1.125" bore with a clearance hole and mill both.
+          var made = [];
+          if (holes) made.push(holes + ' hole' + (holes === 1 ? '' : 's'));
+          if (pockets) made.push(pockets + (tp.mode === 'lightening' ? ' triangle' : ' pocket')
+                                 + (pockets === 1 ? '' : 's'));
+          note.textContent = made.join(' and ') + ' per face, '
+            + (tp.mode === 'holes' ? 'drilled.' : 'milled.');
         }
       }
     }
@@ -1872,6 +2007,11 @@
 
     var sq = $('#f-square-end'); if (sq) state.squareEnd = sq.checked;
     var ctl = $('#f-cut-to-length'); if (ctl) state.cutToLength = ctl.checked;
+
+    // The designer's own controls, rebuilt from whatever they ACTUALLY show. Its palette
+    // is a pair of selects, which Firefox restores across a soft reload just like the
+    // ones above; the design document itself lives in state, not in the DOM.
+    if (window.PCTubeDesigner) window.PCTubeDesigner.adopt();
   }
 
   /* One place that makes the DOM agree with `state`. Called at startup, and safe to call
@@ -1902,6 +2042,16 @@
         cfg: { toolLibrary: CFG.toolLibrary || {}, defaultTool: CFG.defaultTool,
                defaultToolText: CFG.defaultToolText },
         onChange: updateSummary,
+      });
+    }
+    // Started before bindSetup for the same reason the multi-tool editor is: the setup
+    // pass calls applyTubePatternUI(), which asks the designer to draw its panel.
+    if (window.PCTubeDesigner) {
+      window.PCTubeDesigner.init({
+        state: state,
+        cfg: CFG.tubeDesigner || {},
+        onGeometry: adoptTubeGeometry,
+        onChange: function () { invalidatePreview(); updateSummary(); drawLayout(); },
       });
     }
     bindSetup();

@@ -21,4 +21,4 @@ test:
 	@uv run python gcode_audit.py
 	@echo ""
 	@echo "Checking browser JavaScript (no Node available - see check_js.py)..."
-	@uv run python check_js.py static/wizard.js static/multitool.js static/gcode_viewer.js static/source_onshape.js
+	@uv run python check_js.py static/wizard.js static/multitool.js static/tube_designer.js static/gcode_viewer.js static/source_onshape.js

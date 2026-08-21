@@ -74,6 +74,7 @@ from team_config import TeamConfig, DEFAULT_TOOL_DIAMETER_IN
 
 # Multi-tool operations (several tools per part, with manual tool changes)
 import drill_sizes
+import tube_designer
 import tooling
 from tooling import ToolingError
 
@@ -508,6 +509,13 @@ def _app_template_context():
         'detected_thickness': None,
         'local_mode': LOCAL_MODE,
         'tool_library': tooling.TOOL_LIBRARY,
+        # The custom tube designer's menus and its snap grid, rendered from the server so
+        # the browser holds no copy of a size or a constant that could go stale.
+        'tube_designer_cfg': {
+            'sizes': tube_designer.size_menu(),
+            'grid': tube_designer.GRID_SNAP,
+            'maxFeatures': tube_designer.MAX_FEATURES,
+        },
     }
 
 
