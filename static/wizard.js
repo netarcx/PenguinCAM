@@ -870,6 +870,18 @@
     var mtToggle = $('#multitool-toggle'); if (mtToggle) mtToggle.style.display = (is25 || isTube) ? 'none' : '';
     applyMultiToolUI();
     updatePartsModeNote();
+    // In full-page grid mode the Layout canvas and the operations editor are on screen
+    // whatever step is current, and gotoStep refreshes only the step you are standing
+    // on. Switching mode from Setup therefore left the previous mode's drawing on the
+    // canvas (the tube, after a trip through Tubing) and an operation list missing any
+    // part added while the editor was mode-disabled - which made its "no operations"
+    // block at Preview look wrong instead of actionable. gotoStep already refreshed
+    // whichever of these IS the current step, so only the other ones need doing here.
+    if (state.step !== 'layout') { refitView(); drawLayout(); }
+    if (multiToolOn() && state.step !== 'tools') {
+      window.PCMultiTool.render();
+      window.PCMultiTool.refreshFeatures();
+    }
   }
 
   // Reflect the multi-tool toggle everywhere it shows: the single-tool field it replaces,
@@ -1019,7 +1031,11 @@
     updateSummary();
     updatePartsModeNote();   // the over-cap warning depends on the count
     invalidatePreview();
-    if (state.step === 'layout') { refitView(); drawLayout(); }
+    // Unconditionally: in grid mode the Layout canvas is on screen from every step, so a
+    // part added or removed while standing elsewhere must show up on it immediately, not
+    // on the next visit to Layout. Harmless in narrow mode - the canvas is just hidden.
+    refitView();
+    drawLayout();
   }
 
   function removePart(id) {
