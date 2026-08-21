@@ -44,6 +44,7 @@
     squareEnd: false,
     cutToLength: false,
     thicknessTouched: false,
+    tubeHeightTouched: false,
     thicknessBeforeTube: null,
     tubeSize: '2x1-flat',
     tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
@@ -530,6 +531,7 @@
 
   /* --------------------------------------------------------------- setup */
   var thicknessBound = false;
+  var tubeHeightBound = false;
 
   function bindSetup() {
     var machineSel = $('#f-machine');
@@ -567,12 +569,18 @@
     });
     bindLengthField($('#f-tube-height'),
       function () { return state.tubeHeight_text; },
-      function (inches, text) { state.tubeHeight = inches; state.tubeHeight_text = text; });
+      function (inches, text) {
+        state.tubeHeight = inches; state.tubeHeight_text = text;
+        if (tubeHeightBound) state.tubeHeightTouched = true;
+        invalidatePreview();
+      });
+    tubeHeightBound = true;
     var sizeSel = $('#f-tube-size');
     if (sizeSel) {
       state.tubeSize = sizeSel.value;
       sizeSel.addEventListener('change', function () {
-        state.tubeSize = this.value; applyTubePatternUI(); invalidatePreview();
+        state.tubeSize = this.value; syncTubeHeightToSize();
+        applyTubePatternUI(); invalidatePreview(); updateSummary();
         refreshTubePatternGeometry();
       });
     }
@@ -765,6 +773,20 @@
   //: The wall thickness a tube job starts from. Real 1x1/2x1 is 1/16"-1/8".
   var TUBE_WALL_DEFAULT_TEXT = '0.0625"';
 
+  //: How tall each tube size is. The server derives the height from the SIZE - a 2x1 on
+  //: its 1" face is a 2" TALL tube - so leaving this field showing 1.0" had the panel and
+  //: the program describing different parts, and the height sets the safe-Z retract.
+  var TUBE_HEIGHTS = { '1x1': 1.0, '2x1-flat': 1.0, '2x1-standing': 2.0 };
+
+  function syncTubeHeightToSize() {
+    var h = TUBE_HEIGHTS[state.tubeSize];
+    if (!h || state.tubeHeightTouched) return;
+    state.tubeHeight = h;
+    state.tubeHeight_text = h + '"';
+    var field = $('#f-tube-height');
+    if (field) field.value = state.tubeHeight_text;
+  }
+
   function setThicknessField(inches, text) {
     state.thickness = inches;
     state.thickness_text = text;
@@ -785,6 +807,7 @@
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
     var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
+    if (isTube) syncTubeHeightToSize();
     // The thickness field carries the sheet default (1/4") into tubing, where it means
     // WALL thickness. Real 1x1 and 2x1 is 1/16"-1/8", so every tube job quoted a cycle
     // time three to four times too long and pecked four times as often as it needed to.
@@ -1829,6 +1852,18 @@
     });
   }
 
+  /* One place that makes the DOM agree with `state`. Called at startup, and safe to call
+     again: every function in it is idempotent and reads state rather than toggling it. */
+  function syncUIFromState() {
+    applyModeUI();          // mode-dependent fields, labels, and the tube/multi-tool panels
+    updatePartsModeNote();
+    updateSummary();
+    updateLayoutInfo();     // machine name, bed size and kerf in the Layout panel
+    updateLayoutHint();
+    refitView();
+    drawLayout();
+  }
+
   function init() {
     if (DEBUG) { $('#debug-overlay').hidden = false; }
     window.PenguinCAM.debug = dbg; // let the Onshape adapter log into the debug overlay
@@ -1867,6 +1902,14 @@
       var opt25 = $('#opt-mode-25d'); if (opt25) opt25.hidden = true;
       var r25 = $('input[name="mode"][value="2.5d"]'); if (r25) r25.disabled = true;
     }
+    // Draw the whole UI from state ONCE before the first paint. Everything below used
+    // to run only as a side effect of a user event, so on first load the panels showed
+    // whatever the static HTML happened to say. In full-page grid mode all four are on
+    // screen at once, so the Layout panel sat there reading "Bed:   Tool: kerf" with the
+    // values blank until you happened to visit that step - and switching mode and back
+    // "fixed" it only because that re-enters gotoStep. First load must look exactly like
+    // the state it is showing.
+    syncUIFromState();
     gotoStep('setup');
     dbg('init', { source: state.source, authed: CFG.authenticated, theme: CFG.theme });
     if (state.source === 'onshape' && !CFG.authenticated) {
