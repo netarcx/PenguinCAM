@@ -246,7 +246,11 @@
     var keep = [];
     this.scene.children.forEach(function (c) { if (c instanceof THREE.Light) keep.push(c); });
     while (this.scene.children.length) this.scene.remove(this.scene.children[0]);
-    keep.forEach(this.scene.add, this.scene);
+    // NOT forEach(this.scene.add, this.scene): Object3D.add is variadic, so forEach's
+    // index and array arguments were passed in as extra children and three.js logged
+    // "object not an instance of THREE.Object3D" on every single load. Harmless, but it
+    // buried real errors in the console.
+    keep.forEach(function (c) { this.scene.add(c); }, this);
     this.completedLine = this.upcomingLine = this.toolMesh = null;
 
     var tc = this._themeColors();

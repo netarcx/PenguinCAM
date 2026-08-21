@@ -333,6 +333,8 @@
       chips.push('Aluminum Tube');
       chips.push(state.thickness_text + ' wall');
       chips.push('tube ' + state.tubeHeight_text + ' tall');
+      if (tubePatternOn()) chips.push(state.tubePattern === 'holes'
+        ? 'drilled pattern' : 'truss lightening');
     } else {
       var msel = $('#f-material');
       chips.push(msel && msel.options[msel.selectedIndex] ? msel.options[msel.selectedIndex].text : state.material);
@@ -345,10 +347,15 @@
                                  : (state.tools || []).length;
       chips.push(n + ' tool' + (n === 1 ? '' : 's'));
     } else {
-      chips.push('⌀ ' + state.tool_diameter_text + ' tool');
+      // A drilled pattern runs a 0.201" twist drill whatever the tool field says - the
+      // server substitutes it. The chip is what an operator reads before loading a tool,
+      // so it has to name the real one.
+      chips.push(state.tubePattern === 'holes' && state.mode === 'tubing'
+        ? '⌀ 0.201" twist drill'
+        : '⌀ ' + state.tool_diameter_text + ' tool');
     }
     if (state.mode === 'tubing') {
-      chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
+      if (!tubePatternOn()) chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
     } else {
       if (idx >= list.indexOf('layout')) {
         chips.push(state.parts.length + ' part' + (state.parts.length === 1 ? '' : 's'));
@@ -534,20 +541,21 @@
     if (sizeSel) {
       state.tubeSize = sizeSel.value;
       sizeSel.addEventListener('change', function () {
-        state.tubeSize = this.value; applyTubePatternUI();
+        state.tubeSize = this.value; applyTubePatternUI(); invalidateTubePreview();
       });
     }
     var patSel = $('#f-tube-pattern');
     if (patSel) {
       patSel.addEventListener('change', function () {
         state.tubePattern = this.value; applyTubePatternUI(); updatePartsModeNote();
+        invalidateTubePreview();
       });
     }
     bindLengthField($('#f-tube-pattern-length'),
       function () { return state.tubePatternLength_text; },
       function (inches, text) {
         state.tubePatternLength = inches; state.tubePatternLength_text = text;
-        applyTubePatternUI();
+        applyTubePatternUI(); invalidateTubePreview();
       });
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
@@ -633,6 +641,20 @@
   /* Mirror the pattern controls, and say up front how many holes the tube will get -
      the count follows from the length, and an operator who typed the wrong length would
      otherwise not find out until they read the program. */
+  /* A generated program belongs to the settings that produced it. In full-page grid
+     mode the Setup panel stays live while Preview is on screen, so changing the tube
+     size or length left the previous program sitting there with Download still enabled -
+     the panel said 48" 1x1 while the button handed over a 24" 2x1. Anything that changes
+     what would be generated must therefore retire what already was. */
+  function invalidateTubePreview() {
+    if (state.step !== 'preview' && $('#preview-result').hidden) return;
+    resetPreview();
+    $('#btn-do').disabled = true;
+    $('#gen-status').textContent = '';
+    $('#preview-errors').textContent =
+      'Settings changed - press Next, or return to Preview, to regenerate.';
+  }
+
   function applyTubePatternUI() {
     var box = $('#tube-pattern-fields');
     if (box) box.hidden = !tubePatternOn();
@@ -706,6 +728,11 @@
     if (!note) return;
     if (state.mode === '2.5d') {
       note.textContent = '2.5D mode: one part per job (thickness comes from the CAD layers).';
+    } else if (tubePatternOn()) {
+      // Silence here meant a student uploaded a DXF, saw it accepted and listed, and got
+      // a program generated from the tube length that ignored it completely.
+      note.textContent = 'Nothing to add: the pattern is generated from the tube length. '
+        + 'Any DXF dropped here is ignored - go straight to Layout.';
     } else if (state.mode === 'tubing') {
       note.textContent = 'Tubing: add 1 face (mirrored onto the opposite side) or 2 faces (a distinct pattern per side).';
     } else {
@@ -1142,7 +1169,10 @@
 
   function updateLayoutInfo() {
     var el = $('#info-machine-name'); if (el) el.textContent = state.machine.name;
-    el = $('#info-machine-size'); if (el) el.textContent = state.machine.width + '" x ' + state.machine.height + '"';
+    el = $('#info-machine-size');
+    // toFixed: the config is in mm, so the converted inches arrived as
+    // 31.496062992125985 and were printed verbatim.
+    if (el) el.textContent = state.machine.width.toFixed(2) + '" x ' + state.machine.height.toFixed(2) + '"';
     el = $('#info-tool');
     if (el) {
       // Show the kerf actually being enforced, not the (hidden) single-tool field.
@@ -1352,6 +1382,21 @@
       // Counting faces would report "0 faces" here: a generated pattern has no uploaded
       // face to count. Describe the tube that was machined instead.
       n = state.tubeSize + ' tube, ' + (state.tubePatternLength_text || state.tubePatternLength + '"');
+      // Replace the PREDICTED count with the real one. The prediction is arithmetic on
+      // copies of the generator's constants and knows nothing about the tool, so it went
+      // on promising 11 triangles for a program that contained none (a cutter too fat to
+      // enter them). A program that cuts nothing must not look like a success.
+      var tp = resp.tube_preview, note = $('#tube-pattern-note');
+      if (tp && note) {
+        var holes = (tp.holes || []).length, pockets = (tp.pockets || []).length;
+        if (!holes && !pockets) {
+          note.textContent = 'This tube pattern cut nothing - see the warnings above.';
+        } else {
+          note.textContent = holes
+            ? holes + ' holes per face, drilled.'
+            : pockets + ' triangles per face, milled.';
+        }
+      }
     }
     else if (state.mode === 'tubing') { n = state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'); }
     else { n = resp.parts ? (resp.parts.length + ' part(s)') : '1 part'; }
@@ -1369,7 +1414,11 @@
     $('#preview-errors').textContent = (resp.warnings || []).map(function (w) {
       return '⚠ ' + w;
     }).join('\n');
-    $('#btn-do').disabled = false;   // gcode ready — enable the save/download action
+    // ONE decision, made last. An unconditional `disabled = false` here silently undid
+    // the checks above, so a tube pattern that cut nothing still offered a download.
+    var tpv = resp.tube_preview;
+    var cutsNothing = !!tpv && !(tpv.holes || []).length && !(tpv.pockets || []).length;
+    $('#btn-do').disabled = cutsNothing;
     show3DPreview(resp);
     updateSummary();  // refresh the stock chip with the server-authoritative size
   }

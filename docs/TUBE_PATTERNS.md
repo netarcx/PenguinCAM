@@ -62,6 +62,24 @@ while the drill is below the tube surface**.
 
 ---
 
+## What it refuses
+
+An audit of the generated programs found several that were well-formed, passed every
+test, and were physically wrong. These are now refused outright rather than emitted:
+
+| Refused | Because |
+|---|---|
+| A drilled pattern with `--square-end` or `--cut-to-length` | Those are milling operations. The program has a twist drill loaded and no tool change, so it fed the drill sideways through the wall 316 times. Run the facing as a separate tube-facing job. |
+| A tube longer than the machine's travel | A 24" tube exceeds the 19.7" Y travel of the machine this was written for. It used to return a clean success, a 3D preview and a downloadable program the machine cannot run. |
+| Any job in millimetres | Every constant here is inches and the tube program hard-codes `G20`, so a metric run emitted inch-mode G-code holding millimetre numbers. |
+| A tool that is not the drill, in `holes` mode | Checked against `min_millable_hole`, not just `tool_diameter` - a config with `min_millable_multiplier: 1.0` passed the naive check and milled every hole. |
+| A tube size that is not recognised | `_parse_tube_size` answers "1x1" for anything unknown, so a typo silently became a 1x1 job on a 2" face. |
+| A non-positive or non-finite tool, wall, height or length | A negative tool made the pocket-clearing loop step outward forever and hung the request; a negative height put the whole program, including its "safe" retract, below the work zero. |
+
+Drilled holes also now go **deeper than the wall by the length of the drill point**. A
+twist drill cuts a cone: stopping the tip at the wall bottom left a 0.201" hole exiting
+at 0.027", which no #10 screw passes - the one thing the pattern exists to allow.
+
 ## The rules that keep it safe
 
 Each drops geometry rather than emitting something the machine will mishandle:
@@ -78,9 +96,9 @@ Each drops geometry rather than emitting something the machine will mishandle:
   `MIN_WEB` apart at every X — but the check runs anyway, because two overlapping pockets
   would be cut twice and the second pass would climb into air. Verified across 784 tube
   configurations: zero overlaps, minimum gap exactly 0.125".
-- **The program retracts to safe Z before its first lateral move.** It previously went
-  straight from the WCS line to `G0 X.. Y..`, so the first rapid ran at whatever height the
-  machine was left at. This affected DXF tube jobs too, not just generated ones.
+- **The program retracts to safe Z before its first lateral move, and after every
+  pause.** The operator has just had their hands in the envelope to flip the tube, and
+  jogging Z is the normal thing to do while there.
 
 All of these are warnings, not errors: the program is still machinable without whatever was
 dropped, and the operator is told what is missing.

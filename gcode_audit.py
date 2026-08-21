@@ -344,9 +344,31 @@ def main():
                                       (1.0, 2.0, '2x1-standing')):
         for length in (6.0, 24.0):
             for mode in ('holes', 'lightening'):
+                # Squaring and cutting to length are MILLING operations. They are audited
+                # on the milled pattern only: with a twist drill loaded the generator now
+                # refuses them, because it used to emit them and feed the drill sideways.
+                mill = (mode == 'lightening')
                 audit_tube(f'tube/{label}/{length:g}in/{mode}', face_width, length,
-                           height, mode=mode)
-    audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, cut_to_length=True)
+                           height, mode=mode, square_end=mill)
+    audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, mode='lightening',
+               square_end=True, cut_to_length=True)
+
+    # The refusal is part of the contract, so audit it too: a drilled pattern combined
+    # with a milling operation must produce NO program rather than a dangerous one.
+    global checked
+    for square, cut in ((True, False), (False, True)):
+        checked += 1
+        import tube_patterns as _tp
+        pp = FRCPostProcessor(0.0625, _tp.HOLE_DIAMETER)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(2.0, 12.0, mode='holes')
+        res = pp.generate_tube_pattern_gcode(tube_height=1.0, square_end=square,
+                                             cut_to_length=cut, tube_width=2.0,
+                                             tube_length=12.0)
+        if res.success:
+            fail(f'tube/drill+mill/{square}{cut}',
+                 'a drilled pattern was allowed to run a milling operation')
 
     print(f'audited {checked} generated programs')
     print('  note: tube programs get the text/structure rules only - the ZMIN and '

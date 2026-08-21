@@ -11,6 +11,7 @@ tube program.
 
 import math
 import os
+import re
 import sys
 import unittest
 
@@ -177,7 +178,8 @@ class TestTrussPockets(unittest.TestCase):
         mangle it, so the pattern drops it and says so."""
         pattern = tube_patterns.generate(2.0, 24.0, tool_diameter=1.25, mode='lightening')
         self.assertEqual(pattern['pockets'], [])
-        self.assertTrue(any('does not fit' in w for w in pattern['warnings']))
+        self.assertTrue(any('to helix into' in w or 'nothing to clear' in w
+                            for w in pattern['warnings']), pattern['warnings'])
 
     def test_holes_and_pockets_are_mutually_exclusive(self):
         """The core rule: a drilled face has no room to lighten, and a trussed face has
@@ -254,16 +256,29 @@ class TestTubeGCodeFormatting(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        pp = FRCPostProcessor(0.0625, tube_patterns.HOLE_DIAMETER)
-        pp.apply_material_preset('aluminum_tube')
-        pp.tube_height = 1.0
-        pp.load_tube_pattern(2.0, 12.0, mode='holes')
-        result = pp.generate_tube_pattern_gcode(
+        # Two programs: a drilled one (no facing - squaring with a drill in the spindle
+        # is refused) and a milled one that DOES square and cut to length, so the header,
+        # facing and cut-off comments are covered by the rules too.
+        drilled = FRCPostProcessor(0.0625, tube_patterns.HOLE_DIAMETER)
+        drilled.apply_material_preset('aluminum_tube')
+        drilled.tube_height = 1.0
+        drilled.load_tube_pattern(2.0, 12.0, mode='holes')
+        r1 = drilled.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0)
+        assert r1.success, r1.errors
+
+        milled = FRCPostProcessor(0.0625, TOOL)
+        milled.apply_material_preset('aluminum_tube')
+        milled.tube_height = 1.0
+        milled.load_tube_pattern(2.0, 12.0, mode='lightening')
+        r2 = milled.generate_tube_pattern_gcode(
             tube_height=1.0, square_end=True, cut_to_length=True,
             tube_width=2.0, tube_length=12.0)
-        assert result.success, result.errors
-        cls.gcode = result.gcode
-        cls.lines = result.gcode.split('\n')
+        assert r2.success, r2.errors
+
+        cls.gcode = r1.gcode + '\n' + r2.gcode
+        cls.lines = cls.gcode.split('\n')
 
     def test_no_nested_comments(self):
         for n, line in enumerate(self.lines, 1):
@@ -299,6 +314,164 @@ class TestTubeGCodeFormatting(unittest.TestCase):
 
     def test_program_actually_cuts_the_pattern(self):
         self.assertIn('HOLES', self.gcode.upper())
+
+
+class TestAuditFindings(unittest.TestCase):
+    """Regressions for bugs found by auditing the generated programs.
+
+    Every one of these produced a program that passed the whole suite and the G-code
+    audit while being physically wrong. They are the reason this class exists.
+    """
+
+    def _drill_pp(self, wall=0.0625, height=1.0):
+        pp = FRCPostProcessor(wall, tube_patterns.HOLE_DIAMETER)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = height
+        return pp
+
+    def test_a_drilled_hole_goes_fully_through_the_wall(self):
+        """A twist drill cuts a cone. Stopping the TIP at the wall bottom leaves a
+        pinhole: a 0.201" hole through 1/16" wall exited at 0.027", which no #10 screw
+        passes - and passing a #10 is the entire purpose of the pattern."""
+        wall = 0.0625
+        pp = self._drill_pp(wall=wall)
+        pp.load_tube_pattern(2.0, 12.0, mode='holes')
+        gcode = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0).gcode
+        tip = min(float(m) for m in re.findall(r'G1 Z([-\d.]+) F[\d.]+\s*;\s*Peck', gcode))
+        point = FRCPostProcessor.drill_point_length(tube_patterns.HOLE_DIAMETER)
+        wall_bottom = 1.0 - wall
+        self.assertLessEqual(tip + point, wall_bottom + 1e-6,
+                             'drill point never clears the wall - the exit is a pinhole')
+
+    def test_a_drill_is_never_asked_to_mill(self):
+        """Squaring and cut-to-length feed the tool sideways, full width. With a drill in
+        the spindle and no tool change in the program, that snapped the drill."""
+        for square, cut in ((True, False), (False, True), (True, True)):
+            pp = self._drill_pp()
+            pp.load_tube_pattern(2.0, 12.0, mode='holes')
+            result = pp.generate_tube_pattern_gcode(
+                tube_height=1.0, square_end=square, cut_to_length=cut,
+                tube_width=2.0, tube_length=12.0)
+            self.assertFalse(result.success,
+                             f'square_end={square} cut_to_length={cut} was allowed')
+            self.assertIn('milling operations', ' '.join(result.errors))
+
+    def test_no_lateral_feed_while_the_drill_is_in_metal(self):
+        """The property that matters, asserted directly on the output rather than
+        inferred from which branch generated it."""
+        pp = self._drill_pp()
+        pp.load_tube_pattern(2.0, 12.0, mode='holes')
+        gcode = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0).gcode
+        top = 1.0
+        x = y = z = None
+        for line in gcode.split('\n'):
+            code = line.split(';')[0].split('(')[0].strip()
+            if not code or not re.match(r'G0?[0-3]\b', code):
+                continue
+            nx = ny = nz = None
+            for tok in code.split():
+                if tok.startswith('X'):
+                    nx = float(tok[1:])
+                elif tok.startswith('Y'):
+                    ny = float(tok[1:])
+                elif tok.startswith('Z'):
+                    nz = float(tok[1:])
+            feed = code.split()[0] in ('G1', 'G01', 'G2', 'G02', 'G3', 'G03')
+            moved = (nx is not None and nx != x) or (ny is not None and ny != y)
+            if moved and feed and z is not None and z < top - 1e-6:
+                self.fail(f'drill fed sideways at Z={z}: {line.strip()}')
+            x, y, z = (nx if nx is not None else x,
+                       ny if ny is not None else y,
+                       nz if nz is not None else z)
+
+    def test_cut_to_length_without_a_length_is_refused(self):
+        pp = FRCPostProcessor(0.0625, TOOL)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        result = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=True,
+            tube_width=2.0, tube_length=None)
+        self.assertFalse(result.success)
+        self.assertIn('tube length', ' '.join(result.errors).lower())
+
+    def test_the_program_lifts_after_every_pause(self):
+        """The operator has just had their hands in the envelope and may have jogged Z.
+        Resuming into a lateral rapid at that height drags the tool over the part."""
+        pp = FRCPostProcessor(0.0625, TOOL)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        lines = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0).gcode.split('\n')
+        for i, line in enumerate(lines):
+            if not line.startswith('M0'):
+                continue
+            for follow in lines[i:]:
+                code = follow.split(';')[0].strip()
+                if not re.match(r'G0?[0-3]\b', code):
+                    continue
+                toks = code.split()
+                if any(t[:1] in ('X', 'Y') for t in toks) and not any(t[:1] == 'Z' for t in toks):
+                    self.fail(f'XY move after pause before any retract: {follow.strip()}')
+                break
+
+    def test_metric_jobs_are_refused_rather_than_silently_wrong(self):
+        """Every constant here is inches and the tube program hard-codes G20, so a metric
+        run emitted inch-mode G-code holding millimetre numbers: a 610 mm tube became a
+        610 INCH tube and the Z offset went below the jig."""
+        pp = FRCPostProcessor(1.6, tube_patterns.HOLE_DIAMETER, units='mm')
+        pp.tube_height = 25.4
+        with self.assertRaises(ValueError) as caught:
+            pp.load_tube_pattern(50.8, 610.0, mode='holes')
+        self.assertIn('inch-only', str(caught.exception))
+
+    def test_a_stale_error_does_not_condemn_the_next_pattern(self):
+        pp = FRCPostProcessor(0.0625, 0.675)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(1.4, 12.0, mode='lightening')   # tool too big; may error
+        pp.errors.append('a stale error from the previous load')
+        pp2 = FRCPostProcessor(0.0625, tube_patterns.HOLE_DIAMETER)
+        pp2.apply_material_preset('aluminum_tube')
+        pp2.tube_height = 1.0
+        pp2.errors.append('left over')
+        pp2.load_tube_pattern(2.0, 12.0, mode='holes')
+        self.assertEqual(pp2.errors, [], 'load_tube_pattern must clear stale errors')
+
+    def test_a_pocket_the_tool_cannot_enter_is_dropped(self):
+        """Sized against what the cutter SWEEPS helixing in, not its bare radius. A 3/8"
+        tool on a 1" face removed metal from X 0.132 to X 0.788 of a pocket bounded at
+        0.25..0.75 - through the edge margin protecting the extrusion corner."""
+        pattern = tube_patterns.generate(1.0, 24.0, 0.375, mode='lightening')
+        self.assertEqual(pattern['pockets'], [])
+        self.assertTrue(pattern['warnings'])
+
+    def test_nan_and_infinity_are_refused(self):
+        for bad in (float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                tube_patterns.generate(2.0, bad, TOOL, mode='holes')
+            with self.assertRaises(ValueError):
+                tube_patterns.generate(bad, 24.0, TOOL, mode='holes')
+
+    def test_three_rows_only_where_the_web_survives(self):
+        """1.5" was a round number, not a derived one: it put three rows on a 1.5" face
+        with 0.049" of metal between them, a knife edge in 1/16" wall."""
+        self.assertEqual(len(tube_patterns.hole_rows(1.5)), 1)
+        self.assertEqual(len(tube_patterns.hole_rows(2.0)), 3)
+        rows = tube_patterns.hole_rows(2.0)
+        self.assertGreaterEqual((rows[1] - rows[0]) - tube_patterns.HOLE_DIAMETER,
+                                tube_patterns.MIN_WEB - 1e-9)
+
+    def test_a_face_too_narrow_for_a_hole_gets_none(self):
+        pattern = tube_patterns.generate(0.15, 6.0, TOOL, mode='holes')
+        self.assertEqual(pattern['circles'], [])
+        self.assertTrue(any('too narrow' in w for w in pattern['warnings']))
 
 
 class TestProcessRoute(unittest.TestCase):
@@ -370,6 +543,65 @@ class TestProcessRoute(unittest.TestCase):
         response = self._post(tube_pattern='swiss-cheese')
         self.assertEqual(response.status_code, 400)
 
+    def test_a_tube_longer_than_the_machine_is_refused(self):
+        """The one that needs no hostile input: 24" is the most ordinary FRC tube length
+        and it is the placeholder in the field, but it is longer than the Y travel of the
+        machine this was written for. It used to return 200 with a 3D preview."""
+        response = self._post(tube_pattern_length='2000')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('does not fit the machine', response.get_json()['error'])
+
+    def test_an_unknown_tube_size_is_refused_not_guessed(self):
+        """_parse_tube_size answers 1x1 for anything it does not recognise, so a typo
+        became 23 holes down the centre of a 2" face instead of 69 in three rows."""
+        for bad in ('2\u00d71', 'A' * 300, '', '3x3'):
+            response = self._post(tube_size=bad)
+            self.assertEqual(response.status_code, 400, f'{bad!r} was accepted')
+
+    def test_physically_impossible_dimensions_are_refused(self):
+        """Each of these produced a successful program with wrong Z: a negative height
+        put the whole program below the work zero - including its 'safe' retract - and a
+        wall thicker than the tube pecked inches through the jig."""
+        for field, value in (('tube_height', '-1'), ('tube_height', '0'),
+                             ('tube_height', 'nan'), ('thickness', '5'),
+                             ('thickness', '0'), ('thickness', '-0.1')):
+            response = self._post(**{field: value})
+            self.assertEqual(response.status_code, 400,
+                             f'{field}={value} was accepted')
+
+    def test_non_finite_length_is_refused(self):
+        for value in ('nan', '1e309', 'inf'):
+            self.assertEqual(self._post(tube_pattern_length=value).status_code, 400)
+
+    def test_the_response_reports_the_tool_that_will_be_loaded(self):
+        """The drill is substituted server-side; echoing the user's end mill back had the
+        summary chip and the program header disagree about what to put in the spindle."""
+        body = self._post(tube_pattern='holes', tool_diameter='0.25').get_json()
+        self.assertAlmostEqual(body['parameters']['tool_diameter'],
+                               tube_patterns.HOLE_DIAMETER, places=6)
+        self.assertIn('twist drill', body['gcode'])
+
+    def test_the_standing_orientation_uses_its_real_height(self):
+        """2x1 on its 1" face is a 2" TALL tube. Keeping the form's 1.0 put the safe-Z
+        retract 0.75" inside the tube and drilled every hole an inch below the wall."""
+        gcode = self._post(tube_size='2x1-standing').get_json()['gcode']
+        self.assertIn('( Tube height: 2.000" )', gcode)
+
+    def test_an_ignored_dxf_is_reported(self):
+        """Silently discarding an attached file meant downloading a program named after
+        a part that contained none of it."""
+        import io as _io
+        data = {'material': 'aluminum_tube', 'tube_pattern': 'holes',
+                'tube_size': '2x1-flat', 'tube_pattern_length': '12',
+                'tube_height': '1.0', 'thickness': '0.0625',
+                'tool_diameter': '0.157', 'square_end': '0', 'cut_to_length': '0',
+                'file': (_io.BytesIO(b'0\nSECTION\n'), 'my_bracket.dxf')}
+        body = self.client.post('/process', data=data,
+                                content_type='multipart/form-data').get_json()
+        self.assertTrue(any('not used' in w for w in body.get('warnings', [])),
+                        body.get('warnings'))
+
+
     def test_a_1x1_still_generates(self):
         response = self._post(tube_size='1x1')
         self.assertEqual(response.status_code, 200)
@@ -387,6 +619,22 @@ class TestProcessRoute(unittest.TestCase):
         response = self._post(tube_pattern='none')
         self.assertEqual(response.status_code, 400)
         self.assertIn('file', response.get_json()['error'].lower())
+
+
+class TestPostProcessorGuards(unittest.TestCase):
+    """Inputs that used to hang or crash rather than be refused."""
+
+    def test_a_non_positive_tool_is_refused_at_construction(self):
+        """A negative tool made the pocket-clearing loop step OUTWARD every pass, so
+        neither exit condition could fire and the request hung inside shapely."""
+        for bad in (0, -0.25, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                FRCPostProcessor(0.25, bad)
+
+    def test_a_non_positive_thickness_is_refused(self):
+        for bad in (0, -0.1, float('nan')):
+            with self.assertRaises(ValueError):
+                FRCPostProcessor(bad, 0.157)
 
 
 if __name__ == '__main__':

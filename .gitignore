@@ -54,3 +54,8 @@ test_output_*.nc
 
 # ...but never ignore test fixtures/goldens under tests/
 !tests/**
+# ...except compiled bytecode, which the blanket un-ignore above was re-including:
+# `!tests/**` overrides the `__pycache__/` rule at the top of this file, so a .pyc
+# under tests/ was committable (and got committed once).
+tests/__pycache__/
+tests/**/__pycache__/

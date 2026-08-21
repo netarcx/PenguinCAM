@@ -187,6 +187,18 @@ class FRCPostProcessor:
             config = TeamConfig()
         self.config = config
 
+        # A non-positive or non-finite tool makes the pocket-clearing loop step OUTWARD
+        # every pass, so neither of its exit conditions can ever fire and the request
+        # hangs inside shapely forever. Rejected at construction: every toolpath in this
+        # class divides by, offsets by, or steps over the tool, and none of them mean
+        # anything for a tool of zero or negative width.
+        if not math.isfinite(tool_diameter) or tool_diameter <= 0:
+            raise ValueError(f'Tool diameter must be a positive finite number, '
+                             f'got {tool_diameter!r}')
+        if not math.isfinite(material_thickness) or material_thickness <= 0:
+            raise ValueError(f'Material thickness must be a positive finite number, '
+                             f'got {material_thickness!r}')
+
         self.material_thickness = material_thickness
         self.tool_diameter = tool_diameter
         self.tool_radius = tool_diameter / 2
@@ -439,6 +451,13 @@ class FRCPostProcessor:
         if coolant_on:
             gcode.append(coolant_on)
         gcode.append('G4 P3.0  ; 3 second spindle spin-up')
+        # Lift before the next feature moves in XY. The pre-pause retract left Z safe,
+        # but the operator has just had their hands in the envelope to flip or fixture the
+        # work and jogging Z is the normal thing to do while there. Resuming into a
+        # lateral rapid at whatever height they left drags the tool across the part - the
+        # same hazard the program start already guards against.
+        if safe_z is not None:
+            gcode.append(f'G0 Z{safe_z:.4f}  ; Retract before any XY move after the pause')
         gcode.append('')
         # Tool resumes at safe height after the pause; the next feature must rapid down to
         # the clearance plane before its slow plunge feed (see _approach_ramp_start).
@@ -1131,11 +1150,29 @@ class FRCPostProcessor:
         """
         import tube_patterns
 
+        # INCH ONLY. Every constant in tube_patterns is inches, and the tube program
+        # hard-codes G20 while apply_material_preset has already converted the feeds to
+        # mm/min. A metric run therefore produced inch-mode G-code holding millimetre
+        # coordinates: a 610 mm tube became a 610 INCH tube (3657 holes), and a 1.6 mm
+        # wall made the Z offset negative, commanding the drill 0.6" below the top of the
+        # jig on every hole. Refused rather than scaled, because the rest of the tube
+        # G-code path is inch-only too and a partial conversion would be worse.
+        if getattr(self, 'units', 'inch') != 'inch':
+            raise ValueError(
+                f'Pre-designed tube patterns are inch-only, but this job is in '
+                f'{self.units}. Run the tube pattern in inches, or draw the pattern in '
+                f'CAD and use the DXF path.')
+
         kwargs = {'mode': mode}
         if hole_diameter is not None:
             kwargs['hole_diameter'] = hole_diameter
         if spacing is not None:
             kwargs['spacing'] = spacing
+        # The material's own helix entry radius, not the module default: pockets have to
+        # be sized against what this job's cutter will actually sweep going in.
+        kwargs['helix_radius_multiplier'] = getattr(
+            self, 'helix_radius_multiplier',
+            tube_patterns.DEFAULT_HELIX_RADIUS_MULTIPLIER)
         pattern = tube_patterns.generate(face_width, tube_length, self.tool_diameter,
                                          **kwargs)
 
@@ -1146,6 +1183,19 @@ class FRCPostProcessor:
                     f'A drilled hole pattern needs a {wanted:.4f}" twist drill, but the '
                     f'tool is {self.tool_diameter:.4f}". A tool narrower than the hole '
                     f'would mill each hole out sideways instead of drilling it.')
+            # Checking tool_diameter alone was not enough. classify_holes decides
+            # drill-vs-mill from min_millable_hole, which is derived from the tool at
+            # CONSTRUCTION - so a caller that set .tool_diameter afterwards, or a team
+            # config with min_millable_multiplier at 1.0, sailed past the check above and
+            # got helical entries with the header still reading "twist drill". Verify the
+            # decision this pattern actually depends on, not a proxy for it.
+            if not (self.min_millable_hole > wanted):
+                raise ValueError(
+                    f'A drilled hole pattern needs every hole to peck straight down, but '
+                    f'this job would mill a {wanted:.4f}" hole (min_millable_hole is '
+                    f'{self.min_millable_hole:.4f}"). Build the post-processor with the '
+                    f'drill as its tool, and check min_millable_multiplier in the team '
+                    f'config is above 1.0.')
 
         # Stand in for load_dxf's parsed geometry. No perimeter: the tube face IS the
         # boundary and the tube flow passes skip_perimeter=True, so inventing one here
@@ -1154,9 +1204,14 @@ class FRCPostProcessor:
         self.lines = []
         self.arcs = []
         self.polylines = []
+        self.splines = []
         self.layer_data = None
         self.perimeter = None
         self.pockets = [list(ring) for ring in pattern['pockets']]
+        # Errors are per-load, not per-object. Without this, a pattern that failed
+        # validation left its errors behind and the NEXT, perfectly valid pattern loaded
+        # into the same post-processor was refused - citing pockets that no longer exist.
+        self.errors = []
 
         self.classify_holes()
         self._sort_pockets()
@@ -2939,8 +2994,21 @@ class FRCPostProcessor:
         # entirely (a zero-radius arc I0 J0 is degenerate and errors on many controllers).
         pure_drill = final_toolpath_radius <= self.hole_size_tolerance
 
-        if pure_drill:
+        if pure_drill and final_depth <= 0:
+            # A twist drill cuts a CONE, not a flat bottom. Stopping the tip at cut_depth
+            # leaves the hole full diameter only where the point has fully emerged, so a
+            # 0.201 in hole through a 1/16 in wall exited as a 0.027 in pinhole - nothing
+            # a #10 screw could pass, which is the whole purpose of the pattern.
+            # _generate_drill_gcode has always done this; this path had not, and this path
+            # is the one the tube patterns use.
+            point = self.drill_point_length(diameter)
+            final_depth = final_depth - point
             gcode.append(f"(Peck drill straight down - hole is tool-sized, no lateral clearing)")
+            gcode.append(f"(Through hole: plus {point:.4f} in so the point clears "
+                         f"and the exit is full diameter)")
+        elif pure_drill:
+            gcode.append(f"(Peck drill straight down - hole is tool-sized, no lateral clearing)")
+            gcode.append(f"(Blind hole: depth measured to the drill tip)")
         else:
             gcode.append(f"(Peck drill at center, then spiral clear to {diameter:.3f}\" diameter)")
 
@@ -5162,6 +5230,46 @@ class FRCPostProcessor:
         Returns:
             PostProcessorResult with gcode string and stats
         """
+        # Squaring the end and cutting to length are MILLING operations: they feed the
+        # tool sideways, full width, a quarter inch deep. A drilled hole pattern has a
+        # twist drill in the spindle and there is no tool change in this program, so the
+        # combination fed a 0.201 in drill laterally through the wall 316 times. A drill
+        # has no peripheral cutting edge and no radial rigidity; it snaps.
+        if getattr(self, 'tube_pattern_mode', None) == 'holes' and (square_end or cut_to_length):
+            wanted = []
+            if square_end:
+                wanted.append('squaring the end')
+            if cut_to_length:
+                wanted.append('cutting to length')
+            return PostProcessorResult(success=False, errors=[
+                f"Cannot combine a drilled hole pattern with {' and '.join(wanted)}: "
+                f"those are milling operations and this program has a "
+                f"{self.tool_diameter:.3f} in twist drill loaded, with no tool change. "
+                f"Run the facing as a separate tube-facing job with an end mill."])
+
+        # A generated pattern never goes through transform_coordinates, which is where a
+        # DXF part gets checked against the machine. So the check was simply absent for
+        # the path most likely to need it: a tube length is typed, not measured, and the
+        # advertised 24" tube is longer than the Y travel of the machine this was written
+        # for. The program ran off the end and the operator found out at the soft limit.
+        if getattr(self, 'tube_pattern_mode', None) is not None:
+            span_x = tube_width or 0.0
+            span_y = tube_length or 0.0
+            x_max = self.config.machine_x_max
+            y_max = self.config.machine_y_max
+            if span_x > x_max or span_y > y_max:
+                return PostProcessorResult(success=False, errors=[
+                    f'A {span_x:.2f}" x {span_y:.2f}" tube does not fit the machine '
+                    f'({x_max:.1f}" x {y_max:.1f}" of travel). Machine it in shorter '
+                    f'sections, or use a longer-travel machine.'])
+
+        # Cutting to length needs to know the length. Without this the cut plane was
+        # computed as `None + offset` and the job died with a TypeError.
+        if cut_to_length and not tube_length:
+            return PostProcessorResult(success=False, errors=[
+                'Cutting to length needs a tube length; none was given or it could not '
+                'be measured from the drawing.'])
+
         # Check for validation errors first (both faces, in two-face mode).
         combined_errors = list(self.errors)
         if second_face_pp is not None:
@@ -5242,9 +5350,13 @@ class FRCPostProcessor:
 
         # Determine tube width for facing operations
         if tube_width is None:
-            # Calculate from DXF geometry if not provided
-            tube_width = 1.0  # Default
-            if square_end:
+            # Measured from the geometry, ALWAYS - not only when squaring. Face 2 is
+            # mirrored with X_new = tube_width - X_old, so a guessed width does not make
+            # the mirror approximate, it puts every face-2 feature at the wrong X. With
+            # the old default of 1.0 a 2" tube machined face 2 up to 1" off the near
+            # edge - into the jig.
+            tube_width = None
+            if True:
                 all_x_coords = []
                 if hasattr(self, 'holes'):
                     for hole in self.holes:
@@ -5259,6 +5371,12 @@ class FRCPostProcessor:
                     calculated_width = max(all_x_coords) - min(all_x_coords)
                     if calculated_width > 0.1:  # Only use if reasonable
                         tube_width = calculated_width
+            if tube_width is None:
+                return PostProcessorResult(success=False, errors=[
+                    'Could not measure the tube width from the drawing, and face 2 is '
+                    'machined by mirroring about it. Pass the tube width explicitly '
+                    '(--tube-width) rather than have every face-2 feature land at the '
+                    'wrong X.'])
 
         # === PHASE 1: FIRST FACE (SQUARE + MACHINE PATTERN) ===
         gcode.append('( === PHASE 1: FIRST FACE === )')
@@ -5288,7 +5406,7 @@ class FRCPostProcessor:
         gcode.append('( Machine pattern on first face )')
         gcode.append('( Machining holes and pockets only - perimeter is tube face )')
         z_offset = tube_height - self.material_thickness
-        gcode.append(f'( Z offset: +{z_offset:.3f}", tube_height minus wall_thickness )')
+        gcode.append(f'( Z offset: {z_offset:+.3f}", tube_height minus wall_thickness )')
         # Y offset for first face: matches facing offset so holes align with face
         y_offset_first_face = self.tube_facing_offset if square_end else 0.0
         gcode.append(f'( Y offset: +{y_offset_first_face:.3f}", rough end will be milled back )')
@@ -5346,7 +5464,7 @@ class FRCPostProcessor:
             gcode.append('( Machine pattern on second face - X-mirrored )')
             gcode.append('( Pattern is X-mirrored, tube flipped end-for-end, so holes align opposite )')
         z_offset = tube_height - self.material_thickness
-        gcode.append(f'( Z offset: +{z_offset:.3f}", tube_height minus wall_thickness )')
+        gcode.append(f'( Z offset: {z_offset:+.3f}", tube_height minus wall_thickness )')
         # Y offset: 0 for Phase 2 - work zero is re-established after flip, face is at Y=0"
         y_offset_phase2 = 0.0
         gcode.append(f'( Y offset: {y_offset_phase2:.4f}", face at Y=0, no offset needed )')

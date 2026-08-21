@@ -37,11 +37,17 @@ HOLE_SPACING = 0.5
 #: the outer rows an inch apart with a third row down the centreline.
 ROW_INSET = 0.5
 
-#: A face narrower than this gets a single centred row. Three rows need 2 * ROW_INSET of
-#: face plus material outside them; on a 1" face the outer two would sit on the corner
-#: radii of the extrusion, where a drill wanders and a bolt head has nothing flat to sit
-#: on - so a 1" face gets one hole per column, down the centre.
-MULTI_ROW_MIN_WIDTH = 1.5
+#: Material left between a hole edge and a pocket edge, and between adjacent pockets.
+#: This is the truss web - the part actually carrying load - so it is a floor, not a
+#: target: pockets shrink to preserve it and are dropped entirely if they cannot.
+MIN_WEB = 0.125
+
+#: A face narrower than this gets a single centred row. DERIVED, not chosen: three rows
+#: only become web-legal once the gap between adjacent hole EDGES reaches MIN_WEB, which
+#: needs 2 * (ROW_INSET + HOLE_DIAMETER + MIN_WEB) of face. It was previously a round 1.5",
+#: which put three rows on a 1.5" face with 0.049" of metal between them - a knife edge
+#: that tears out of 1/16" wall. Reachable: _parse_tube_size accepts '1.5x1.5'.
+MULTI_ROW_MIN_WIDTH = 2 * (ROW_INSET + HOLE_DIAMETER + MIN_WEB)
 
 #: Material left along each long edge of the face when lightening. The corner radius of
 #: the extrusion lives here, and it is the stiffest part of the section - cutting into it
@@ -52,10 +58,6 @@ LIGHTENING_EDGE_MARGIN = 0.25
 #: Holes closer than this to a cut end tear out rather than cut cleanly.
 MIN_END_MARGIN = 0.375
 
-#: Material left between a hole edge and a pocket edge, and between adjacent pockets.
-#: This is the truss web - the part actually carrying load - so it is a floor, not a
-#: target: pockets shrink to preserve it and are dropped entirely if they cannot.
-MIN_WEB = 0.125
 
 #: Y-extent of one truss cell (pocket + following web). Four hole pitches, so the truss
 #: stays in step with the hole grid however long the tube is.
@@ -67,20 +69,33 @@ MIN_WEB = 0.125
 #: about as long as the triangle stays a sensible shape on a 2x1.
 TRUSS_CELL = 2.0
 
-#: Clearance the tool needs INSIDE a pocket beyond its own radius. A pocket whose
-#: inscribed circle only just equals the cutter cannot be cleared - the toolpath
-#: degenerates to a point or vanishes when offset inward - so such pockets are dropped
-#: with a warning rather than emitted as geometry the post-processor will silently skip.
+#: Clearance the tool needs INSIDE a pocket beyond the radius it actually sweeps. A
+#: pocket whose inscribed circle only just equals that cannot be cleared - the toolpath
+#: degenerates or vanishes when offset inward - so such pockets are dropped with a
+#: warning rather than emitted as geometry the post-processor will silently skip.
 POCKET_TOOL_CLEARANCE = 0.01
 
+#: The post-processor does not enter a pocket with the tool alone: it helixes down around
+#: the centroid, sweeping tool_radius * (1 + helix_radius_multiplier). Sizing pockets
+#: against the bare radius let a 3/8" cutter on a 1" face remove metal from X 0.132 to
+#: X 0.788 of a pocket bounded at 0.25..0.75 - straight through the edge margin that
+#: exists to protect the extrusion's corner. Default matches the post-processor's own
+#: default; callers pass the material's real value.
+DEFAULT_HELIX_RADIUS_MULTIPLIER = 0.75
 
-def hole_rows(face_width):
+
+def hole_rows(face_width, hole_diameter=HOLE_DIAMETER, web=MIN_WEB):
     """X positions of the hole rows across a face of this width.
 
     A 2" face carries three holes per column - the two outer rows an inch apart, plus one
-    on the centreline. A 1" face carries one, centred.
+    on the centreline. A 1" face carries one, centred. A face too narrow to hold even one
+    hole with `web` of metal on each side carries none: returning a row anyway put a
+    0.201" hole in the middle of a 0.15" face, which is not a hole, it is a slot through
+    the side of the tube.
     """
-    if face_width >= MULTI_ROW_MIN_WIDTH:
+    if face_width < hole_diameter + 2 * web:
+        return []
+    if face_width >= 2 * (ROW_INSET + hole_diameter + web):
         return [ROW_INSET, face_width / 2.0, face_width - ROW_INSET]
     return [face_width / 2.0]
 
@@ -113,7 +128,8 @@ def _triangle_inradius(a, b):
 
 
 def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUSS_CELL,
-                  edge_margin=LIGHTENING_EDGE_MARGIN, end_margin=MIN_END_MARGIN):
+                  edge_margin=LIGHTENING_EDGE_MARGIN, end_margin=MIN_END_MARGIN,
+                  helix_radius_multiplier=DEFAULT_HELIX_RADIUS_MULTIPLIER):
     """Right-triangle lightening pockets down the face, as a truss.
 
     A lightening pattern carries no holes, so the pockets get the whole face rather than
@@ -153,12 +169,27 @@ def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUS
 
     leg_y = cell - web              # the web is the gap to the next cell
     inradius = _triangle_inradius(band, leg_y)
-    needed = tool_diameter / 2.0 + POCKET_TOOL_CLEARANCE
+    # Sized against what the cutter actually SWEEPS on the way in, not its bare radius.
+    sweep = (tool_diameter / 2.0) * (1.0 + helix_radius_multiplier)
+    needed = sweep + POCKET_TOOL_CLEARANCE
     if inradius < needed:
         warnings.append(
-            f'Lightening pockets skipped: a {tool_diameter:.3f}" tool does not fit the '
-            f'{band:.3f}" x {leg_y:.3f}" triangle (needs {needed * 2:.3f}" of room, '
-            f'the triangle holds {inradius * 2:.3f}"). Use a smaller tool.')
+            f'Lightening pockets skipped: a {tool_diameter:.3f}" tool needs '
+            f'{needed * 2:.3f}" of room to helix into the {band:.3f}" x {leg_y:.3f}" '
+            f'triangle, which holds {inradius * 2:.3f}". Use a smaller tool.')
+        return [], warnings
+
+    # The inradius says a circle fits; it does not say the CLEARED path survives being
+    # offset inward by the tool radius. The post-processor drops a pocket whose inward
+    # offset is smaller than 0.001 sq in, and it does so after reporting the pattern as
+    # loaded - which produced a program claiming pockets and cutting none. Test the same
+    # thing here, where it can still be reported as a warning.
+    from shapely.geometry import Polygon as _Poly
+    probe = [(band_lo, 0.0), (band_hi, 0.0), (band_lo, leg_y)]
+    if _Poly(probe).buffer(-tool_diameter / 2.0).area <= 0.001:
+        warnings.append(
+            f'Lightening pockets skipped: a {tool_diameter:.3f}" tool leaves nothing to '
+            f'clear inside the {band:.3f}" x {leg_y:.3f}" triangle. Use a smaller tool.')
         return [], warnings
 
     pockets = []
@@ -207,7 +238,8 @@ MODES = ('holes', 'lightening')
 
 
 def generate(face_width, tube_length, tool_diameter, mode='holes',
-             hole_diameter=HOLE_DIAMETER, spacing=HOLE_SPACING):
+             hole_diameter=HOLE_DIAMETER, spacing=HOLE_SPACING,
+             helix_radius_multiplier=DEFAULT_HELIX_RADIUS_MULTIPLIER):
     """Build a standard tube pattern.
 
     mode='holes'      - mounting holes only, drilled. Three per column on a 2" face, one
@@ -222,10 +254,17 @@ def generate(face_width, tube_length, tool_diameter, mode='holes',
     """
     if mode not in MODES:
         raise ValueError(f'mode must be one of {MODES}, got {mode!r}')
-    if tube_length <= 0:
-        raise ValueError('Tube length must be positive')
-    if face_width <= 0:
-        raise ValueError('Face width must be positive')
+    # Written as `not (x > 0)` rather than `x <= 0` so NaN is REJECTED. NaN compares
+    # False against everything, so it slid through every guard here and came out the far
+    # end as NaN hole centres and `Xnan` in the G-code.
+    if not (tube_length > 0) or math.isinf(tube_length):
+        raise ValueError(f'Tube length must be a positive finite number, got {tube_length!r}')
+    if not (face_width > 0) or math.isinf(face_width):
+        raise ValueError(f'Face width must be a positive finite number, got {face_width!r}')
+    if not (tool_diameter > 0) or math.isinf(tool_diameter):
+        raise ValueError(f'Tool diameter must be a positive finite number, got {tool_diameter!r}')
+    if not (spacing > 0):
+        raise ValueError(f'Hole spacing must be positive, got {spacing!r}')
 
     warnings = []
     circles = []
@@ -234,7 +273,11 @@ def generate(face_width, tube_length, tool_diameter, mode='holes',
     ys = []
 
     if mode == 'holes':
-        rows = hole_rows(face_width)
+        rows = hole_rows(face_width, hole_diameter=hole_diameter)
+        if not rows:
+            warnings.append(
+                f'A {face_width:.3f}" face is too narrow for a {hole_diameter:.3f}" hole '
+                f'with {MIN_WEB:.3f}" of metal each side; no holes generated.')
         ys = hole_run(tube_length, spacing=spacing)
         if not ys:
             warnings.append(
@@ -247,7 +290,8 @@ def generate(face_width, tube_length, tool_diameter, mode='holes',
                                 'diameter': hole_diameter})
     else:
         pocket_rings, pocket_warnings = truss_pockets(
-            face_width, tube_length, tool_diameter)
+            face_width, tube_length, tool_diameter,
+            helix_radius_multiplier=helix_radius_multiplier)
         warnings.extend(pocket_warnings)
 
     return {'circles': circles, 'pockets': pocket_rings, 'warnings': warnings,

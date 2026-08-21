@@ -15,6 +15,7 @@ import shutil
 import traceback
 from pathlib import Path
 import json
+import math
 import base64
 import secrets
 import re
@@ -266,6 +267,11 @@ else:
     auth = DummyAuth()
 
 # Initialize rate limiting
+#: Tube sizes the pre-designed patterns accept. A whitelist, because
+#: _parse_tube_size answers "1x1" for anything it does not recognise, which turned a
+#: typo into a silently wrong program rather than an error.
+VALID_TUBE_SIZES = ('1x1', '2x1', '2x1-flat', '2x1-standing', '1.5x1.5', '2x2')
+
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -759,6 +765,7 @@ def _detect_tube_dims(dxf_path, rotation):
 def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
+        ignored_upload = False
         # A pre-designed tube pattern is generated, not drawn, so that path has no DXF to
         # upload. Decided before the upload checks below, which otherwise reject the
         # request before any of the tube parameters are even read.
@@ -810,6 +817,25 @@ def process_file():
             pattern_length = float(request.form.get('tube_pattern_length', 0) or 0)
             if use_tube_pattern and pattern_mode not in ('holes', 'lightening'):
                 return jsonify({'error': f'Unknown tube pattern {pattern_mode!r}'}), 400
+            # Whitelisted, not parsed leniently. _parse_tube_size answers "1x1" for
+            # anything it does not recognise, so a typo, an autocorrected unicode
+            # multiplication sign, or a stale client turned a 2x1 job into a 1x1 job -
+            # 23 holes down the centre of a 2" face instead of 69 in three rows, with no
+            # error anywhere. It also reached the output filename, where a long value was
+            # an unhandled ENAMETOOLONG 500.
+            if use_tube_pattern and tube_size not in VALID_TUBE_SIZES:
+                return jsonify({'error': f'Unknown tube size {tube_size!r}. Expected one '
+                                         f'of: {", ".join(sorted(VALID_TUBE_SIZES))}'}), 400
+            # Finite and physical. These reach Z arithmetic directly: a negative height
+            # put the whole program - including its "safe" retract - below the work zero,
+            # and a wall thicker than the tube pecked four inches through the jig.
+            if not math.isfinite(tube_height) or not 0 < tube_height <= 12:
+                return jsonify({'error': 'Tube height must be between 0 and 12 inches'}), 400
+            if not math.isfinite(thickness) or not 0 < thickness < tube_height / 2:
+                return jsonify({'error': 'Wall thickness must be positive and less than '
+                                         'half the tube height'}), 400
+            if use_tube_pattern and not math.isfinite(pattern_length):
+                return jsonify({'error': 'Tube length must be a finite number'}), 400
             if use_tube_pattern and pattern_length <= 0:
                 return jsonify({'error': 'Tube length is required for a pre-designed '
                                          'pattern - it decides how many holes fit'}), 400
@@ -817,9 +843,16 @@ def process_file():
             # Standard mode parameters
             tab_spacing = float(request.form.get('tab_spacing', 6.0))
 
-        # Save uploaded file
+        # Save uploaded file. Not in pattern mode: the geometry is generated, so a DXF
+        # posted alongside it is never read, and saving it only made the ignoring harder
+        # to notice.
         input_path = None
-        if file is not None and file.filename:
+        if use_tube_pattern:
+            if (file is not None and file.filename) or (
+                    request.files.get('file_face2') is not None
+                    and request.files['file_face2'].filename):
+                ignored_upload = True
+        elif file is not None and file.filename:
             input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
             file.save(input_path)
 
@@ -829,7 +862,16 @@ def process_file():
         if use_tube_pattern:
             # The tube is described, not measured: its face width follows from the size
             # and its length is what the operator typed.
-            tube_width, _ = FRCPostProcessor._parse_tube_size(None, tube_size)
+            # Take BOTH dimensions from the size. Keeping the form's tube_height meant
+            # "2x1 machining the 1in face" ran with a 1in height on a 2in tall tube, so
+            # the safe-Z retract (tube_height + 0.25) landed 0.75in INSIDE the tube and
+            # every hole was drilled an inch below the wall. The CLI already derived it;
+            # only this path did not.
+            tube_width, size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
+            if abs(tube_height - size_height) > 1e-6:
+                log(f"Tube height {tube_height:.3f}\" does not match {tube_size}; "
+                    f"using {size_height:.3f}\" from the tube size")
+                tube_height = size_height
             tube_length = pattern_length
             log(f"\U0001f4d0 Pre-designed {tube_size} pattern on a {tube_length:.3f}\" tube "
                 f"(face {tube_width:.3f}\")")
@@ -843,7 +885,7 @@ def process_file():
             # Use Onshape-derived name
             base_name = suggested_filename
             log(f"📝 Using Onshape filename base: {base_name}")
-        elif file is not None and file.filename:
+        elif file is not None and file.filename and not use_tube_pattern:
             # Use DXF filename
             base_name = Path(file.filename).stem
             log(f"Using DXF filename base: {base_name}")
@@ -907,6 +949,18 @@ def process_file():
                     pp.apply_material_preset(material, machine_id)
                     if user_name:
                         pp.user_name = user_name
+                    # Checked here, before load_tube_pattern, because generating and
+                    # route-optimising thousands of holes is the expensive part: a
+                    # 2000" tube spent 84 seconds and produced 13.7 MB before anything
+                    # downstream would have rejected it. The post-processor enforces the
+                    # same bound again; this one just refuses early and cheaply.
+                    if (tube_length > team_config.machine_y_max
+                            or tube_width > team_config.machine_x_max):
+                        return jsonify({'error': (
+                            f'A {tube_width:.1f}" x {tube_length:.1f}" tube does not fit '
+                            f'the machine ({team_config.machine_x_max:.1f}" x '
+                            f'{team_config.machine_y_max:.1f}" of travel). Cut the tube '
+                            f'shorter, or machine it in two setups.')}), 400
                     pattern_warnings = pp.load_tube_pattern(
                         tube_width, tube_length, mode=pattern_mode)
                 else:
@@ -993,6 +1047,11 @@ def process_file():
             actual_filename = result.filename
             output_token = file_token_manager.register_file(output_path, actual_filename)
 
+        except ValueError:
+            # A rejected input, not a crash. This handler used to swallow every
+            # ValueError into a blanket 500, which hid the post-processor's own
+            # well-worded validation messages behind "Post-processor API error".
+            raise
         except Exception as e:
             log(f"❌ Post-processor API error: {e}")
             log(traceback.format_exc())
@@ -1052,11 +1111,27 @@ def process_file():
                 'pockets': [[[pt[0], pt[1]] for pt in ring] for ring in pp.pockets],
             }
 
+        # Report the tool that was USED. A drilled pattern substitutes a 0.201" twist
+        # drill for whatever was in the tool field, and echoing the user's value back had
+        # the summary chip and the program header disagree about what to load.
+        if is_aluminum_tube and use_tube_pattern and pattern_mode == 'holes':
+            parameters['tool_diameter'] = pattern_tool
+        if is_aluminum_tube and use_tube_pattern:
+            parameters['tube_size'] = tube_size
+            parameters['tube_pattern'] = pattern_mode
+            parameters['tube_length'] = tube_length
+
         # Pattern warnings are advice, not failures - a pocket dropped because the tool
         # will not fit still leaves a machinable program, but the operator has to be told
         # that the lightening they asked for is not in the file.
         if is_aluminum_tube and pattern_warnings:
             response_data['warnings'] = list(pattern_warnings)
+        if ignored_upload:
+            # Discarding a file the user deliberately attached, silently, meant they
+            # downloaded a program named after their part that contained none of it.
+            response_data.setdefault('warnings', []).append(
+                'The DXF you added was not used: a pre-designed pattern is generated '
+                'from the tube size and length. Choose "From my DXF" to machine it.')
 
         # Add cycle time if available
         if 'cycle_time_display' in result.stats:
