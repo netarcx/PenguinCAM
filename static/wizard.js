@@ -1852,9 +1852,32 @@
     });
   }
 
+  /* Take whatever the controls ACTUALLY show and make that the state, before anything is
+     drawn from it. Firefox restores radios, selects and checkboxes across a soft reload,
+     so a page that came back with "Tubing" checked was read by the app as 2D: the radio
+     said Tubing while the tube fields stayed hidden, which looks exactly like "it
+     defaults to tubing and half the boxes are missing". autocomplete="off" in the markup
+     stops the restore; this stops it MATTERING, for bfcache and session restore too.
+     Text fields need no help - bindLengthField already commits whatever they render with. */
+  function adoptControlsIntoState() {
+    var modeRadio = document.querySelector('input[name="mode"]:checked');
+    if (modeRadio && !modeRadio.disabled) state.mode = modeRadio.value;
+
+    var sizeSel = $('#f-tube-size');
+    if (sizeSel && sizeSel.value) state.tubeSize = sizeSel.value;
+    var patSel = $('#f-tube-pattern');
+    if (patSel && patSel.value) state.tubePattern = patSel.value;
+    var matSel = $('#f-material');
+    if (matSel && matSel.value && state.mode !== 'tubing') state.material = matSel.value;
+
+    var sq = $('#f-square-end'); if (sq) state.squareEnd = sq.checked;
+    var ctl = $('#f-cut-to-length'); if (ctl) state.cutToLength = ctl.checked;
+  }
+
   /* One place that makes the DOM agree with `state`. Called at startup, and safe to call
      again: every function in it is idempotent and reads state rather than toggling it. */
   function syncUIFromState() {
+    adoptControlsIntoState();   // the controls are the truth at startup, not the defaults
     applyModeUI();          // mode-dependent fields, labels, and the tube/multi-tool panels
     updatePartsModeNote();
     updateSummary();

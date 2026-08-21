@@ -58,7 +58,7 @@
                 {% if machines and machines|length > 1 %}
                 <label class="field">
                     <span>Machine</span>
-                    <select id="f-machine">
+                    <select id="f-machine" autocomplete="off">
                         {% for mid, m in machines.items() %}
                         <option value="{{ mid }}" {% if mid == current_machine_id %}selected{% endif %}>{{ m.name }}</option>
                         {% endfor %}
@@ -68,13 +68,13 @@
 
                 <fieldset class="field">
                     <legend>Mode</legend>
-                    <label class="radio"><input type="radio" name="mode" value="2d" checked> 2D — flat plate (one or more parts)</label>
-                    <label class="radio" id="opt-mode-25d"><input type="radio" name="mode" value="2.5d"> 2.5D — derive thickness from CAD (single part)</label>
-                    <label class="radio"><input type="radio" name="mode" value="tubing"> Tubing — machine both faces of a tube</label>
+                    <label class="radio"><input type="radio" name="mode" value="2d" autocomplete="off" checked> 2D — flat plate (one or more parts)</label>
+                    <label class="radio" id="opt-mode-25d"><input type="radio" name="mode" value="2.5d" autocomplete="off"> 2.5D — derive thickness from CAD (single part)</label>
+                    <label class="radio"><input type="radio" name="mode" value="tubing" autocomplete="off"> Tubing — machine both faces of a tube</label>
                 </fieldset>
 
                 <label class="field inline" id="multitool-toggle">
-                    <input type="checkbox" id="f-multitool">
+                    <input type="checkbox" id="f-multitool" autocomplete="off">
                     <span>Use several tools &mdash; plan an operation list per part</span>
                 </label>
                 <p class="hint" id="multitool-note" style="display:none">
@@ -90,7 +90,7 @@
 
                 <label class="field" id="material-field">
                     <span>Material</span>
-                    <select id="f-material">
+                    <select id="f-material" autocomplete="off">
                         {% for mid, m in materials.items() if mid != 'aluminum_tube' %}
                         <option value="{{ mid }}" {% if mid == 'plywood' %}selected{% endif %}>{{ m.name }}</option>
                         {% endfor %}
@@ -115,7 +115,7 @@
                     </label>
                     <label class="field">
                         <span>Tube size</span>
-                        <select id="f-tube-size">
+                        <select id="f-tube-size" autocomplete="off">
                             <option value="2x1-flat">2x1 - machining the 2" face</option>
                             <option value="2x1-standing">2x1 - machining the 1" face</option>
                             <option value="1x1">1x1</option>
@@ -123,7 +123,7 @@
                     </label>
                     <label class="field">
                         <span>Pattern</span>
-                        <select id="f-tube-pattern">
+                        <select id="f-tube-pattern" autocomplete="off">
                             <option value="none">From my DXF</option>
                             <option value="holes">Mounting holes - drilled, #10 clearance on 1/2" centres</option>
                             <option value="lightening">Lightening - triangular truss pockets</option>
@@ -141,11 +141,11 @@
                         <p class="hint" id="tube-pattern-note"></p>
                     </div>
                     <label class="field inline">
-                        <input type="checkbox" id="f-square-end">
+                        <input type="checkbox" id="f-square-end" autocomplete="off">
                         <span>Square the tube end before machining</span>
                     </label>
                     <label class="field inline">
-                        <input type="checkbox" id="f-cut-to-length">
+                        <input type="checkbox" id="f-cut-to-length" autocomplete="off">
                         <span>Machine the far end to length</span>
                     </label>
                 </div>
@@ -264,7 +264,7 @@
                         <!-- The clearing toolpath fills a pocket completely, so on a tube
                              it hides the part it is cutting. Turning it off leaves the
                              model on its own. -->
-                        <label class="speed"><input type="checkbox" id="show-toolpath" checked>
+                        <label class="speed"><input type="checkbox" id="show-toolpath" autocomplete="off" checked>
                             Toolpath</label>
                     </div>
                     <p class="hint">Origin (0,0,0) = lower-left, sacrifice board. Drag to orbit, scroll to zoom.</p>
