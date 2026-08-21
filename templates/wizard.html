@@ -255,6 +255,11 @@
                             </select>
                         </label>
                         <button type="button" class="btn small" id="reset-view">Reset view</button>
+                        <!-- The clearing toolpath fills a pocket completely, so on a tube
+                             it hides the part it is cutting. Turning it off leaves the
+                             model on its own. -->
+                        <label class="speed"><input type="checkbox" id="show-toolpath" checked>
+                            Toolpath</label>
                     </div>
                     <p class="hint">Origin (0,0,0) = lower-left, sacrifice board. Drag to orbit, scroll to zoom.</p>
                 </div>

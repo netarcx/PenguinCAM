@@ -1445,6 +1445,7 @@
         playbackControls: $('#playback-controls'), playButton: $('#play-button'),
         restartButton: $('#restart-button'), speedSelect: $('#playback-speed'),
         resetButton: $('#reset-view'), emptyState: $('#viewer-empty'),
+        showToolpath: $('#show-toolpath'),
       });
     }
     var W, D, stockH;

@@ -97,6 +97,13 @@
   };
 
   GcodeViewer.prototype._bindControls = function () {
+    var self = this;
+    if (this.els.showToolpath) {
+      this.toolpathVisible = this.els.showToolpath.checked !== false;
+      this.els.showToolpath.addEventListener('change', function () {
+        self.setToolpathVisible(this.checked);
+      });
+    }
     var self = this, e = this.els;
     if (e.scrubber) e.scrubber.addEventListener('input', function (ev) { self._update(parseInt(ev.target.value, 10) || 0); });
     if (e.playButton) e.playButton.addEventListener('click', function () { self.isPlaying ? self._stop() : self._start(); });
@@ -117,6 +124,12 @@
     var lines = gcode.split('\n');
     var moves = [];
     var cx = 0, cy = 0, cz = 0;
+    // Which side of the tube the machine is working on. A tube program cuts face 1,
+    // pauses for the operator to flip the tube, then cuts face 2 at the SAME
+    // coordinates - the part moved, not the tool. Drawing both literally put two
+    // mirrored patterns on top of each other on one wall, which is what made the truss
+    // look like overlapping triangles with its mirror image missing.
+    var phase = 1;
     var b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
     function track(x, y, z) {
       if (x < b.minX) b.minX = x; if (x > b.maxX) b.maxX = x;
@@ -125,6 +138,7 @@
     }
     for (var li = 0; li < lines.length; li++) {
       var t = lines[li].trim();
+      if (t.indexOf('PHASE 2') >= 0) phase = 2;
       if (!t || t.charAt(0) === '(' || t.charAt(0) === ';') continue;
       var gm = t.match(/^(G[0-3])\b/);
       if (!gm) continue;
@@ -151,14 +165,14 @@
             var ang = sa + sweep * tt;
             var px = ccx + r * Math.cos(ang), py = ccy + r * Math.sin(ang), pz = sz + zStep * (s + 1);
             if (isNaN(px) || isNaN(py) || isNaN(pz)) continue;
-            moves.push({ type: type, from: { x: cx, y: cy, z: cz }, to: { x: px, y: py, z: pz }, line: t });
+            moves.push({ type: type, phase: phase, from: { x: cx, y: cy, z: cz }, to: { x: px, y: py, z: pz }, line: t });
             cx = px; cy = py; cz = pz; track(cx, cy, cz);
           }
           continue;
         }
       }
       if (nx !== cx || ny !== cy || nz !== cz) {
-        moves.push({ type: type, from: { x: cx, y: cy, z: cz }, to: { x: nx, y: ny, z: nz }, line: t });
+        moves.push({ type: type, phase: phase, from: { x: cx, y: cy, z: cz }, to: { x: nx, y: ny, z: nz }, line: t });
         cx = nx; cy = ny; cz = nz; track(cx, cy, cz);
       }
     }
@@ -186,49 +200,69 @@
     var wall = Math.min(tube.wall || 0.0625, H / 2);
     var group = new THREE.Group();
 
-    var face = new THREE.Shape();
-    face.moveTo(0, 0); face.lineTo(W, 0); face.lineTo(W, L); face.lineTo(0, L);
-    face.lineTo(0, 0);
+    // BOTH machined walls, because both get cut. Face 2 carries the same pattern
+    // mirrored in X - the operator flips the tube and the machine repeats the program -
+    // so modelling only the near wall left the far half of the truss missing from the
+    // part, which is precisely what it looks like on the real tube if you only cut one
+    // side.
+    function wallShape(mirror) {
+      var shape = new THREE.Shape();
+      shape.moveTo(0, 0); shape.lineTo(W, 0); shape.lineTo(W, L); shape.lineTo(0, L);
+      shape.lineTo(0, 0);
+      var mx = function (x) { return mirror ? W - x : x; };
+      (tube.holes || []).forEach(function (h) {
+        var path = new THREE.Path();
+        path.absarc(mx(h.x), h.y, h.d / 2, 0, Math.PI * 2, true);
+        shape.holes.push(path);
+      });
+      (tube.pockets || []).forEach(function (ring) {
+        if (!ring || ring.length < 3) return;
+        var path = new THREE.Path();
+        path.moveTo(mx(ring[0][0]), ring[0][1]);
+        for (var i = 1; i < ring.length; i++) path.lineTo(mx(ring[i][0]), ring[i][1]);
+        path.lineTo(mx(ring[0][0]), ring[0][1]);
+        shape.holes.push(path);
+      });
+      return shape;
+    }
 
-    (tube.holes || []).forEach(function (h) {
-      var path = new THREE.Path();
-      path.absarc(h.x, h.y, h.d / 2, 0, Math.PI * 2, true);
-      face.holes.push(path);
+    // Two tones. With one material you look down through a cut and see an identically
+    // lit surface behind it, so the hole reads as solid metal and the pattern is
+    // invisible - the model was correct and looked like an uncut bar. The far side is
+    // darker, so a cut reads as depth.
+    var nearMetal = new THREE.MeshStandardMaterial({
+      color: 0xc3cedd, metalness: 0.6, roughness: 0.38, side: THREE.DoubleSide
     });
-    (tube.pockets || []).forEach(function (ring) {
-      if (!ring || ring.length < 3) return;
-      var path = new THREE.Path();
-      path.moveTo(ring[0][0], ring[0][1]);
-      for (var i = 1; i < ring.length; i++) path.lineTo(ring[i][0], ring[i][1]);
-      path.lineTo(ring[0][0], ring[0][1]);
-      face.holes.push(path);
+    var farMetal = new THREE.MeshStandardMaterial({
+      color: 0x5a6675, metalness: 0.5, roughness: 0.6, side: THREE.DoubleSide
     });
 
-    var metal = new THREE.MeshStandardMaterial({
-      color: 0xb9c4d4, metalness: 0.65, roughness: 0.35, side: THREE.DoubleSide
-    });
+    function machinedWall(mirror, y, material) {
+      var mesh = new THREE.Mesh(
+        new THREE.ExtrudeGeometry(wallShape(mirror), { depth: wall, bevelEnabled: false }),
+        material);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = y;
+      return mesh;
+    }
 
-    var top = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(face, { depth: wall, bevelEnabled: false }), metal);
-    top.rotation.x = -Math.PI / 2;
-    top.position.y = H - wall;      // sit the machined wall at the top of the tube
-    group.add(top);
+    group.add(machinedWall(false, H - wall, nearMetal));   // face 1, the near wall
+    group.add(machinedWall(true, 0, farMetal));            // face 2, mirrored
 
-    // The other three walls. Plain boxes: nothing is cut in them, and drawing them keeps
-    // the section reading as a tube rather than a plate floating in space.
+    // The two unmachined side walls. Plain boxes: nothing is cut in them, and drawing
+    // them keeps the section reading as a tube rather than two loose plates.
     function slab(w, h, d, x, y, z) {
-      var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), metal);
+      var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), farMetal);
       m.position.set(x, y, z);
       return m;
     }
-    group.add(slab(W, wall, L, W / 2, wall / 2, -L / 2));                       // bottom
-    group.add(slab(wall, H - 2 * wall, L, wall / 2, H / 2, -L / 2));            // left
-    group.add(slab(wall, H - 2 * wall, L, W - wall / 2, H / 2, -L / 2));        // right
+    group.add(slab(wall, H - 2 * wall, L, wall / 2, H / 2, -L / 2));
+    group.add(slab(wall, H - 2 * wall, L, W - wall / 2, H / 2, -L / 2));
 
     // A soft outline makes the edges legible against the toolpath colours.
     var edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, L)),
-      new THREE.LineBasicMaterial({ color: 0x8fa3bf, transparent: true, opacity: 0.5 }));
+      new THREE.LineBasicMaterial({ color: 0x8fa3bf, transparent: true, opacity: 0.45 }));
     edges.position.set(W / 2, H / 2, -L / 2);
     group.add(edges);
     return group;
@@ -239,6 +273,31 @@
     var parsed = this._parse(gcode);
     this.moves = parsed.moves;
     if (!this.moves.length) return;
+
+    // Put the second face where it really is. The machine cuts face 2 at the same
+    // coordinates as face 1 because the OPERATOR flipped the tube in between - so drawn
+    // literally, both patterns land on the same wall, mirrored, on top of each other.
+    // Undo the flip for display: mirror X back about the tube's width and reflect Z
+    // through its height, which is exactly the 180-degree roll the operator performed.
+    // The toolpath then sits on the wall it actually machines, and the two stop
+    // colliding.
+    if (opts.tube && opts.tube.face_width && opts.tube.height) {
+      var mw = opts.tube.face_width, mh = opts.tube.height;
+      var b2 = parsed.bounds;
+      b2.minX = Infinity; b2.maxX = -Infinity; b2.minZ = Infinity; b2.maxZ = -Infinity;
+      this.moves.forEach(function (m) {
+        if (m.phase === 2) {
+          m.from = { x: mw - m.from.x, y: m.from.y, z: mh - m.from.z };
+          m.to = { x: mw - m.to.x, y: m.to.y, z: mh - m.to.z };
+        }
+        [m.from, m.to].forEach(function (pt) {
+          if (pt.x < b2.minX) b2.minX = pt.x;
+          if (pt.x > b2.maxX) b2.maxX = pt.x;
+          if (pt.z < b2.minZ) b2.minZ = pt.z;
+          if (pt.z > b2.maxZ) b2.maxZ = pt.z;
+        });
+      });
+    }
     var b = parsed.bounds;
     var maxX = b.maxX, maxY = b.maxY, maxZ = b.maxZ, minX = b.minX, minY = b.minY;
 
@@ -389,6 +448,9 @@
         new THREE.LineBasicMaterial({ color: 0x2ea043 }));
       this.scene.add(this.completedLine);
     }
+    // _update rebuilds both lines from scratch on every frame, so the visibility choice
+    // has to be reapplied here or it is lost the moment the scrubber moves.
+    this.setToolpathVisible(this.toolpathVisible !== false);
   };
 
   GcodeViewer.prototype._start = function () {
@@ -415,6 +477,16 @@
     this.isPlaying = false;
     if (this.els.playButton) this.els.playButton.classList.remove('playing');
     if (this.interval) { clearInterval(this.interval); this.interval = null; }
+  };
+
+  /* Show or hide the toolpath, leaving the model. A pocket's clearing passes cover the
+     pocket completely, so on a tube the CAM path hides the very geometry it is cutting -
+     and the whole point of drawing the tube was to be able to look at the part. */
+  GcodeViewer.prototype.setToolpathVisible = function (visible) {
+    this.toolpathVisible = visible !== false;
+    if (this.completedLine) this.completedLine.visible = this.toolpathVisible;
+    if (this.upcomingLine) this.upcomingLine.visible = this.toolpathVisible;
+    if (this.toolMesh) this.toolMesh.visible = this.toolpathVisible;
   };
 
   GcodeViewer.prototype.resetView = function () {
