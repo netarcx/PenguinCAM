@@ -12,8 +12,10 @@ check and then vanished when offset inward, leaving a program that reported succ
 cut nothing.
 """
 
+import json
 import math
 import os
+import re
 import sys
 import unittest
 
@@ -385,6 +387,346 @@ class TestDocumentShape(unittest.TestCase):
                       'corner_radius': 0.25}])
         self.assertEqual(tube_designer.describe(r), '1 hole, 1 pocket')
         self.assertEqual(tube_designer.describe(resolve([])), 'nothing yet')
+
+
+class TestLoadTubeDesign(unittest.TestCase):
+    """The post-processor side: a design loads exactly as a DXF tube face does."""
+
+    def setUp(self):
+        from frc_cam_postprocessor import FRCPostProcessor
+        self.pp = FRCPostProcessor(0.0625, TOOL)
+        self.pp.apply_material_preset('aluminum_tube')
+        self.pp.tube_height = 1.0
+
+    def _load(self, features, face_width=FACE, tube_length=12.0):
+        return self.pp.load_tube_design({'version': 1, 'features': features},
+                                        face_width, tube_length)
+
+    def test_holes_are_classified_not_hand_built(self):
+        """Same size checks and the same peck-vs-helical decision a drawn hole gets."""
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '8-32'},
+                    {'type': 'bearing', 'x': 1.0, 'y': 6.0}])
+        self.assertEqual(len(self.pp.holes), 2)
+        by_d = {round(h['diameter'], 4): h for h in self.pp.holes}
+        self.assertTrue(by_d[0.1695]['needs_peck_drill'])
+        self.assertFalse(by_d[1.125]['needs_peck_drill'],
+                         'a 1.125" bore must be helixed into, never plunged')
+
+    def test_no_perimeter_is_invented_for_a_tube_face(self):
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'}])
+        self.assertIsNone(self.pp.perimeter)
+
+    def test_pockets_reach_the_post_processor(self):
+        self._load([{'type': 'pocket', 'x': 1.0, 'y': 6.0, 'w': 1.0, 'h': 2.0,
+                     'corner_radius': 0.25}])
+        self.assertEqual(len(self.pp.pockets), 1)
+
+    def test_the_mode_is_custom_so_the_header_says_end_mill(self):
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'}])
+        self.assertEqual(self.pp.tube_pattern_mode, 'custom')
+
+    def test_a_design_that_cannot_be_machined_is_refused_whole(self):
+        with self.assertRaises(ValueError) as caught:
+            self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'},
+                        {'type': 'hole', 'x': 0.1, 'y': 3.0, 'size': '10-32'}])
+        self.assertIn('Feature 2', str(caught.exception))
+
+    def test_a_stale_error_does_not_condemn_the_next_design(self):
+        """Errors are per-load. Without the reset, a design that failed validation left
+        its errors behind and the next, valid one was refused citing features that no
+        longer exist."""
+        self.pp.errors = ['left over from a previous load']
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'}])
+        self.assertEqual(self.pp.errors, [])
+
+    def test_metric_jobs_are_refused_rather_than_silently_wrong(self):
+        from frc_cam_postprocessor import FRCPostProcessor
+        pp = FRCPostProcessor(1.6, 4.0, units='mm')
+        pp.apply_material_preset('aluminum_tube')
+        with self.assertRaises(ValueError) as caught:
+            pp.load_tube_design({'features': []}, 50.8, 300.0)
+        self.assertIn('inch-only', str(caught.exception))
+
+    def test_squaring_the_end_stays_allowed_on_a_milled_design(self):
+        """The drill refusal keys on mode == 'holes', which is the only mode that puts a
+        twist drill in the spindle. A custom design is milled, so facing the end is an
+        ordinary operation - and this test exists so that stays true."""
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'}])
+        result = self.pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=True, cut_to_length=False,
+            tube_width=FACE, tube_length=12.0)
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('Square tube end', result.gcode)
+
+    def test_the_same_design_still_refuses_to_run_off_the_machine(self):
+        self._load([{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'}],
+                   tube_length=12.0)
+        result = self.pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=FACE, tube_length=2000.0)
+        self.assertFalse(result.success)
+        self.assertTrue(any('does not fit the machine' in e for e in result.errors))
+
+
+class TestGeneratedProgram(unittest.TestCase):
+    """What a mixed design actually emits. Claims are checked against the program."""
+
+    @classmethod
+    def setUpClass(cls):
+        from frc_cam_postprocessor import FRCPostProcessor
+        pp = FRCPostProcessor(0.0625, TOOL)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_design({'version': 1, 'features': [
+            {'type': 'hole', 'x': 1.0, 'y': 2.0, 'size': '8-32'},
+            {'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'},
+            {'type': 'hole', 'x': 1.0, 'y': 4.0, 'size': '1/4-20'},
+            {'type': 'bearing', 'x': 1.0, 'y': 6.0},
+            {'type': 'pocket', 'x': 1.0, 'y': 9.0, 'w': 1.2, 'h': 2.0,
+             'corner_radius': 0.25}]}, 2.0, 12.0)
+        cls.pp = pp
+        cls.gcode = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0).gcode
+
+    def test_both_faces_are_machined(self):
+        self.assertIn('PHASE 1', self.gcode)
+        self.assertIn('PHASE 2', self.gcode)
+
+    def test_the_bearing_bore_is_helixed_into_and_then_cleared(self):
+        self.assertIn('Hole 1.125" dia: helical entry', self.gcode)
+        self.assertIn('Archimedean spiral', self.gcode)
+
+    def test_the_header_claims_an_end_mill_not_a_drill(self):
+        """A design mixing 0.1695", 0.1935", 0.2656" and 1.125" cannot be drilled with
+        one bit, and the operator loads whatever the header names."""
+        self.assertNotIn('twist drill', self.gcode)
+        self.assertIn(f'( Tool: {TOOL:.3f}" end mill )', self.gcode)
+
+    def test_the_header_says_what_the_design_contains(self):
+        self.assertIn('( Custom design: 4 holes, 1 pocket )', self.gcode)
+
+    def test_no_canned_cycles(self):
+        self.assertNotIn('G83', self.gcode)
+
+    def test_the_first_motion_retracts_before_moving_in_xy(self):
+        """At program start the tool is wherever the last job left it; a rapid across
+        the tube at that height drags the cutter through it."""
+        for line in self.gcode.splitlines():
+            code = re.sub(r'\(.*?\)', '', line).split(';')[0].strip()
+            if not code or not re.match(r'G0?[0-3]\b', code):
+                continue
+            words = code.split()
+            self.assertFalse(any(w[:1] in ('X', 'Y') for w in words)
+                             and not any(w.startswith('Z') for w in words),
+                             f'first motion moves in XY before retracting: {code}')
+            break
+
+    def test_no_rapid_traverses_inside_the_tube(self):
+        """The wall top is at Z = tube height. A G0 with the tool below that, moving in
+        XY, is the cutter being dragged sideways through metal."""
+        tube_top = 1.0
+        x = y = z = 0.0
+        offences = []
+        for line in self.gcode.splitlines():
+            code = re.sub(r'\(.*?\)', '', line).split(';')[0].strip()
+            if not code or not re.match(r'G0?[0-3]\b', code):
+                continue
+            words = dict((w[0], float(w[1:])) for w in code.split()[1:]
+                         if w[:1] in 'XYZ')
+            nx, ny, nz = words.get('X', x), words.get('Y', y), words.get('Z', z)
+            moved_xy = abs(nx - x) > 1e-9 or abs(ny - y) > 1e-9
+            if (re.match(r'G0?0\b', code) and moved_xy
+                    and z < tube_top - 1e-6 and nz < tube_top - 1e-6):
+                offences.append(code)
+            x, y, z = nx, ny, nz
+        self.assertEqual(offences, [])
+
+    def test_comment_rules(self):
+        for line in self.gcode.splitlines():
+            line.encode('ascii')                       # no unicode reaches a controller
+            depth = worst = 0
+            for ch in line.split(';')[0]:
+                if ch == '(':
+                    depth += 1
+                    worst = max(worst, depth)
+                elif ch == ')':
+                    depth -= 1
+            self.assertLessEqual(worst, 1, f'nested comment: {line}')
+            self.assertNotIn('[', line)
+            self.assertNotIn(']', line)
+
+
+class TestCustomDesignRoute(unittest.TestCase):
+    """/process with tube_pattern=custom, and the editor's /api/tube-pattern POST."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ['PENGUINCAM_LOCAL'] = '1'
+        from frc_cam_gui_app import app, limiter
+        app.config['TESTING'] = True
+        # /process allows 10 requests a minute, which is right for the deployed app and
+        # wrong here; the limiter's 429 surfaces as a KeyError on the body rather than
+        # as anything that reads like rate limiting.
+        limiter.enabled = False
+        cls.client = app.test_client()
+
+    DESIGN = {'version': 1, 'features': [
+        {'type': 'hole', 'x': 1.0, 'y': 2.0, 'size': '8-32'},
+        {'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'},
+        {'type': 'hole', 'x': 1.0, 'y': 4.0, 'size': '1/4-20'},
+        {'type': 'bearing', 'x': 1.0, 'y': 6.0},
+        {'type': 'pocket', 'x': 1.0, 'y': 9.0, 'w': 1.2, 'h': 2.0,
+         'corner_radius': 0.25}]}
+
+    def _post(self, **overrides):
+        data = {'material': 'aluminum_tube', 'tube_pattern': 'custom',
+                'tube_size': '2x1-flat', 'tube_pattern_length': '12',
+                'tube_height': '1.0', 'thickness': '0.0625',
+                'tool_diameter': '0.157', 'square_end': '0', 'cut_to_length': '0',
+                'tube_design': json.dumps(self.DESIGN)}
+        data.update(overrides)
+        data = {k: v for k, v in data.items() if v is not None}
+        return self.client.post('/process', data=data,
+                                content_type='multipart/form-data')
+
+    def _api(self, **overrides):
+        data = {'size': '2x1-flat', 'length': '12', 'tool': '0.157',
+                'design': json.dumps(self.DESIGN)}
+        data.update(overrides)
+        data = {k: v for k, v in data.items() if v is not None}
+        return self.client.post('/api/tube-pattern', data=data)
+
+    # --- /process ---------------------------------------------------------------
+    def test_a_custom_design_needs_no_dxf(self):
+        response = self._post()
+        self.assertEqual(response.status_code, 200,
+                         response.get_data(as_text=True)[:400])
+        gcode = response.get_json()['gcode']
+        self.assertIn('PHASE 1', gcode)
+        self.assertIn('PHASE 2', gcode)
+
+    def test_the_program_mills_the_mixed_sizes_rather_than_claiming_a_drill(self):
+        gcode = self._post().get_json()['gcode']
+        self.assertNotIn('twist drill', gcode)
+        self.assertIn('Hole 1.125" dia: helical entry', gcode)
+
+    def test_the_tool_reported_back_is_the_users_end_mill(self):
+        """Unlike a drilled pattern, nothing is substituted here: a custom design is cut
+        with the tool the user said they would load. The bore-only design is used
+        because a 1/4" cutter cannot make the 8-32 holes in the mixed one - which the
+        route refuses, correctly."""
+        bore = {'features': [{'type': 'bearing', 'x': 1.0, 'y': 6.0}]}
+        body = self._post(tool_diameter='0.25',
+                          tube_design=json.dumps(bore)).get_json()
+        self.assertAlmostEqual(body['parameters']['tool_diameter'], 0.25, places=6)
+        self.assertIn('( Tool: 0.250" end mill )', body['gcode'])
+
+    def test_bad_json_is_a_400_not_a_500(self):
+        response = self._post(tube_design='{"features": [')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('JSON', response.get_json()['error'])
+
+    def test_a_missing_design_is_refused(self):
+        response = self._post(tube_design=None)
+        self.assertEqual(response.status_code, 400)
+
+    def test_a_design_that_cuts_nothing_is_refused(self):
+        response = self._post(tube_design=json.dumps({'features': []}))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('no features', response.get_json()['error'])
+
+    def test_an_unmachinable_design_is_refused_naming_the_feature(self):
+        bad = {'features': [{'type': 'hole', 'x': 0.1, 'y': 3.0, 'size': '10-32'}]}
+        response = self._post(tube_design=json.dumps(bad))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Feature 1', response.get_json()['error'])
+
+    def test_the_hole_cap_is_enforced_by_the_route(self):
+        big = {'features': [{'type': 'hole-run', 'x': 0.5, 'y': 1.0, 'pitch': 0.5,
+                             'count': 400, 'size': '10-32'},
+                            {'type': 'hole-run', 'x': 1.5, 'y': 1.0, 'pitch': 0.5,
+                             'count': 400, 'size': '10-32'}]}
+        response = self._post(tube_design=json.dumps(big), tube_pattern_length='18')
+        self.assertEqual(response.status_code, 400)
+
+    def test_a_tube_longer_than_the_machine_is_still_refused(self):
+        response = self._post(tube_pattern_length='2000')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('does not fit the machine', response.get_json()['error'])
+
+    def test_an_unknown_pattern_is_still_refused(self):
+        self.assertEqual(self._post(tube_pattern='swiss-cheese').status_code, 400)
+
+    def test_the_response_carries_the_resolved_geometry_for_the_preview(self):
+        """The viewer draws the tube itself, which it cannot do from G-code alone:
+        nothing in a toolpath distinguishes a hole from a circular pocket."""
+        preview = self._post().get_json()['tube_preview']
+        self.assertEqual(preview['mode'], 'custom')
+        self.assertEqual(preview['face_width'], 2.0)
+        self.assertEqual(len(preview['holes']), 4)
+        self.assertEqual(len(preview['pockets']), 1)
+        self.assertTrue(any(abs(h['d'] - 1.125) < 1e-6 for h in preview['holes']))
+
+    def test_the_counts_in_the_preview_match_the_program(self):
+        body = self._post().get_json()
+        holes = len(body['tube_preview']['holes'])
+        self.assertEqual(body['gcode'].count('( Custom design: '), 1)
+        self.assertIn(f'( Custom design: {holes} holes, 1 pocket )', body['gcode'])
+
+    # --- /api/tube-pattern (POST) ------------------------------------------------
+    def test_the_editor_gets_geometry_without_generating_gcode(self):
+        body = self._api().get_json()
+        self.assertEqual(body['mode'], 'custom')
+        self.assertEqual(len(body['holes']), 4)
+        self.assertEqual(len(body['pockets']), 1)
+        self.assertEqual(body['errors'], [])
+        self.assertEqual(body['summary'], '4 holes, 1 pocket')
+        self.assertNotIn('gcode', body)
+
+    def test_the_editor_is_told_which_feature_is_bad(self):
+        bad = {'features': [{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '10-32'},
+                            {'type': 'hole', 'x': 0.1, 'y': 3.0, 'size': '10-32'}]}
+        body = self._api(design=json.dumps(bad)).get_json()
+        self.assertTrue(body['features'][0]['ok'])
+        self.assertFalse(body['features'][1]['ok'])
+        self.assertTrue(body['features'][1]['errors'])
+        self.assertTrue(body['errors'])
+
+    def test_an_unmachinable_design_is_200_with_errors_not_400(self):
+        """The editor asks on every edit; a design mid-edit is not a bad request."""
+        bad = {'features': [{'type': 'hole', 'x': 0.1, 'y': 3.0, 'size': '10-32'}]}
+        self.assertEqual(self._api(design=json.dumps(bad)).status_code, 200)
+
+    def test_bad_json_is_a_400(self):
+        response = self._api(design='{oops')
+        self.assertEqual(response.status_code, 400)
+
+    def test_an_unknown_tube_size_is_refused(self):
+        self.assertEqual(self._api(size='3x3').status_code, 400)
+
+    def test_a_half_typed_length_is_answered_not_rejected(self):
+        body = self._api(length='0').get_json()
+        self.assertEqual(body['holes'], [])
+        self.assertTrue(body['errors'])
+
+    def test_the_envelope_is_reported_before_anything_is_generated(self):
+        body = self._api(length='2000').get_json()
+        self.assertTrue(any('does not fit the machine' in e for e in body['errors']))
+
+    def test_the_named_sizes_are_resolved_server_side(self):
+        """The browser sends a name; the server decides the number. A stale client
+        cannot ship a wrong diameter."""
+        design = {'features': [{'type': 'hole', 'x': 1.0, 'y': 3.0, 'size': '1/4-20',
+                                'diameter': 0.75}]}
+        body = self._api(design=json.dumps(design)).get_json()
+        self.assertAlmostEqual(body['holes'][0]['d'], 0.2656, places=4)
+
+    def test_the_generated_patterns_still_answer_on_get(self):
+        response = self.client.get('/api/tube-pattern?size=2x1-flat&length=24&mode=holes')
+        self.assertEqual(response.status_code, 200)
+        # 47 columns of 3 on a 24" 2x1 face - the generated pattern, untouched.
+        self.assertEqual(len(response.get_json()['holes']), 141)
 
 
 if __name__ == '__main__':

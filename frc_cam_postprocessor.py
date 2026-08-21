@@ -1226,6 +1226,75 @@ class FRCPostProcessor:
             print(f"  \u26a0 {warning}")
         return pattern['warnings']
 
+    def load_tube_design(self, design: dict, face_width: float, tube_length: float):
+        """Load a CUSTOM tube face - features the user placed themselves - instead of a
+        DXF or one of the two fixed patterns.
+
+        This is deliberately the DXF path, not the drilled one. A design can mix a
+        0.1695" clearance hole, a 0.2656" one and a 1.125" bearing bore, which no single
+        twist drill can make, and this program has no tool change; the one tool that can
+        cut all three is the end mill already in the spindle. Everything after resolution
+        is therefore identical to a drawn face: classify_holes() picks peck-plunge for a
+        hole at tool size and helical entry for a big one, _sort_pockets() orders the
+        rings, and generate_tube_pattern_gcode() mirrors the whole thing onto face 2.
+
+        Because the tool IS an end mill here, square_end and cut_to_length stay allowed -
+        the refusal in generate_tube_pattern_gcode keys on mode == 'holes', which is the
+        only mode that puts a drill in the spindle.
+
+        Raises ValueError if the design cannot be machined as drawn. That is the same
+        stance load_tube_pattern takes for an unusable tool: a refusal the operator can
+        act on beats a program that is well-formed and wrong.
+
+        Returns the design's warnings, which are advice rather than errors.
+        """
+        import tube_designer
+
+        # INCH ONLY, for exactly the reasons load_tube_pattern is: every constant in
+        # tube_designer is inches and the tube program hard-codes G20, so a metric run
+        # would emit inch-mode G-code holding millimetre numbers.
+        if getattr(self, 'units', 'inch') != 'inch':
+            raise ValueError(
+                f'Custom tube designs are inch-only, but this job is in {self.units}. '
+                f'Run the tube job in inches, or draw the face in CAD and use the DXF '
+                f'path.')
+
+        resolved = tube_designer.resolve(
+            design, face_width, tube_length, self.tool_diameter,
+            helix_radius_multiplier=getattr(
+                self, 'helix_radius_multiplier',
+                tube_designer.DEFAULT_HELIX_RADIUS_MULTIPLIER),
+            hole_size_tolerance=self.hole_size_tolerance)
+        if resolved['errors']:
+            raise ValueError('This design cannot be machined as drawn. '
+                             + ' '.join(resolved['errors']))
+
+        # Stand in for load_dxf's parsed geometry, exactly as load_tube_pattern does. No
+        # perimeter: the tube face IS the boundary and the tube flow passes
+        # skip_perimeter=True.
+        self.circles = [{'center': c['center'], 'radius': c['radius'],
+                         'diameter': c['diameter']} for c in resolved['circles']]
+        self.lines = []
+        self.arcs = []
+        self.polylines = []
+        self.splines = []
+        self.layer_data = None
+        self.perimeter = None
+        self.pockets = [list(ring) for ring in resolved['pockets']]
+        # Errors are per-load, not per-object: a design that failed validation must not
+        # leave its errors behind to condemn the next one loaded into this processor.
+        self.errors = []
+
+        self.classify_holes()
+        self._sort_pockets()
+        self.tube_pattern_mode = 'custom'
+
+        print(f"\nLoaded custom tube design: {len(self.holes)} holes, "
+              f"{len(self.pockets)} pockets")
+        for warning in resolved['warnings']:
+            print(f"  \u26a0 {warning}")
+        return resolved['warnings']
+
     def _optimize_route(self, items, item_type="items"):
         """
         Generic route optimization using nearest neighbor + 2-opt algorithm.
@@ -5304,6 +5373,12 @@ class FRCPostProcessor:
         _tool_kind = ('twist drill' if getattr(self, 'tube_pattern_mode', None) == 'holes'
                       else 'end mill')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" {_tool_kind} )')
+        if getattr(self, 'tube_pattern_mode', None) == 'custom':
+            # A custom face is whatever the operator drew, so the header has to say what
+            # is in it - "tube pattern" alone tells them nothing about this program.
+            _nh, _np = len(self.holes), len(self.pockets)
+            gcode.append(f'( Custom design: {_nh} hole{"" if _nh == 1 else "s"}, '
+                         f'{_np} pocket{"" if _np == 1 else "s"} )')
         gcode.append(f'( Material: {self.spindle_speed} RPM, {self.feed_rate:.1f} ipm )')
         if two_face:
             gcode.append('( Two-face mode: distinct pattern machined on each side )')

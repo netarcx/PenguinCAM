@@ -193,6 +193,13 @@ def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
     if not result.success:
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
+    _check_tube_program(name, result)
+
+
+def _check_tube_program(name, result):
+    """The frame-independent checks every tube program must pass, whichever path built
+    it. Shared by the fixed patterns and by custom designs so neither can drift into
+    being audited less than the other."""
     g = result.gcode
     lines = g.splitlines()
 
@@ -229,6 +236,43 @@ def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
         if has_xy and not has_z:
             fail(name, f'first motion moves in XY before retracting: {code}')
         break
+
+
+def audit_tube_design(name, design, face_width, tube_length, tube_height,
+                      tool=0.157, wall=0.0625, square_end=False, cut_to_length=False):
+    """Audit a CUSTOM tube design - features the user placed themselves.
+
+    Same checks as audit_tube, plus the two claims that are specific to this path: the
+    header must not offer a twist drill (a design mixing clearance sizes and a 1.125"
+    bore is machined with the end mill, and the operator loads what the header says),
+    and squaring/cutting to length must be ALLOWED here, unlike the drilled pattern -
+    there is a milling cutter in the spindle, so those are ordinary operations.
+    """
+    global checked
+    checked += 1
+    with redirect_stdout(io.StringIO()):
+        pp = FRCPostProcessor(wall, tool)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = tube_height
+        pp.load_tube_design(design, face_width, tube_length)
+        result = pp.generate_tube_pattern_gcode(
+            tube_height=tube_height, square_end=square_end,
+            cut_to_length=cut_to_length, tube_width=face_width, tube_length=tube_length)
+    if not result.success:
+        fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
+        return
+
+    _check_tube_program(name, result)
+
+    g = result.gcode
+    if 'twist drill' in g:
+        fail(name, 'a custom design claims a twist drill in its header; it is milled')
+    if 'Custom design:' not in g:
+        fail(name, 'header does not say what the custom design contains')
+    # A bore big enough to need helical entry must actually get one - a straight plunge
+    # with a 0.157 end mill into 1.125 of bore is the bug this path exists to avoid.
+    if any(abs(h['diameter'] - 1.125) < 1e-6 for h in pp.holes) and 'Helical entry' not in g:
+        fail(name, 'a 1.125" bearing bore was cut without a helical entry')
 
 
 def audit(name, job, expect_drill=False):
@@ -352,6 +396,30 @@ def main():
                            height, mode=mode, square_end=mill)
     audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, mode='lightening',
                square_end=True, cut_to_length=True)
+
+    # Custom designs: a mixed-size face (which no single drill could make), the same
+    # design on a narrow face, and one that also squares the end - allowed here because
+    # the tool is an end mill, unlike the drilled pattern.
+    MIXED = {'version': 1, 'features': [
+        {'type': 'hole-run', 'x': 0.5, 'y': 1.0, 'pitch': 0.5, 'count': 6,
+         'axis': 'y', 'size': '8-32'},
+        {'type': 'hole-array', 'x': 1.5, 'y': 1.0, 'pitch_x': 0.0, 'pitch_y': 1.0,
+         'cols': 1, 'rows': 3, 'size': '10-32'},
+        {'type': 'hole', 'x': 1.0, 'y': 2.0, 'size': '1/4-20'},
+        {'type': 'bearing', 'x': 1.0, 'y': 5.0},
+        {'type': 'pocket', 'x': 1.0, 'y': 8.0, 'w': 1.2, 'h': 2.0,
+         'corner_radius': 0.25},
+    ]}
+    NARROW = {'version': 1, 'features': [
+        {'type': 'hole-run', 'x': 0.5, 'y': 1.0, 'pitch': 0.75, 'count': 8,
+         'axis': 'y', 'size': '10-32'},
+        {'type': 'pocket', 'x': 0.5, 'y': 8.0, 'w': 0.5, 'h': 1.5,
+         'corner_radius': 0.25},
+    ]}
+    audit_tube_design('tube/custom/2x1-flat/mixed', MIXED, 2.0, 12.0, 1.0)
+    audit_tube_design('tube/custom/2x1-flat/mixed+square', MIXED, 2.0, 12.0, 1.0,
+                      square_end=True)
+    audit_tube_design('tube/custom/1x1/narrow', NARROW, 1.0, 12.0, 1.0)
 
     # The refusal is part of the contract, so audit it too: a drilled pattern combined
     # with a milling operation must produce NO program rather than a dangerous one.
