@@ -629,8 +629,13 @@ def _serve_wizard_upload():
     # ========================================================================
     # End authentication gate
     # ========================================================================
+    # Dark by default - it is what a shop screen usually wants - but an explicit
+    # ?theme=light is honoured. The stylesheet has carried a full light palette all
+    # along; this route hardcoded 'dark' and dropped the parameter on the floor, so
+    # asking for light gave you a dark page and no indication why.
+    theme = 'light' if request.args.get('theme', '').lower() == 'light' else 'dark'
     return render_template('wizard.html', source='upload', authenticated=True,
-                           onshape_ctx={}, theme='dark', **_app_template_context())
+                           onshape_ctx={}, theme=theme, **_app_template_context())
 
 
 @app.route('/')
