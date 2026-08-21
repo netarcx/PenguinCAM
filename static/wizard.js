@@ -697,6 +697,15 @@
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
     var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
+    // The thickness field carries the sheet default (1/4") into tubing, where it means
+    // WALL thickness. Real 1x1 and 2x1 is 1/16"-1/8", so every tube job quoted a cycle
+    // time three to four times too long and pecked four times as often as it needed to.
+    // Only the untouched default is replaced - a value the user typed is theirs.
+    if (isTube && state.thickness_text === '0.25"') {
+      state.thickness = 0.0625;
+      state.thickness_text = '0.0625"';
+      var tfield = $('#f-thickness'); if (tfield) tfield.value = state.thickness_text;
+    }
     applyTubePatternUI();
     // Several tools per part is a 2D-only plan for now: 2.5D takes its depths from the
     // CAD layers and tubing runs a fixed program of its own.
