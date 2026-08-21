@@ -125,7 +125,8 @@
                         <span>Pattern</span>
                         <select id="f-tube-pattern">
                             <option value="none">From my DXF</option>
-                            <option value="standard">Standard - #10 clearance holes on 1/2" centres</option>
+                            <option value="holes">Mounting holes - drilled, #10 clearance on 1/2" centres</option>
+                            <option value="lightening">Lightening - triangular truss pockets</option>
                         </select>
                     </label>
                     <!-- Pre-designed pattern only: with no DXF there is nothing to measure
@@ -136,10 +137,6 @@
                             <input type="text" id="f-tube-pattern-length" inputmode="text"
                                    autocomplete="off" spellcheck="false"
                                    placeholder='e.g. 24" or 600mm'>
-                        </label>
-                        <label class="field inline">
-                            <input type="checkbox" id="f-tube-pattern-pockets" checked>
-                            <span>Triangular lightening pockets, where the face is wide enough</span>
                         </label>
                         <p class="hint" id="tube-pattern-note"></p>
                     </div>

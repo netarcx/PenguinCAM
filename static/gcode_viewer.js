@@ -166,6 +166,74 @@
   };
 
   /* -------------------------------------------------------------- load */
+  /* ---------------------------------------------------------------- tube CAD ----
+   * A solid model of the tube with the pattern actually cut into it, rather than the
+   * translucent stock box the plate view uses.
+   *
+   * The machined wall is built as a THREE.Shape - the face rectangle - with every hole
+   * and every pocket added as a Path hole, then extruded to the wall thickness. That is
+   * a genuine cut-out, not a decal: you can see through the holes and read the truss.
+   * The remaining three walls are plain boxes, which is enough to make it read as a tube
+   * and costs nothing to build.
+   *
+   * Shape coordinates are the pattern's own frame (u = across the face, v = along the
+   * tube). rotateX(-90 deg) maps local (u, v, w) to (u, w, -v), which is exactly the
+   * gcode-to-scene mapping the rest of this viewer uses, so the model lands on the
+   * toolpath without a second convention to keep straight.
+   */
+  GcodeViewer.prototype._buildTube = function (tube) {
+    var W = tube.face_width, L = tube.length, H = tube.height;
+    var wall = Math.min(tube.wall || 0.0625, H / 2);
+    var group = new THREE.Group();
+
+    var face = new THREE.Shape();
+    face.moveTo(0, 0); face.lineTo(W, 0); face.lineTo(W, L); face.lineTo(0, L);
+    face.lineTo(0, 0);
+
+    (tube.holes || []).forEach(function (h) {
+      var path = new THREE.Path();
+      path.absarc(h.x, h.y, h.d / 2, 0, Math.PI * 2, true);
+      face.holes.push(path);
+    });
+    (tube.pockets || []).forEach(function (ring) {
+      if (!ring || ring.length < 3) return;
+      var path = new THREE.Path();
+      path.moveTo(ring[0][0], ring[0][1]);
+      for (var i = 1; i < ring.length; i++) path.lineTo(ring[i][0], ring[i][1]);
+      path.lineTo(ring[0][0], ring[0][1]);
+      face.holes.push(path);
+    });
+
+    var metal = new THREE.MeshStandardMaterial({
+      color: 0xb9c4d4, metalness: 0.65, roughness: 0.35, side: THREE.DoubleSide
+    });
+
+    var top = new THREE.Mesh(
+      new THREE.ExtrudeGeometry(face, { depth: wall, bevelEnabled: false }), metal);
+    top.rotation.x = -Math.PI / 2;
+    top.position.y = H - wall;      // sit the machined wall at the top of the tube
+    group.add(top);
+
+    // The other three walls. Plain boxes: nothing is cut in them, and drawing them keeps
+    // the section reading as a tube rather than a plate floating in space.
+    function slab(w, h, d, x, y, z) {
+      var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), metal);
+      m.position.set(x, y, z);
+      return m;
+    }
+    group.add(slab(W, wall, L, W / 2, wall / 2, -L / 2));                       // bottom
+    group.add(slab(wall, H - 2 * wall, L, wall / 2, H / 2, -L / 2));            // left
+    group.add(slab(wall, H - 2 * wall, L, W - wall / 2, H / 2, -L / 2));        // right
+
+    // A soft outline makes the edges legible against the toolpath colours.
+    var edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, L)),
+      new THREE.LineBasicMaterial({ color: 0x8fa3bf, transparent: true, opacity: 0.5 }));
+    edges.position.set(W / 2, H / 2, -L / 2);
+    group.add(edges);
+    return group;
+  };
+
   GcodeViewer.prototype.load = function (gcode, opts) {
     opts = opts || {};
     var parsed = this._parse(gcode);
@@ -187,6 +255,11 @@
     var gridSize = Math.max(maxX * 1.3, maxY * 1.3, 15);
     var grid = new THREE.GridHelper(gridSize, Math.ceil(gridSize), tc.grid1, tc.grid2);
     grid.position.set(gridSize / 3, 0, -gridSize / 3);
+    if (opts.tube && opts.tube.length) {
+      // Centre the grid under the tube; the default placement puts most of it off to one
+      // side, which is what made the part look lost rather than sitting on a table.
+      grid.position.set(opts.tube.face_width / 2, 0, -opts.tube.length / 2);
+    }
     this.scene.add(grid);
     this._addAxes(Math.max(maxDim, 5) * 0.6);
     var ms = Math.max(0.15, maxDim * 0.02);
@@ -197,15 +270,21 @@
     var stockD = opts.stockDepth || (maxY - minY);
     var stockH = opts.stockHeight || 0.25;
     this.stockHeight = stockH;
-    var stockGeo = new THREE.BoxGeometry(stockW, stockH, stockD);
-    var stockMat = new THREE.MeshStandardMaterial({
-      color: 0xe8f0ff, transparent: true, opacity: 0.15,
-      metalness: 0.3, roughness: 0.7, side: THREE.DoubleSide, depthWrite: false
-    });
-    var stockMesh = new THREE.Mesh(stockGeo, stockMat);
-    stockMesh.position.set(stockW / 2, stockH / 2, -stockD / 2);
-    stockMesh.renderOrder = -1;
-    this.scene.add(stockMesh);
+    if (opts.tube && opts.tube.face_width && opts.tube.length) {
+      // A real model of the part, not a box standing in for it.
+      this.stockHeight = opts.tube.height;
+      this.scene.add(this._buildTube(opts.tube));
+    } else {
+      var stockGeo = new THREE.BoxGeometry(stockW, stockH, stockD);
+      var stockMat = new THREE.MeshStandardMaterial({
+        color: 0xe8f0ff, transparent: true, opacity: 0.15,
+        metalness: 0.3, roughness: 0.7, side: THREE.DoubleSide, depthWrite: false
+      });
+      var stockMesh = new THREE.Mesh(stockGeo, stockMat);
+      stockMesh.position.set(stockW / 2, stockH / 2, -stockD / 2);
+      stockMesh.renderOrder = -1;
+      this.scene.add(stockMesh);
+    }
 
     var toolDia = opts.toolDiameter || 0.157;
     var toolLen = Math.max(maxZ * 1.5, 1.0);
@@ -225,10 +304,28 @@
     this._update(0);
 
     // Camera.
+    if (opts.tube && opts.tube.face_width && opts.tube.length) {
+      // A tube is long and thin, and the plate framing below - look at a third of the
+      // extents from twice the longest dimension away - leaves it a sliver in the corner
+      // of a huge grid. Frame it on its own bounding sphere instead, and look along the
+      // length from above so the pattern on the machined face is what you actually see.
+      var tw = opts.tube.face_width, tl = opts.tube.length, th = opts.tube.height;
+      var cx = tw / 2, cy = th / 2, cz = -tl / 2;
+      var radius = Math.sqrt(tw * tw + th * th + tl * tl) / 2;
+      var fov = this.camera.fov * Math.PI / 180;
+      var dist = (radius / Math.sin(fov / 2)) * 0.62;
+      // Off the long axis and well above it: a tube viewed down its own length shows
+      // almost nothing of the face that was machined.
+      var dir = new THREE.Vector3(0.55, 0.62, -0.56).normalize();
+      this.camera.position.set(cx + dir.x * dist, cy + dir.y * dist, cz + dir.z * dist);
+      this.optimalCam = { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z };
+      this.optimalLook = { x: cx, y: cy, z: cz };
+    } else {
     var viewDist = Math.max(maxX, maxY, maxZ) * 2 || 10;
     this.camera.position.set(viewDist * 0.7, viewDist * 0.7, viewDist * 0.7);
     this.optimalCam = { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z };
     this.optimalLook = { x: maxX / 3, y: maxZ / 3, z: -maxY / 3 };
+    }
     this.controls.target.set(this.optimalLook.x, this.optimalLook.y, this.optimalLook.z);
     this.controls.update();
     this._resize();

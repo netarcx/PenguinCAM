@@ -1106,34 +1106,46 @@ class FRCPostProcessor:
         self._sort_holes()
 
     def load_tube_pattern(self, face_width: float, tube_length: float,
-                          hole_diameter: float = None, spacing: float = None,
-                          pockets: bool = True):
+                          mode: str = 'holes', hole_diameter: float = None,
+                          spacing: float = None):
         """Load a pre-designed tube pattern instead of a DXF.
 
-        Standard FRC tubing gets the same pattern every time - #10 clearance holes on
-        half-inch centres, plus triangular lightening pockets on a face wide enough to
-        hold them - so tube_patterns generates it directly and this method feeds it in
-        where load_dxf's geometry would have gone. See tube_patterns for the layout and
-        the coordinate frame.
+        mode='holes' drills mounting holes - three per column on a 2" face, one on a 1"
+        face. mode='lightening' mills truss triangles and no holes. The two never appear
+        together: see tube_patterns.MODES for why.
+
+        HOLES ARE DRILLED, NOT MILLED. That is not a separate toolpath - it falls out of
+        sizing the cutter to the hole. classify_holes marks a hole at tool size as
+        needs_peck_drill, and _generate_peck_drill_and_spiral_gcode then emits straight
+        pecks with NO lateral clearing, which is the only motion a twist drill can make.
+        So a holes pattern REQUIRES the tool to be a drill of the hole's diameter, and
+        this method refuses rather than quietly milling with whatever is loaded: an end
+        mill fed sideways through 141 holes is exactly the class of bug this project has
+        shipped before.
 
         The generated circles go through classify_holes() rather than being turned into
-        holes here. That is the whole point of routing them this way: a pattern hole gets
-        the same too-small-for-the-tool rejection and the same peck-vs-helical decision as
-        a drawn one, so there is no second code path that could disagree with the first.
+        holes here, so a pattern hole gets the same too-small-for-the-tool rejection and
+        the same peck-vs-helical decision as a drawn one.
 
-        Returns the pattern's warnings (an oversized tool that will not fit the pockets,
-        a tube too short to hole) so the caller can show them. They are advice, not
-        errors: the pattern is still machinable without whatever was dropped.
+        Returns the pattern's warnings, which are advice rather than errors.
         """
         import tube_patterns
 
-        kwargs = {'pockets': pockets}
+        kwargs = {'mode': mode}
         if hole_diameter is not None:
             kwargs['hole_diameter'] = hole_diameter
         if spacing is not None:
             kwargs['spacing'] = spacing
         pattern = tube_patterns.generate(face_width, tube_length, self.tool_diameter,
                                          **kwargs)
+
+        if mode == 'holes':
+            wanted = hole_diameter if hole_diameter is not None else tube_patterns.HOLE_DIAMETER
+            if abs(self.tool_diameter - wanted) > self.hole_size_tolerance:
+                raise ValueError(
+                    f'A drilled hole pattern needs a {wanted:.4f}" twist drill, but the '
+                    f'tool is {self.tool_diameter:.4f}". A tool narrower than the hole '
+                    f'would mill each hole out sideways instead of drilling it.')
 
         # Stand in for load_dxf's parsed geometry. No perimeter: the tube face IS the
         # boundary and the tube flow passes skip_perimeter=True, so inventing one here
@@ -1149,10 +1161,14 @@ class FRCPostProcessor:
         self.classify_holes()
         self._sort_pockets()
 
-        print(f"\nLoaded tube pattern: {len(self.holes)} holes, "
+        # Remembered so the program header can say "drill" rather than "end mill", and so
+        # the preview can draw the right thing.
+        self.tube_pattern_mode = mode
+
+        print(f"\nLoaded tube pattern ({mode}): {len(self.holes)} holes, "
               f"{len(self.pockets)} lightening pockets")
         for warning in pattern['warnings']:
-            print(f"  ⚠ {warning}")
+            print(f"  \u26a0 {warning}")
         return pattern['warnings']
 
     def _optimize_route(self, items, item_type="items"):
@@ -5175,7 +5191,11 @@ class FRCPostProcessor:
         if hasattr(self, 'user_name') and self.user_name:
             gcode.append(f'( User: {self.user_name} )')
         gcode.append(f'( Tube height: {tube_height:.3f}" )')
-        gcode.append(f'( Tool: {self.tool_diameter:.3f}" end mill )')
+        # A drilled hole pattern runs a twist drill, not an end mill, and the header is
+        # what the operator reads before loading a tool.
+        _tool_kind = ('twist drill' if getattr(self, 'tube_pattern_mode', None) == 'holes'
+                      else 'end mill')
+        gcode.append(f'( Tool: {self.tool_diameter:.3f}" {_tool_kind} )')
         gcode.append(f'( Material: {self.spindle_speed} RPM, {self.feed_rate:.1f} ipm )')
         if two_face:
             gcode.append('( Two-face mode: distinct pattern machined on each side )')
@@ -5211,6 +5231,14 @@ class FRCPostProcessor:
 
         # Safe height above the tube, in work coordinates (portable - no G53).
         tube_safe_z = tube_height + 0.25
+
+        # Retract BEFORE the first lateral move. Without this the program went straight
+        # from the WCS line to `G0 X.. Y..`, so the first rapid ran at whatever height the
+        # machine happened to be left at - and a tool sitting below the top of the tube
+        # would be dragged across it. Every later move is already covered, because each
+        # feature ends by retracting.
+        gcode.append(f'G0 Z{tube_safe_z:.4f}  ; Retract to safe height before any XY move')
+        gcode.append('')
 
         # Determine tube width for facing operations
         if tube_width is None:
@@ -6136,13 +6164,13 @@ def main():
     parser.add_argument('--tube-length', type=float,
                        help='Tube face length (Y dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
     parser.add_argument('--tube-pattern', type=str, default='none',
-                        choices=['none', 'standard'],
+                        choices=['none', 'holes', 'lightening'],
                         help="Use a pre-designed tube pattern instead of a DXF. "
-                             "'standard' is #10 clearance holes on 0.5in centres plus "
-                             "triangular lightening pockets where the face is wide "
-                             "enough. Requires --tube-length.")
-    parser.add_argument('--tube-pattern-no-pockets', action='store_true',
-                        help='With --tube-pattern, generate holes only (no lightening)')
+                             "'holes' DRILLS #10 clearance holes on 0.5in centres, three "
+                             "per column on a 2in face and one on a 1in face - the tool "
+                             "must be a 0.201in twist drill. 'lightening' mills "
+                             "right-triangle truss pockets and no holes. The two are "
+                             "never combined. Requires --tube-length.")
     parser.add_argument('--square-end', action='store_true',
                        help='Square the tube end before machining pattern (tube-pattern mode)')
     parser.add_argument('--cut-to-length', action='store_true',
@@ -6235,6 +6263,17 @@ def main():
         if not args.output_gcode:
             parser.error("output_gcode is required for tube-pattern mode")
 
+        # A drilled hole pattern is produced by sizing the cutter to the hole, so the
+        # tool for that mode IS the drill. Set before the post-processor is built rather
+        # than mutated afterwards, because min_millable_hole is derived from it at
+        # construction and a later change would leave the two disagreeing.
+        if use_pattern and args.tube_pattern == 'holes':
+            import tube_patterns as _tp
+            if abs(args.tool_diameter - _tp.HOLE_DIAMETER) > 1e-4:
+                print(f'Using a {_tp.HOLE_DIAMETER:.4f}" twist drill for the hole pattern '
+                      f'(--tool-diameter {args.tool_diameter:.4f}" is for milling)')
+            args.tool_diameter = _tp.HOLE_DIAMETER
+
         # Create post-processor with tube WALL thickness (not height!)
         pp = FRCPostProcessor(material_thickness=args.thickness,
                               tool_diameter=args.tool_diameter,
@@ -6270,8 +6309,7 @@ def main():
                 args.tube_height = size_height
                 pp.tube_height = size_height
             pattern_warnings = pp.load_tube_pattern(
-                face_width, args.tube_length,
-                pockets=not args.tube_pattern_no_pockets)
+                face_width, args.tube_length, mode=args.tube_pattern)
         else:
             pp.load_dxf(args.input_dxf)
             pp.transform_coordinates('bottom-left', args.rotation)  # Tube jig is always bottom-left

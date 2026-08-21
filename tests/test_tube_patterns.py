@@ -27,10 +27,10 @@ TOOL = 0.157
 class TestPatternGeometry(unittest.TestCase):
     """Where the holes and pockets land."""
 
-    def test_two_rows_on_a_2x1_face(self):
-        self.assertEqual(tube_patterns.hole_rows(2.0), [0.5, 1.5])
+    def test_three_holes_per_column_on_a_2x1_face(self):
+        self.assertEqual(tube_patterns.hole_rows(2.0), [0.5, 1.0, 1.5])
 
-    def test_single_centred_row_on_a_1x1_face(self):
+    def test_one_hole_per_column_on_a_1x1_face(self):
         self.assertEqual(tube_patterns.hole_rows(1.0), [0.5])
 
     def test_holes_are_on_half_inch_centres(self):
@@ -54,17 +54,18 @@ class TestPatternGeometry(unittest.TestCase):
         self.assertEqual(tube_patterns.hole_run(0.5), [])
 
     def test_short_tube_warns_instead_of_failing(self):
-        pattern = tube_patterns.generate(2.0, 0.5, TOOL)
+        pattern = tube_patterns.generate(2.0, 0.5, TOOL, mode='holes')
         self.assertEqual(pattern['circles'], [])
         self.assertTrue(any('too short' in w for w in pattern['warnings']))
 
     def test_holes_use_number_10_clearance(self):
-        pattern = tube_patterns.generate(2.0, 12.0, TOOL)
+        pattern = tube_patterns.generate(2.0, 12.0, TOOL, mode='holes')
         self.assertTrue(all(abs(c['diameter'] - 0.201) < 1e-9 for c in pattern['circles']))
 
     def test_hole_count_matches_rows_times_run(self):
-        pattern = tube_patterns.generate(2.0, 12.0, TOOL)
+        pattern = tube_patterns.generate(2.0, 12.0, TOOL, mode='holes')
         expected = len(tube_patterns.hole_rows(2.0)) * len(tube_patterns.hole_run(12.0))
+        self.assertEqual(len(tube_patterns.hole_rows(2.0)), 3)
         self.assertEqual(len(pattern['circles']), expected)
 
 
@@ -72,7 +73,7 @@ class TestTrussPockets(unittest.TestCase):
     """The lightening pockets, which are the part that can damage a tube if wrong."""
 
     def setUp(self):
-        self.pattern = tube_patterns.generate(2.0, 24.0, TOOL)
+        self.pattern = tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')
         self.polys = [Polygon(ring) for ring in self.pattern['pockets']]
 
     def test_a_2x1_face_gets_pockets(self):
@@ -103,16 +104,15 @@ class TestTrussPockets(unittest.TestCase):
             apex_x.append(apex[0])
         self.assertGreater(len(set(round(x, 4) for x in apex_x)), 1)
 
-    def test_pockets_never_touch_a_hole(self):
-        holes = [Point(c['center']).buffer(c['radius']) for c in self.pattern['circles']]
-        for poly in self.polys:
-            for hole in holes:
-                self.assertFalse(poly.intersects(hole) and poly.intersection(hole).area > 1e-12)
+    def test_a_lightening_pattern_has_no_holes_to_collide_with(self):
+        self.assertEqual(self.pattern['circles'], [])
 
-    def test_pockets_keep_the_minimum_web_to_every_hole(self):
-        holes = [Point(c['center']).buffer(c['radius']) for c in self.pattern['circles']]
-        worst = min(poly.distance(hole) for poly in self.polys for hole in holes)
-        self.assertGreaterEqual(worst, tube_patterns.MIN_WEB - 1e-6)
+    def test_pockets_keep_material_along_both_long_edges(self):
+        """The corner radius of the extrusion is the stiffest part of the section."""
+        for poly in self.polys:
+            minx, _, maxx, _ = poly.bounds
+            self.assertGreaterEqual(minx, tube_patterns.LIGHTENING_EDGE_MARGIN - 1e-9)
+            self.assertLessEqual(maxx, 2.0 - tube_patterns.LIGHTENING_EDGE_MARGIN + 1e-9)
 
     def test_pockets_do_not_overlap_each_other(self):
         for i, a in enumerate(self.polys):
@@ -127,33 +127,82 @@ class TestTrussPockets(unittest.TestCase):
             self.assertGreaterEqual(miny, 0.0)
             self.assertLessEqual(maxy, 24.0)
 
-    def test_a_1x1_face_gets_no_pockets(self):
-        """One hole row leaves no band to lighten - not an error, just holes only."""
-        pattern = tube_patterns.generate(1.0, 24.0, TOOL)
-        self.assertEqual(pattern['pockets'], [])
+    def test_pockets_are_separated_by_the_web_at_every_length(self):
+        """The specific guarantee: consecutive triangles never overlap, and the gap is
+        the web - not merely 'some' clearance that could drift to nothing."""
+        for length in (4.0, 4.75, 8.0, 12.5, 24.0, 36.0, 48.0):
+            polys = [Polygon(r) for r in tube_patterns.generate(2.0, length, TOOL, mode='lightening')['pockets']]
+            for a, b in zip(polys, polys[1:]):
+                self.assertFalse(a.intersects(b) and a.intersection(b).area > 1e-12,
+                                 f'pockets overlap on a {length}" tube')
+                self.assertAlmostEqual(a.distance(b), tube_patterns.MIN_WEB, places=6,
+                                       msg=f'gap drifted on a {length}" tube')
+
+    def test_triangles_are_worth_cutting(self):
+        """Guards the size against silently shrinking back. A 2x1 triangle spans the full
+        band between the hole rows and most of a two-inch cell."""
+        poly = Polygon(tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets'][0])
+        minx, miny, maxx, maxy = poly.bounds
+        self.assertGreater(maxy - miny, 1.5, 'triangle got short along the tube')
+        self.assertGreater(maxx - minx, 1.4, 'triangle no longer spans the face')
+        self.assertGreater(poly.area, 1.2, 'triangle area shrank')
+
+    def test_the_overlap_guard_actually_catches_an_overlap(self):
+        """The guard is only worth having if it fires. Two triangles that genuinely share
+        area must be detected, or the check in truss_pockets is decoration."""
+        overlapping = [
+            [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)],
+            [(0.0, 0.5), (1.0, 0.5), (0.0, 1.5), (0.0, 0.5)],
+        ]
+        self.assertEqual(tube_patterns._first_overlap(overlapping), (0, 1))
+
+    def test_the_overlap_guard_ignores_shapes_that_only_touch(self):
+        """Edge contact is not overlap - nothing is cut twice - so it must not be
+        reported, or every real pattern would be thrown away."""
+        touching = [
+            [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (0.0, 0.0)],
+            [(0.0, 1.0), (1.0, 1.0), (0.0, 2.0), (0.0, 1.0)],
+        ]
+        self.assertIsNone(tube_patterns._first_overlap(touching))
+
+    def test_a_1x1_face_can_be_lightened(self):
+        """With no holes competing for the face, even a 1" face has a band worth cutting -
+        which was impossible while holes and pockets shared a face."""
+        pattern = tube_patterns.generate(1.0, 24.0, TOOL, mode='lightening')
+        self.assertTrue(pattern['pockets'])
 
     def test_pockets_dropped_when_the_tool_cannot_clear_them(self):
         """A cutter wider than the triangle's inscribed circle cannot clear the corner.
         Emitting the pocket anyway would leave the post-processor to silently skip or
         mangle it, so the pattern drops it and says so."""
-        pattern = tube_patterns.generate(2.0, 24.0, tool_diameter=0.75)
+        pattern = tube_patterns.generate(2.0, 24.0, tool_diameter=1.25, mode='lightening')
         self.assertEqual(pattern['pockets'], [])
         self.assertTrue(any('does not fit' in w for w in pattern['warnings']))
 
-    def test_holes_only_when_pockets_are_switched_off(self):
-        pattern = tube_patterns.generate(2.0, 24.0, TOOL, pockets=False)
-        self.assertEqual(pattern['pockets'], [])
-        self.assertTrue(pattern['circles'])
+    def test_holes_and_pockets_are_mutually_exclusive(self):
+        """The core rule: a drilled face has no room to lighten, and a trussed face has
+        nothing solid left to bolt through."""
+        holes = tube_patterns.generate(2.0, 24.0, TOOL, mode='holes')
+        light = tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')
+        self.assertTrue(holes['circles']);  self.assertEqual(holes['pockets'], [])
+        self.assertTrue(light['pockets']);  self.assertEqual(light['circles'], [])
+
+    def test_an_unknown_mode_is_refused(self):
+        with self.assertRaises(ValueError):
+            tube_patterns.generate(2.0, 24.0, TOOL, mode='both')
 
 
 class TestLoadTubePattern(unittest.TestCase):
     """The pattern reaching the post-processor through the same door a DXF uses."""
 
-    def _pp(self, face_width=2.0, length=12.0):
-        pp = FRCPostProcessor(0.0625, TOOL)
+    def _pp(self, face_width=2.0, length=12.0, mode='holes'):
+        # A drilled pattern REQUIRES the tool to be the drill; load_tube_pattern refuses
+        # anything else, which is the point of the test below.
+        tool = tube_patterns.HOLE_DIAMETER if mode == 'holes' else TOOL
+        pp = FRCPostProcessor(0.0625, tool)
         pp.apply_material_preset('aluminum_tube')
         pp.tube_height = 1.0
-        pp.load_tube_pattern(face_width, length)
+        pp.load_tube_pattern(face_width, length, mode=mode)
         return pp
 
     def test_holes_are_classified_not_hand_built(self):
@@ -167,12 +216,32 @@ class TestLoadTubePattern(unittest.TestCase):
         self.assertIsNone(self._pp().perimeter)
 
     def test_pockets_reach_the_post_processor(self):
-        self.assertTrue(self._pp().pockets)
+        self.assertTrue(self._pp(mode='lightening').pockets)
 
     def test_a_1x1_loads_with_holes_and_no_pockets(self):
         pp = self._pp(face_width=1.0)
         self.assertTrue(pp.holes)
         self.assertEqual(pp.pockets, [])
+
+    def test_holes_are_drilled_not_milled(self):
+        """The whole point of sizing the tool to the hole: classify_holes must mark every
+        hole for a straight peck, because a twist drill cannot be fed sideways."""
+        pp = self._pp()
+        self.assertTrue(pp.holes)
+        for hole in pp.holes:
+            self.assertTrue(hole['needs_peck_drill'],
+                            'hole would be milled with a helical entry, not drilled')
+
+    def test_a_hole_pattern_refuses_a_milling_cutter(self):
+        """An end mill narrower than the hole would cut each hole out sideways. Refused
+        rather than silently milled - that is the exact bug class this project shipped
+        before."""
+        pp = FRCPostProcessor(0.0625, 0.157)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        with self.assertRaises(ValueError) as caught:
+            pp.load_tube_pattern(2.0, 12.0, mode='holes')
+        self.assertIn('twist drill', str(caught.exception))
 
 
 class TestTubeGCodeFormatting(unittest.TestCase):
@@ -185,10 +254,10 @@ class TestTubeGCodeFormatting(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        pp = FRCPostProcessor(0.0625, TOOL)
+        pp = FRCPostProcessor(0.0625, tube_patterns.HOLE_DIAMETER)
         pp.apply_material_preset('aluminum_tube')
         pp.tube_height = 1.0
-        pp.load_tube_pattern(2.0, 12.0)
+        pp.load_tube_pattern(2.0, 12.0, mode='holes')
         result = pp.generate_tube_pattern_gcode(
             tube_height=1.0, square_end=True, cut_to_length=True,
             tube_width=2.0, tube_length=12.0)
@@ -238,14 +307,19 @@ class TestProcessRoute(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ['PENGUINCAM_LOCAL'] = '1'
-        from frc_cam_gui_app import app
+        from frc_cam_gui_app import app, limiter
         app.config['TESTING'] = True
+        # /process allows 10 requests a minute. That is right for the deployed app and
+        # wrong here: this class makes more than that, and the limiter's 429 surfaces as
+        # a KeyError on the response body rather than as anything that reads like rate
+        # limiting - which cost a while to spot the first time.
+        limiter.enabled = False
         cls.client = app.test_client()
 
     def _post(self, **overrides):
-        data = {'material': 'aluminum_tube', 'tube_pattern': 'standard',
+        data = {'material': 'aluminum_tube', 'tube_pattern': 'holes',
                 'tube_size': '2x1-flat', 'tube_pattern_length': '24',
-                'tube_pattern_pockets': '1', 'tube_height': '1.0',
+                'tube_height': '1.0',
                 'thickness': '0.0625', 'tool_diameter': '0.157',
                 'square_end': '0', 'cut_to_length': '0'}
         data.update(overrides)
@@ -265,14 +339,36 @@ class TestProcessRoute(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('length', response.get_json()['error'].lower())
 
-    def test_holes_only_when_pockets_are_unticked(self):
-        """Checked by counting pocket TOOLPATHS, not the word 'pocket' - the tube header
-        says 'machining holes and pockets only' whether or not any pocket exists."""
-        with_pockets = self._post(tube_pattern_pockets='1').get_json()['gcode']
-        without = self._post(tube_pattern_pockets='0').get_json()['gcode']
-        marker = 'Position at pocket center'
-        self.assertGreater(with_pockets.count(marker), 0)
-        self.assertEqual(without.count(marker), 0)
+    def test_the_two_modes_cut_different_things(self):
+        """Counted by TOOLPATHS, not by the word 'pocket' - the tube header says
+        'machining holes and pockets only' whether or not any pocket exists."""
+        holes = self._post(tube_pattern='holes').get_json()['gcode']
+        light = self._post(tube_pattern='lightening').get_json()['gcode']
+        pocket_marker, drill_marker = 'Position at pocket center', 'Peck drill straight down'
+        self.assertEqual(holes.count(pocket_marker), 0)
+        self.assertGreater(holes.count(drill_marker), 0)
+        self.assertGreater(light.count(pocket_marker), 0)
+        self.assertEqual(light.count(drill_marker), 0)
+
+    def test_a_hole_job_reports_the_drill_in_its_header(self):
+        gcode = self._post(tube_pattern='holes').get_json()['gcode']
+        self.assertIn('twist drill', gcode)
+
+    def test_the_response_carries_geometry_for_the_cad_preview(self):
+        """The viewer draws the tube itself, which it cannot do from G-code alone -
+        nothing in a toolpath distinguishes a hole from a circular pocket."""
+        preview = self._post(tube_pattern='holes').get_json()['tube_preview']
+        self.assertEqual(preview['face_width'], 2.0)
+        self.assertEqual(preview['length'], 24.0)
+        self.assertTrue(preview['holes'])
+        self.assertEqual(preview['pockets'], [])
+        light = self._post(tube_pattern='lightening').get_json()['tube_preview']
+        self.assertTrue(light['pockets'])
+        self.assertEqual(light['holes'], [])
+
+    def test_an_unknown_pattern_is_refused(self):
+        response = self._post(tube_pattern='swiss-cheese')
+        self.assertEqual(response.status_code, 400)
 
     def test_a_1x1_still_generates(self):
         response = self._post(tube_size='1x1')

@@ -47,7 +47,6 @@
     tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
     tubePatternLength: 0,
     tubePatternLength_text: '',
-    tubePatternPockets: true,
     // The machine envelope is a read-only constraint; the parts' combined bounding box
     // is the stock (G54 origin = its lower-left).
     machine: { width: CFG.bed.width || 24, height: CFG.bed.height || 24, name: CFG.machineName || 'Machine' },
@@ -550,12 +549,6 @@
         state.tubePatternLength = inches; state.tubePatternLength_text = text;
         applyTubePatternUI();
       });
-    var pocketsBox = $('#f-tube-pattern-pockets');
-    if (pocketsBox) {
-      pocketsBox.addEventListener('change', function () {
-        state.tubePatternPockets = this.checked; applyTubePatternUI();
-      });
-    }
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
     var mt = $('#f-multitool');
@@ -647,20 +640,26 @@
     if (!note) return;
     if (!tubePatternOn()) { note.textContent = ''; return; }
     var len = state.tubePatternLength;
-    if (!(len > 0)) { note.textContent = 'Enter the tube length to see the hole count.'; return; }
-    var SPACING = 0.5, END_MARGIN = 0.375;
-    var usable = len - 2 * END_MARGIN;
-    if (usable < 0) {
-      note.textContent = 'Too short to hole at least ' + END_MARGIN + '" from both ends.';
-      return;
+    if (!(len > 0)) { note.textContent = 'Enter the tube length to see what will be cut.'; return; }
+    var SPACING = 0.5, END_MARGIN = 0.375, CELL = 2.0;
+    var wide = state.tubeSize === '2x1-flat';
+    if (state.tubePattern === 'holes') {
+      var usable = len - 2 * END_MARGIN;
+      if (usable < 0) {
+        note.textContent = 'Too short to hole at least ' + END_MARGIN + '" from both ends.';
+        return;
+      }
+      var cols = Math.floor(usable / SPACING) + 1;
+      var perCol = wide ? 3 : 1;
+      note.textContent = cols + ' columns of ' + perCol + ', ' + (cols * perCol)
+        + ' holes per face. Drilled with a 0.201" twist drill - load the drill, not an end mill.';
+    } else {
+      var run = len - 2 * END_MARGIN;
+      var cells = Math.floor(run / CELL);
+      if (cells < 1) { note.textContent = 'Too short for a lightening triangle.'; return; }
+      note.textContent = cells + ' triangles per face, '
+        + (wide ? '1.5' : '0.5') + '" x 1.875" each. Milled with your end mill. No holes.';
     }
-    var perRow = Math.floor(usable / SPACING) + 1;
-    var rows = state.tubeSize === '2x1-flat' ? 2 : 1;
-    var bits = perRow * rows + ' holes per face, ' + perRow + ' per row';
-    if (rows === 1) bits = perRow + ' holes per face, one centred row';
-    if (state.tubePatternPockets && rows === 2) bits += ', plus lightening pockets';
-    else if (state.tubePatternPockets && rows === 1) bits += '. No room to lighten a single-row face';
-    note.textContent = bits + '.';
   }
 
   function applyModeUI() {
@@ -1234,10 +1233,7 @@
     fd.append('cut_to_length', state.cutToLength ? '1' : '0');
     fd.append('tube_size', state.tubeSize);
     fd.append('tube_pattern', state.tubePattern);
-    if (generated) {
-      fd.append('tube_pattern_length', state.tubePatternLength);
-      fd.append('tube_pattern_pockets', state.tubePatternPockets ? '1' : '0');
-    }
+    if (generated) fd.append('tube_pattern_length', state.tubePatternLength);
     fd.append('timestamp', timestamp());
     if (p) fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'tube');
@@ -1411,6 +1407,10 @@
     viewer.load(resp.gcode, {
       stockWidth: W, stockDepth: D,
       stockHeight: stockH, toolDiameter: multiToolOn() ? jobKerf() : state.tool_diameter,
+      // Present only for a generated tube pattern, where the server knows the real
+      // shape. The viewer then draws the tube itself with the pattern cut through it,
+      // instead of a translucent box around the toolpath.
+      tube: resp.tube_preview || null,
     });
     dbg('preview', { w: W, d: D });
   }

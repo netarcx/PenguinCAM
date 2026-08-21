@@ -33,15 +33,20 @@ HOLE_DIAMETER = 0.201
 #: this grid interchange between tubes.
 HOLE_SPACING = 0.5
 
-#: Distance from a long edge of the face to a hole row centre. On 2x1 this puts the two
-#: rows an inch apart; on a narrow face there is only one row and it is centred instead.
+#: Distance from a long edge of the face to the outer hole rows. On a 2" face this puts
+#: the outer rows an inch apart with a third row down the centreline.
 ROW_INSET = 0.5
 
-#: A face narrower than this gets a single centred row. Two rows an inch apart need
-#: 2 * ROW_INSET of face plus material outside them; on a 1" face they would sit on the
-#: corner radii of the extrusion, where a drill wanders and a bolt head has nothing flat
-#: to sit on.
-TWO_ROW_MIN_WIDTH = 1.5
+#: A face narrower than this gets a single centred row. Three rows need 2 * ROW_INSET of
+#: face plus material outside them; on a 1" face the outer two would sit on the corner
+#: radii of the extrusion, where a drill wanders and a bolt head has nothing flat to sit
+#: on - so a 1" face gets one hole per column, down the centre.
+MULTI_ROW_MIN_WIDTH = 1.5
+
+#: Material left along each long edge of the face when lightening. The corner radius of
+#: the extrusion lives here, and it is the stiffest part of the section - cutting into it
+#: costs far more strength than the weight is worth.
+LIGHTENING_EDGE_MARGIN = 0.25
 
 #: Minimum distance from the machined end of the tube to the CENTRE of the nearest hole.
 #: Holes closer than this to a cut end tear out rather than cut cleanly.
@@ -52,9 +57,15 @@ MIN_END_MARGIN = 0.375
 #: target: pockets shrink to preserve it and are dropped entirely if they cannot.
 MIN_WEB = 0.125
 
-#: Y-extent of one truss cell (pocket + following web). Two hole pitches, so the truss
+#: Y-extent of one truss cell (pocket + following web). Four hole pitches, so the truss
 #: stays in step with the hole grid however long the tube is.
-TRUSS_CELL = 1.0
+#:
+#: The band across the face is fixed - it is whatever the two hole rows leave once MIN_WEB
+#: is kept clear of each - so this is the only dimension a bigger pocket can grow in. The
+#: trade is real: a longer cell removes more material, and it also lays the diagonal web
+#: down flatter, which is the direction that carries truss load less well. Two inches is
+#: about as long as the triangle stays a sensible shape on a 2x1.
+TRUSS_CELL = 2.0
 
 #: Clearance the tool needs INSIDE a pocket beyond its own radius. A pocket whose
 #: inscribed circle only just equals the cutter cannot be cleared - the toolpath
@@ -66,10 +77,11 @@ POCKET_TOOL_CLEARANCE = 0.01
 def hole_rows(face_width):
     """X positions of the hole rows across a face of this width.
 
-    Two rows inset from each edge when there is room, otherwise one centred row.
+    A 2" face carries three holes per column - the two outer rows an inch apart, plus one
+    on the centreline. A 1" face carries one, centred.
     """
-    if face_width >= TWO_ROW_MIN_WIDTH:
-        return [ROW_INSET, face_width - ROW_INSET]
+    if face_width >= MULTI_ROW_MIN_WIDTH:
+        return [ROW_INSET, face_width / 2.0, face_width - ROW_INSET]
     return [face_width / 2.0]
 
 
@@ -100,58 +112,53 @@ def _triangle_inradius(a, b):
     return (a + b - c) / 2.0
 
 
-def truss_pockets(face_width, tube_length, hole_ys, tool_diameter,
-                  hole_diameter=HOLE_DIAMETER, web=MIN_WEB, cell=TRUSS_CELL):
-    """Right-triangle lightening pockets down the middle of the face, as a truss.
+def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUSS_CELL,
+                  edge_margin=LIGHTENING_EDGE_MARGIN, end_margin=MIN_END_MARGIN):
+    """Right-triangle lightening pockets down the face, as a truss.
 
-    The pockets live in the band between the two hole rows. Each cell holds one right
-    triangle, and the right angle alternates between the left and right side of the band
-    from cell to cell, so the material left between them runs diagonally: a zigzag web
-    that carries load in tension and compression rather than a straight rail that carries
-    it in bending.
+    A lightening pattern carries no holes, so the pockets get the whole face rather than
+    a narrow band between hole rows: everything inside `edge_margin` of the long edges,
+    and inside `end_margin` of the ends. That is what makes the triangles worth cutting -
+    on a 2" face the band is 1.5" wide instead of the half inch left between hole rows.
 
-    Returns (pockets, warnings). A face with only one hole row has no band and gets no
-    pockets - that is the 1x1 case, and it is not an error.
+    Each cell holds one right triangle and the right angle alternates between the low-X
+    and high-X side from cell to cell, so the material left between them runs diagonally:
+    a zigzag web carrying load in tension and compression rather than a straight rail
+    carrying it in bending.
+
+    Returns (pockets, warnings).
     """
     warnings = []
-    rows = hole_rows(face_width)
-    if len(rows) < 2:
-        return [], warnings          # single-row face: no room between rows, by design
-
-    hole_r = hole_diameter / 2.0
-    band_lo = rows[0] + hole_r + web
-    band_hi = rows[-1] - hole_r - web
+    band_lo = edge_margin
+    band_hi = face_width - edge_margin
     band = band_hi - band_lo
     if band <= 0:
         warnings.append(
-            'No room for lightening pockets between the hole rows on a '
-            f'{face_width:.3f}" face; holes only.')
+            f'A {face_width:.3f}" face is too narrow to lighten once {edge_margin:.3f}" '
+            f'is left along each edge.')
         return [], warnings
 
-    if not hole_ys:
-        return [], warnings
-
-    # Span the pockets over the same length the holes occupy, so the truss starts and
-    # stops with the hole grid instead of running out past the last hole.
-    run_lo, run_hi = hole_ys[0], hole_ys[-1]
+    run_lo = end_margin
+    run_hi = tube_length - end_margin
     run = run_hi - run_lo
-    cells = int(math.floor(run / cell))
+    cells = int(math.floor(run / cell)) if run > 0 else 0
     if cells < 1:
-        return [], warnings          # too short for even one triangle; holes only
+        warnings.append(
+            f'A {tube_length:.3f}" tube is too short for a lightening triangle.')
+        return [], warnings
 
-    # Centre the whole truss on the hole run, for the same reason the holes themselves
-    # are centred: a symmetric tube stays symmetric.
+    # Centre the truss on the tube, for the same reason a hole run is centred.
     truss_span = cells * cell
     origin = run_lo + (run - truss_span) / 2.0
 
-    leg_y = cell - web              # triangle's Y leg; the web is the gap to the next cell
+    leg_y = cell - web              # the web is the gap to the next cell
     inradius = _triangle_inradius(band, leg_y)
     needed = tool_diameter / 2.0 + POCKET_TOOL_CLEARANCE
     if inradius < needed:
         warnings.append(
             f'Lightening pockets skipped: a {tool_diameter:.3f}" tool does not fit the '
             f'{band:.3f}" x {leg_y:.3f}" triangle (needs {needed * 2:.3f}" of room, '
-            f'the triangle holds {inradius * 2:.3f}"). Use a smaller tool for pockets.')
+            f'the triangle holds {inradius * 2:.3f}"). Use a smaller tool.')
         return [], warnings
 
     pockets = []
@@ -159,48 +166,89 @@ def truss_pockets(face_width, tube_length, hole_ys, tool_diameter,
         y0 = origin + i * cell + web / 2.0
         y1 = y0 + leg_y
         if i % 2 == 0:
-            # Right angle at the low-X end of the cell; apex points to high X.
             tri = [(band_lo, y0), (band_hi, y0), (band_lo, y1)]
         else:
             tri = [(band_lo, y0), (band_hi, y0), (band_hi, y1)]
         tri.append(tri[0])           # closed ring, as the pocket machining expects
         pockets.append(tri)
+
+    # Separation is guaranteed by the arithmetic above - each triangle's base is
+    # horizontal, so cell i ends a full `web` before cell i+1 starts, at every X. Checked
+    # anyway rather than trusted: two overlapping pockets would be cut twice, and the
+    # second pass would climb into air where the first already removed the wall.
+    overlap = _first_overlap(pockets)
+    if overlap is not None:
+        warnings.append(
+            f'Lightening pockets skipped: triangles {overlap[0]} and {overlap[1]} overlap. '
+            f'This is a bug in the pattern geometry, not something you did - please report '
+            f'the tube size and length.')
+        return [], warnings
     return pockets, warnings
 
 
-def generate(face_width, tube_length, tool_diameter,
-             hole_diameter=HOLE_DIAMETER, spacing=HOLE_SPACING, pockets=True):
+def _first_overlap(rings):
+    """Indices of the first pair of rings that share area, or None. Touching along an
+    edge is not overlapping - only shared AREA means the same metal gets cut twice."""
+    from shapely.geometry import Polygon
+    polys = [Polygon(r) for r in rings]
+    for i, a in enumerate(polys):
+        for j, b in enumerate(polys[i + 1:], i + 1):
+            if a.intersects(b) and a.intersection(b).area > 1e-12:
+                return (i, j)
+    return None
+
+
+#: The two things a tube pattern can be. They are mutually exclusive on purpose: a face
+#: drilled on half-inch centres has no room left to lighten, and a face cut away by a
+#: truss has nothing solid left to bolt through. Mixing them would produce a pattern that
+#: does neither job well, and - because holes want a twist drill and pockets want an end
+#: mill - would need a tool change mid-face to produce it.
+MODES = ('holes', 'lightening')
+
+
+def generate(face_width, tube_length, tool_diameter, mode='holes',
+             hole_diameter=HOLE_DIAMETER, spacing=HOLE_SPACING):
     """Build a standard tube pattern.
+
+    mode='holes'      - mounting holes only, drilled. Three per column on a 2" face, one
+                        on a 1" face. No pockets.
+    mode='lightening' - truss triangles only, milled. No holes.
 
     Returns a dict with:
         circles   - [{'center': (x, y), 'radius': r, 'diameter': d}], for classify_holes
         pockets   - [[(x, y), ...]] closed rings
         warnings  - human-readable notes; not errors, the pattern is still usable
+        rows/hole_ys - the hole grid, for callers that want to describe it
     """
-    warnings = []
+    if mode not in MODES:
+        raise ValueError(f'mode must be one of {MODES}, got {mode!r}')
     if tube_length <= 0:
         raise ValueError('Tube length must be positive')
     if face_width <= 0:
         raise ValueError('Face width must be positive')
 
-    rows = hole_rows(face_width)
-    ys = hole_run(tube_length, spacing=spacing)
-    if not ys:
-        warnings.append(
-            f'A {tube_length:.3f}" tube is too short to hold a hole at least '
-            f'{MIN_END_MARGIN:.3f}" from both ends; no holes generated.')
-
-    hole_r = hole_diameter / 2.0
+    warnings = []
     circles = []
-    for x in rows:
-        for y in ys:
-            circles.append({'center': (x, y), 'radius': hole_r, 'diameter': hole_diameter})
-
     pocket_rings = []
-    if pockets:
+    rows = []
+    ys = []
+
+    if mode == 'holes':
+        rows = hole_rows(face_width)
+        ys = hole_run(tube_length, spacing=spacing)
+        if not ys:
+            warnings.append(
+                f'A {tube_length:.3f}" tube is too short to hold a hole at least '
+                f'{MIN_END_MARGIN:.3f}" from both ends; no holes generated.')
+        hole_r = hole_diameter / 2.0
+        for x in rows:
+            for y in ys:
+                circles.append({'center': (x, y), 'radius': hole_r,
+                                'diameter': hole_diameter})
+    else:
         pocket_rings, pocket_warnings = truss_pockets(
-            face_width, tube_length, ys, tool_diameter, hole_diameter=hole_diameter)
+            face_width, tube_length, tool_diameter)
         warnings.extend(pocket_warnings)
 
     return {'circles': circles, 'pockets': pocket_rings, 'warnings': warnings,
-            'rows': rows, 'hole_ys': ys}
+            'rows': rows, 'hole_ys': ys, 'mode': mode}

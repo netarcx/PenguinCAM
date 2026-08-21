@@ -806,8 +806,10 @@ def process_file():
             square_end = request.form.get('square_end', '0') == '1'
             cut_to_length = request.form.get('cut_to_length', '0') == '1'
             tube_size = request.form.get('tube_size', '2x1-flat')
+            pattern_mode = request.form.get('tube_pattern', 'none')
             pattern_length = float(request.form.get('tube_pattern_length', 0) or 0)
-            pattern_pockets = request.form.get('tube_pattern_pockets', '1') == '1'
+            if use_tube_pattern and pattern_mode not in ('holes', 'lightening'):
+                return jsonify({'error': f'Unknown tube pattern {pattern_mode!r}'}), 400
             if use_tube_pattern and pattern_length <= 0:
                 return jsonify({'error': 'Tube length is required for a pre-designed '
                                          'pattern - it decides how many holes fit'}), 400
@@ -888,9 +890,16 @@ def process_file():
                     # the tube frame already), and no second face - the pattern is
                     # symmetric about the face centreline, so the mirrored copy lands on
                     # the same hole centres.
+                    # A drilled hole pattern is produced by sizing the cutter to the
+                    # hole, so that mode runs a twist drill of the hole's diameter rather
+                    # than whatever end mill the user picked for milling.
+                    pattern_tool = tool_diameter
+                    if pattern_mode == 'holes':
+                        import tube_patterns as _tp
+                        pattern_tool = _tp.HOLE_DIAMETER
                     pp = FRCPostProcessor(
                         material_thickness=thickness,
-                        tool_diameter=tool_diameter,
+                        tool_diameter=pattern_tool,
                         units='inch',
                         config=team_config
                     )
@@ -899,7 +908,7 @@ def process_file():
                     if user_name:
                         pp.user_name = user_name
                     pattern_warnings = pp.load_tube_pattern(
-                        tube_width, tube_length, pockets=pattern_pockets)
+                        tube_width, tube_length, mode=pattern_mode)
                 else:
                     pp = _prepare_tube_face(input_path)
                     pattern_warnings = []
@@ -1026,6 +1035,22 @@ def process_file():
             'console': console_output,
             'parameters': parameters
         }
+
+        # Geometry for the CAD preview: the tube as a solid with the pattern cut into
+        # it, rather than only the toolpath the machine will follow. Sent as the pattern's
+        # own numbers (face frame, inches) so the viewer does not have to infer shapes
+        # back out of G-code, which cannot tell a hole from a circular pocket.
+        if is_aluminum_tube and use_tube_pattern:
+            response_data['tube_preview'] = {
+                'face_width': tube_width,
+                'length': tube_length,
+                'height': tube_height,
+                'wall': thickness,
+                'mode': pattern_mode,
+                'holes': [{'x': h['center'][0], 'y': h['center'][1],
+                           'd': h['diameter']} for h in pp.holes],
+                'pockets': [[[pt[0], pt[1]] for pt in ring] for ring in pp.pockets],
+            }
 
         # Pattern warnings are advice, not failures - a pocket dropped because the tool
         # will not fit still leaves a machinable program, but the operator has to be told
