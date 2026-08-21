@@ -136,16 +136,18 @@ class TestTrussPockets(unittest.TestCase):
             for a, b in zip(polys, polys[1:]):
                 self.assertFalse(a.intersects(b) and a.intersection(b).area > 1e-12,
                                  f'pockets overlap on a {length}" tube')
-                self.assertAlmostEqual(a.distance(b), tube_patterns.MIN_WEB, places=6,
+                self.assertAlmostEqual(a.distance(b), tube_patterns.TRUSS_WEB, places=6,
                                        msg=f'gap drifted on a {length}" tube')
 
     def test_triangles_are_worth_cutting(self):
         """Guards the size against silently shrinking back."""
         poly = Polygon(tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets'][0])
         minx, miny, maxx, maxy = poly.bounds
-        self.assertGreater(maxy - miny, 1.5, 'triangle got short along the tube')
-        self.assertGreater(maxx - minx, 1.2, 'triangle no longer spans the face')
-        self.assertGreater(poly.area, 1.0, 'triangle area shrank')
+        # Bounds track TRUSS_WEB: a thicker web deliberately shrinks the triangles, so
+        # these are floors that leave room to tune it, not pins on the current value.
+        self.assertGreater(maxy - miny, 1.2, 'triangle got short along the tube')
+        self.assertGreater(maxx - minx, 1.0, 'triangle no longer spans the face')
+        self.assertGreater(poly.area, 0.7, 'triangle area shrank')
 
     def test_both_halves_of_every_cell_are_cut(self):
         """THE truss property. Each cell is split along a diagonal into two right
@@ -174,7 +176,7 @@ class TestTrussPockets(unittest.TestCase):
         polys = [Polygon(p) for p in
                  tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets']]
         worst = min(a.distance(b) for i, a in enumerate(polys) for b in polys[i + 1:])
-        self.assertGreaterEqual(worst, tube_patterns.MIN_WEB - 1e-6)
+        self.assertGreaterEqual(worst, tube_patterns.TRUSS_WEB - 1e-6)
 
     def test_the_overlap_guard_actually_catches_an_overlap(self):
         """The guard is only worth having if it fires. Two triangles that genuinely share

@@ -248,6 +248,8 @@
 
     group.add(machinedWall(false, H - wall, nearMetal));   // face 1, the near wall
     group.add(machinedWall(true, 0, farMetal));            // face 2, mirrored
+    group.userData.nearWall = group.children[0];
+    group.userData.farWall = group.children[1];
 
     // The two unmachined side walls. Plain boxes: nothing is cut in them, and drawing
     // them keeps the section reading as a tube rather than two loose plates.
@@ -265,7 +267,17 @@
       new THREE.LineBasicMaterial({ color: 0x8fa3bf, transparent: true, opacity: 0.45 }));
     edges.position.set(W / 2, H / 2, -L / 2);
     group.add(edges);
-    return group;
+
+    // Wrap it so the whole tube can be turned over about its own long axis, the way the
+    // operator turns it at the pause. Rotating the outer object about Z spins the inner
+    // one about the tube's centreline, because the inner one is offset to put that
+    // centreline on the origin.
+    var pivot = new THREE.Group();
+    group.position.set(-W / 2, -H / 2, L / 2);
+    pivot.add(group);
+    pivot.position.set(W / 2, H / 2, -L / 2);
+    pivot.userData.tube = { W: W, H: H, L: L };
+    return pivot;
   };
 
   GcodeViewer.prototype.load = function (gcode, opts) {
@@ -273,33 +285,14 @@
     var parsed = this._parse(gcode);
     this.moves = parsed.moves;
     if (!this.moves.length) return;
-
-    // Put the second face where it really is. The machine cuts face 2 at the same
-    // coordinates as face 1 because the OPERATOR flipped the tube in between - so drawn
-    // literally, both patterns land on the same wall, mirrored, on top of each other.
-    // Undo the flip for display: mirror X back about the tube's width and reflect Z
-    // through its height, which is exactly the 180-degree roll the operator performed.
-    // The toolpath then sits on the wall it actually machines, and the two stop
-    // colliding.
-    if (opts.tube && opts.tube.face_width && opts.tube.height) {
-      var mw = opts.tube.face_width, mh = opts.tube.height;
-      var b2 = parsed.bounds;
-      b2.minX = Infinity; b2.maxX = -Infinity; b2.minZ = Infinity; b2.maxZ = -Infinity;
-      this.moves.forEach(function (m) {
-        if (m.phase === 2) {
-          m.from = { x: mw - m.from.x, y: m.from.y, z: mh - m.from.z };
-          m.to = { x: mw - m.to.x, y: m.to.y, z: mh - m.to.z };
-        }
-        [m.from, m.to].forEach(function (pt) {
-          if (pt.x < b2.minX) b2.minX = pt.x;
-          if (pt.x > b2.maxX) b2.maxX = pt.x;
-          if (pt.z < b2.minZ) b2.minZ = pt.z;
-          if (pt.z > b2.maxZ) b2.maxZ = pt.z;
-        });
-      });
-    }
     var b = parsed.bounds;
     var maxX = b.maxX, maxY = b.maxY, maxZ = b.maxZ, minX = b.minX, minY = b.minY;
+
+    // NOTE: phase-2 moves are NOT transformed. The router reaches only the top of the
+    // tube; the OPERATOR turns the work over at the M0. Drawing the second face's path
+    // under the tube - which an earlier version did, to stop the two phases overlapping -
+    // showed the spindle reaching somewhere no router can go. The tube model is rotated
+    // instead (see _update), which is what actually happens.
 
     // Clear everything except lights.
     var keep = [];
@@ -336,7 +329,8 @@
     if (opts.tube && opts.tube.face_width && opts.tube.length) {
       // A real model of the part, not a box standing in for it.
       this.stockHeight = opts.tube.height;
-      this.scene.add(this._buildTube(opts.tube));
+      this.tubeGroup = this._buildTube(opts.tube);
+      this.scene.add(this.tubeGroup);
     } else {
       var stockGeo = new THREE.BoxGeometry(stockW, stockH, stockD);
       var stockMat = new THREE.MeshStandardMaterial({
@@ -414,39 +408,56 @@
       this.toolMesh.position.set(x, z + tl / 2, -y);
     }
 
+    // Turn the work over at the pause, exactly as the operator does. The router never
+    // moves below the tube; the tube presents its other side to it. Rotating about Z
+    // spins the tube on its own long axis, so the wall being machined is always the one
+    // facing up - which is why the toolpath can stay where the spindle really is.
+    var phase = move.phase || 1;
+    if (this.tubeGroup) this.tubeGroup.rotation.z = (phase === 2) ? Math.PI : 0;
+
     if (this.completedLine) this.scene.remove(this.completedLine);
     if (this.upcomingLine) this.scene.remove(this.upcomingLine);
 
+    // Only the phase being cut is drawn. Both phases run at the same coordinates - the
+    // part moved between them, not the tool - so drawing both at once stacks two
+    // mirrored patterns in the same space and reads as overlapping nonsense.
+    var self2 = this;
+    var inPhase = function (m) { return (m.phase || 1) === phase; };
     if (idx < this.moves.length - 1) {
       var up = [];
       for (var i = idx; i < this.moves.length; i++) {
         var m = this.moves[i];
+        if (!inPhase(m)) break;      // the rest belongs to the other side of the tube
         if (i === idx) {
           var fz = (i === 0 && (!m.from.z || m.from.z === 0)) ? this.stockHeight + 0.5 : m.from.z;
           up.push(new THREE.Vector3(m.from.x, fz, -m.from.y));
         }
         up.push(new THREE.Vector3(m.to.x, m.to.z, -m.to.y));
       }
-      this.upcomingLine = new THREE.Line(
+      if (up.length < 2) up = [];
+      if (up.length) this.upcomingLine = new THREE.Line(
         new THREE.BufferGeometry().setFromPoints(up),
         new THREE.LineBasicMaterial({ color: 0xfdb515, opacity: 0.8, transparent: true }));
-      this.scene.add(this.upcomingLine);
+      if (this.upcomingLine) this.scene.add(this.upcomingLine);
     }
 
     if (idx > 0) {
       var done = [];
       for (var k = 0; k <= idx; k++) {
         var mm = this.moves[k];
-        if (k === 0) {
+        if (!inPhase(mm)) { done = []; continue; }   // restart at the flip
+        if (!done.length) {
           var fz2 = (!mm.from.z || mm.from.z === 0) ? this.stockHeight + 0.5 : mm.from.z;
           done.push(new THREE.Vector3(mm.from.x, fz2, -mm.from.y));
         }
         done.push(new THREE.Vector3(mm.to.x, mm.to.z, -mm.to.y));
       }
-      this.completedLine = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(done),
-        new THREE.LineBasicMaterial({ color: 0x2ea043 }));
-      this.scene.add(this.completedLine);
+      if (done.length > 1) {
+        this.completedLine = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(done),
+          new THREE.LineBasicMaterial({ color: 0x2ea043 }));
+        this.scene.add(this.completedLine);
+      }
     }
     // _update rebuilds both lines from scratch on every frame, so the visibility choice
     // has to be reapplied here or it is lost the moment the scrubber moves.

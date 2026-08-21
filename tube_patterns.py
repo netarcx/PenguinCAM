@@ -59,6 +59,15 @@ LIGHTENING_EDGE_MARGIN = 0.25
 MIN_END_MARGIN = 0.375
 
 
+#: Material left between the truss pockets - the web itself. Deliberately its OWN
+#: constant rather than MIN_WEB: that one also sets how close hole rows may sit, and
+#: thickening the truss should not quietly move the hole pattern's thresholds with it.
+#: Each triangle is inset by half of this from its own edges, so every gap in the
+#: finished pattern - across the shared diagonal, between cells, and out to the band
+#: edges - comes to exactly this width. Raise it for a stiffer part, lower it for a
+#: lighter one; the triangles shrink and grow to suit.
+TRUSS_WEB = 0.1875
+
 #: Y-extent of one truss cell (pocket + following web). Four hole pitches, so the truss
 #: stays in step with the hole grid however long the tube is.
 #:
@@ -127,7 +136,7 @@ def _triangle_inradius(a, b):
     return (a + b - c) / 2.0
 
 
-def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUSS_CELL,
+def truss_pockets(face_width, tube_length, tool_diameter, web=TRUSS_WEB, cell=TRUSS_CELL,
                   edge_margin=LIGHTENING_EDGE_MARGIN, end_margin=MIN_END_MARGIN,
                   helix_radius_multiplier=DEFAULT_HELIX_RADIUS_MULTIPLIER):
     """Right-triangle lightening pockets down the face, as a truss.
@@ -204,7 +213,7 @@ def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUS
     #
     # Each triangle is inset by half the web from its own edges, so every gap in the
     # finished pattern - across the shared diagonal, between cells, and to the band
-    # edges - comes out at `web`. Mitred joins keep the corners sharp; the default
+    # edges - comes out at `web` (TRUSS_WEB). Thicker web, smaller triangles. Mitred joins keep the corners sharp; the default
     # rounded join would eat the points of the triangle.
     from shapely.geometry import Polygon as _Poly
 
