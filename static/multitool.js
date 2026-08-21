@@ -640,6 +640,57 @@
     return body;
   }
 
+  /* Focus survival across a re-render.
+   *
+   * api.render rebuilds #mt-tools-body, #mt-runorder and #mt-parts from scratch with
+   * innerHTML = '', which destroys whatever node the caret was in. Any keystroke that
+   * calls touch() re-renders, so without this a user typing a tool diameter loses focus
+   * (and their caret position) after every single character.
+   *
+   * The generated controls carry no ids of their own, so the key is structural: the
+   * index path from the rebuilt container down to the focused node. Same data renders
+   * the same tree, so the path finds the same control again. If the tree HAS changed
+   * shape - a row added or removed - the path simply misses and focus falls back to the
+   * document, which is the honest outcome rather than focusing some unrelated field.
+   */
+  var FOCUS_ROOTS = ['mt-tools-body', 'mt-runorder', 'mt-parts'];
+
+  function focusKey(node) {
+    if (!node || node === document.body) return null;
+    var path = [];
+    var cur = node;
+    while (cur && cur.parentNode) {
+      if (cur.id && FOCUS_ROOTS.indexOf(cur.id) >= 0) {
+        var key = { root: cur.id, path: path };
+        // Caret position matters as much as focus itself: restoring focus to the start
+        // of a partly-typed number would have the next keystroke land in the wrong place.
+        if (typeof node.selectionStart === 'number') {
+          try {
+            key.start = node.selectionStart;
+            key.end = node.selectionEnd;
+          } catch (e) { /* selection unsupported on this input type - focus alone is fine */ }
+        }
+        return key;
+      }
+      path.unshift(Array.prototype.indexOf.call(cur.parentNode.childNodes, cur));
+      cur = cur.parentNode;
+    }
+    return null;      // focus was outside the editor; nothing for us to restore
+  }
+
+  function restoreFocus(key) {
+    if (!key) return;
+    var node = document.getElementById(key.root);
+    for (var i = 0; node && i < key.path.length; i++) {
+      node = node.childNodes[key.path[i]];
+    }
+    if (!node || typeof node.focus !== 'function') return;
+    node.focus();
+    if (typeof key.start === 'number' && typeof node.setSelectionRange === 'function') {
+      try { node.setSelectionRange(key.start, key.end); } catch (e) { /* not a text input */ }
+    }
+  }
+
   api.render = function () {
     var host = $('#mt-tools-body');
     if (!host) return;
