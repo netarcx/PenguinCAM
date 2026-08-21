@@ -192,16 +192,41 @@ def truss_pockets(face_width, tube_length, tool_diameter, web=MIN_WEB, cell=TRUS
             f'clear inside the {band:.3f}" x {leg_y:.3f}" triangle. Use a smaller tool.')
         return [], warnings
 
+    # A truss, not a row of triangles. Each cell is split along a diagonal into TWO
+    # right triangles - one pointing each way - and both are cut. What is left between
+    # them is a single diagonal web, and because the diagonal reverses from cell to cell
+    # the webs zigzag: that zigzag IS the truss, and it is what carries load in tension
+    # and compression instead of bending.
+    #
+    # Cutting only the first of each pair (what this did before) leaves a solid triangle
+    # of metal where the second should be, so the part reads as separate triangles with
+    # half the truss missing - which is exactly what it looked like.
+    #
+    # Each triangle is inset by half the web from its own edges, so every gap in the
+    # finished pattern - across the shared diagonal, between cells, and to the band
+    # edges - comes out at `web`. Mitred joins keep the corners sharp; the default
+    # rounded join would eat the points of the triangle.
+    from shapely.geometry import Polygon as _Poly
+
     pockets = []
     for i in range(cells):
-        y0 = origin + i * cell + web / 2.0
-        y1 = y0 + leg_y
+        y0 = origin + i * cell
+        y1 = y0 + cell
         if i % 2 == 0:
-            tri = [(band_lo, y0), (band_hi, y0), (band_lo, y1)]
+            # Diagonal from the low-X end of this cell to the high-X end of the next.
+            halves = ([(band_lo, y0), (band_hi, y0), (band_lo, y1)],
+                      [(band_hi, y0), (band_hi, y1), (band_lo, y1)])
         else:
-            tri = [(band_lo, y0), (band_hi, y0), (band_hi, y1)]
-        tri.append(tri[0])           # closed ring, as the pocket machining expects
-        pockets.append(tri)
+            halves = ([(band_lo, y0), (band_hi, y0), (band_hi, y1)],
+                      [(band_lo, y0), (band_hi, y1), (band_lo, y1)])
+        for corners in halves:
+            shrunk = _Poly(corners).buffer(-web / 2.0, join_style=2)
+            if shrunk.is_empty or shrunk.geom_type != 'Polygon':
+                continue
+            ring = [(round(x, 6), round(y, 6)) for x, y in shrunk.exterior.coords]
+            if len(ring) < 4:
+                continue
+            pockets.append(ring)
 
     # Separation is guaranteed by the arithmetic above - each triangle's base is
     # horizontal, so cell i ends a full `web` before cell i+1 starts, at every X. Checked

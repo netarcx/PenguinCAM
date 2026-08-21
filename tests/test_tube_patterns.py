@@ -140,13 +140,41 @@ class TestTrussPockets(unittest.TestCase):
                                        msg=f'gap drifted on a {length}" tube')
 
     def test_triangles_are_worth_cutting(self):
-        """Guards the size against silently shrinking back. A 2x1 triangle spans the full
-        band between the hole rows and most of a two-inch cell."""
+        """Guards the size against silently shrinking back."""
         poly = Polygon(tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets'][0])
         minx, miny, maxx, maxy = poly.bounds
         self.assertGreater(maxy - miny, 1.5, 'triangle got short along the tube')
-        self.assertGreater(maxx - minx, 1.4, 'triangle no longer spans the face')
-        self.assertGreater(poly.area, 1.2, 'triangle area shrank')
+        self.assertGreater(maxx - minx, 1.2, 'triangle no longer spans the face')
+        self.assertGreater(poly.area, 1.0, 'triangle area shrank')
+
+    def test_both_halves_of_every_cell_are_cut(self):
+        """THE truss property. Each cell is split along a diagonal into two right
+        triangles and BOTH are removed, so what is left between them is a diagonal web.
+        Cutting only one per cell leaves a solid triangle where the second should be -
+        the part then reads as a row of separate triangles with half the truss missing,
+        which is exactly how it looked."""
+        for length, cells in ((12.0, 5), (24.0, 11)):
+            pockets = tube_patterns.generate(2.0, length, TOOL, mode='lightening')['pockets']
+            self.assertEqual(len(pockets), cells * 2,
+                             f'{length}" tube: expected two triangles per cell')
+
+    def test_the_diagonal_reverses_from_cell_to_cell(self):
+        """A Warren truss zigzags. If every cell used the same diagonal the webs would
+        all run the same way, which is a weaker structure and not what was asked for."""
+        pockets = tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets']
+        # The first triangle of each cell alternates which corner it occupies.
+        firsts = [Polygon(p).centroid.x for p in pockets[::2]]
+        self.assertGreater(len(set(round(x, 2) for x in firsts)), 1,
+                           'every cell used the same diagonal - not a truss')
+
+    def test_the_webs_between_triangles_hold_the_minimum(self):
+        """Every gap - across the shared diagonal, between cells, and to the band edges -
+        is the web. That web is the truss member; if it thins, the part is weaker than
+        designed."""
+        polys = [Polygon(p) for p in
+                 tube_patterns.generate(2.0, 24.0, TOOL, mode='lightening')['pockets']]
+        worst = min(a.distance(b) for i, a in enumerate(polys) for b in polys[i + 1:])
+        self.assertGreaterEqual(worst, tube_patterns.MIN_WEB - 1e-6)
 
     def test_the_overlap_guard_actually_catches_an_overlap(self):
         """The guard is only worth having if it fires. Two triangles that genuinely share

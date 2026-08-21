@@ -1356,6 +1356,52 @@ def process_job():
 # manual tool-change pause at every switch. See tooling.py for the model.
 # ============================================================================
 
+@app.route('/api/tube-pattern')
+@limiter.limit("60 per minute")
+def tube_pattern_geometry():
+    """The geometry of a pre-designed tube pattern, without generating any G-code.
+
+    The Layout step needs to draw the tube before anything has been generated, and the
+    Setup note needs an exact count rather than arithmetic on copies of the generator's
+    constants - copies that silently went stale the last time a constant moved. Both now
+    ask the generator itself, which is cheap: this builds circles and rings and stops.
+    """
+    import tube_patterns
+
+    size = request.args.get('size', '2x1-flat')
+    mode = request.args.get('mode', 'holes')
+    if size not in VALID_TUBE_SIZES:
+        return jsonify({'error': f'Unknown tube size {size!r}'}), 400
+    if mode not in tube_patterns.MODES:
+        return jsonify({'error': f'Unknown pattern {mode!r}'}), 400
+    try:
+        length = float(request.args.get('length', 0))
+        tool = float(request.args.get('tool', DEFAULT_TOOL_DIAMETER_IN))
+    except ValueError:
+        return jsonify({'error': 'length and tool must be numbers'}), 400
+
+    face_width, height = FRCPostProcessor._parse_tube_size(None, size)
+    # A drilled pattern runs the drill, and the tool decides whether pockets survive, so
+    # the preview has to be asked about the same tool the job will use.
+    if mode == 'holes':
+        tool = tube_patterns.HOLE_DIAMETER
+    try:
+        pattern = tube_patterns.generate(face_width, length, tool, mode=mode)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    return jsonify({
+        'face_width': face_width,
+        'height': height,
+        'length': length,
+        'mode': mode,
+        'holes': [{'x': c['center'][0], 'y': c['center'][1], 'd': c['diameter']}
+                  for c in pattern['circles']],
+        'pockets': [[[x, y] for x, y in ring] for ring in pattern['pockets']],
+        'warnings': pattern['warnings'],
+    })
+
+
 @app.route('/api/drill-sizes')
 def drill_size_lookup():
     """Standard drill sizes, and the drill for a given hole.

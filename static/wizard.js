@@ -427,6 +427,10 @@
     }
     if (name === 'layout') {
       updateLayoutInfo();
+      // A generated pattern has nothing cached until the geometry has been asked for -
+      // and Layout is reached before anything is generated, which is why this step came
+      // up blank.
+      if (tubePatternOn() && !tubePatternGeom) refreshTubePatternGeometry();
       // Tubing shares one orientation across both faces; select them together so the
       // rotation handle drives the whole tube at once, and keep them packed tidily.
       if (state.mode === 'tubing') {
@@ -542,20 +546,21 @@
       state.tubeSize = sizeSel.value;
       sizeSel.addEventListener('change', function () {
         state.tubeSize = this.value; applyTubePatternUI(); invalidateTubePreview();
+        refreshTubePatternGeometry();
       });
     }
     var patSel = $('#f-tube-pattern');
     if (patSel) {
       patSel.addEventListener('change', function () {
         state.tubePattern = this.value; applyTubePatternUI(); updatePartsModeNote();
-        invalidateTubePreview();
+        invalidateTubePreview(); refreshTubePatternGeometry();
       });
     }
     bindLengthField($('#f-tube-pattern-length'),
       function () { return state.tubePatternLength_text; },
       function (inches, text) {
         state.tubePatternLength = inches; state.tubePatternLength_text = text;
-        applyTubePatternUI(); invalidateTubePreview();
+        applyTubePatternUI(); invalidateTubePreview(); refreshTubePatternGeometry();
       });
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
@@ -655,6 +660,36 @@
       'Settings changed - press Next, or return to Preview, to regenerate.';
   }
 
+  /* The pattern the server would generate, fetched so Layout can draw the tube before
+     anything has been made and so the count comes from the generator instead of a copy
+     of its constants living over here. */
+  var tubePatternGeom = null;
+  var tubePatternToken = 0;
+
+  function refreshTubePatternGeometry() {
+    if (!tubePatternOn() || !(state.tubePatternLength > 0)) {
+      tubePatternGeom = null;
+      drawLayout();
+      return;
+    }
+    var token = ++tubePatternToken;
+    var q = '?size=' + encodeURIComponent(state.tubeSize)
+          + '&length=' + state.tubePatternLength
+          + '&mode=' + encodeURIComponent(state.tubePattern)
+          + '&tool=' + state.tool_diameter;
+    fetch('/api/tube-pattern' + q, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (token !== tubePatternToken) return;   // a later edit already superseded this
+        tubePatternGeom = j && !j.error ? j : null;
+        applyTubePatternUI();
+        updateLayoutInfo();
+        refitView();
+        drawLayout();
+      })
+      .catch(function () { /* the note falls back to its own arithmetic */ });
+  }
+
   function applyTubePatternUI() {
     var box = $('#tube-pattern-fields');
     if (box) box.hidden = !tubePatternOn();
@@ -663,6 +698,20 @@
     if (!tubePatternOn()) { note.textContent = ''; return; }
     var len = state.tubePatternLength;
     if (!(len > 0)) { note.textContent = 'Enter the tube length to see what will be cut.'; return; }
+    if (tubePatternGeom && tubePatternGeom.length === state.tubePatternLength) {
+      // Counts straight from the generator, so the note cannot drift from the program.
+      var gh = tubePatternGeom.holes.length, gp = tubePatternGeom.pockets.length;
+      if (!gh && !gp) {
+        note.textContent = (tubePatternGeom.warnings || []).join(' ')
+          || 'This tube pattern would cut nothing.';
+        return;
+      }
+      note.textContent = gh
+        ? gh + ' holes per face, drilled with a 0.201" twist drill - load the drill, '
+              + 'not an end mill.'
+        : gp + ' truss pockets per face, milled with your end mill. No holes.';
+      return;
+    }
     var SPACING = 0.5, END_MARGIN = 0.375, CELL = 2.0;
     var wide = state.tubeSize === '2x1-flat';
     if (state.tubePattern === 'holes') {
@@ -896,6 +945,13 @@
     var canvas = $('#layout-canvas');
     if (!canvas) return;
     var bb = combinedBBox();
+    if (tubePatternOn() && tubePatternGeom) {
+      // No parts to bound, so fit the tube instead - otherwise the view falls back to a
+      // fixed 10" square and the tube is drawn off the edge of it.
+      bb = { minX: 0, minY: 0, maxX: tubePatternGeom.face_width,
+             maxY: tubePatternGeom.length,
+             w: tubePatternGeom.face_width, h: tubePatternGeom.length };
+    }
     var w = bb ? Math.max(bb.w, 0.001) : 10;
     var h = bb ? Math.max(bb.h, 0.001) : 10;
     canvasState.wcx = bb ? (bb.minX + bb.maxX) / 2 : 0;
@@ -941,6 +997,48 @@
     canvasState.handleDir = (sel.length === 1) ? rotatePoint(0, 1, sel[0].rotation) : [0, 1];
   }
 
+  /* The tube, face-on, as it sits on the jig: X across the face, Y along the tube away
+     from the spindle. Same frame the pattern is authored in, so nothing has to be
+     transformed to draw it. */
+  function drawTubePattern(ctx, col, geom) {
+    var W = geom.face_width, L = geom.length;
+    var a = worldToCanvas(0, 0), b = worldToCanvas(W, L);
+    ctx.save();
+    ctx.fillStyle = 'rgba(150,165,190,0.10)';
+    ctx.strokeStyle = col.ink;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.rect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(20,22,28,0.85)';
+    ctx.strokeStyle = col.accent;
+    ctx.lineWidth = 1;
+    (geom.pockets || []).forEach(function (ring) {
+      ctx.beginPath();
+      ring.forEach(function (pt, i) {
+        var p = worldToCanvas(pt[0], pt[1]);
+        if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]);
+      });
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    });
+    (geom.holes || []).forEach(function (h) {
+      var c = worldToCanvas(h.x, h.y);
+      var r = Math.max(1, (h.d / 2) * canvasState.scale);
+      ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    });
+
+    // The jig origin, which is what the operator actually sets.
+    var o = worldToCanvas(0, 0);
+    ctx.fillStyle = col.ok;
+    ctx.beginPath(); ctx.arc(o[0], o[1], 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = col.muted;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillText('G54 origin', o[0] + 7, o[1] - 6);
+    ctx.restore();
+  }
+
   function drawLayout() {
     var canvas = $('#layout-canvas');
     if (!canvas) return;
@@ -963,6 +1061,14 @@
       accent: cssVar('--accent') || '#2f81f7',
       ok: cssVar('--ok') || '#3fb950',
     };
+
+    // A generated tube pattern has no parts to nest, so this canvas had nothing to draw
+    // and the Layout step came up blank. Draw the tube itself: the outline the operator
+    // clamps in the jig, and the pattern that will be cut into it.
+    if (tubePatternOn() && tubePatternGeom) {
+      drawTubePattern(ctx, col, tubePatternGeom);
+      return;
+    }
 
     // Stock = combined bounding box (dotted). Red if it exceeds the machine. The G54
     // origin marker sits at its lower-left.
