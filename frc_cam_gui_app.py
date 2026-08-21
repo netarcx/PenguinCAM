@@ -759,16 +759,28 @@ def _detect_tube_dims(dxf_path, rotation):
 def process_file():
     """Process uploaded DXF file and generate G-code"""
     try:
+        # A pre-designed tube pattern is generated, not drawn, so that path has no DXF to
+        # upload. Decided before the upload checks below, which otherwise reject the
+        # request before any of the tube parameters are even read.
+        use_tube_pattern = (
+            request.form.get('material', '').lower() == 'aluminum_tube'
+            and request.form.get('tube_pattern', 'none') != 'none')
+
         # Get uploaded file
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        if not file.filename.lower().endswith('.dxf'):
-            return jsonify({'error': 'File must be a DXF file'}), 400
+        file = request.files.get('file')
+        if use_tube_pattern:
+            # A DXF may still be sent (the browser keeps the field), and is simply unused.
+            if file is not None and file.filename and not file.filename.lower().endswith('.dxf'):
+                return jsonify({'error': 'File must be a DXF file'}), 400
+        else:
+            if file is None:
+                return jsonify({'error': 'No file uploaded'}), 400
+
+            if file.filename == '':
+                return jsonify({'error': 'No file selected'}), 400
+
+            if not file.filename.lower().endswith('.dxf'):
+                return jsonify({'error': 'File must be a DXF file'}), 400
         
         # Get parameters
         material = request.form.get('material', 'plywood')
@@ -793,18 +805,33 @@ def process_file():
             tube_height = float(request.form.get('tube_height', 1.0))
             square_end = request.form.get('square_end', '0') == '1'
             cut_to_length = request.form.get('cut_to_length', '0') == '1'
+            tube_size = request.form.get('tube_size', '2x1-flat')
+            pattern_length = float(request.form.get('tube_pattern_length', 0) or 0)
+            pattern_pockets = request.form.get('tube_pattern_pockets', '1') == '1'
+            if use_tube_pattern and pattern_length <= 0:
+                return jsonify({'error': 'Tube length is required for a pre-designed '
+                                         'pattern - it decides how many holes fit'}), 400
         else:
             # Standard mode parameters
             tab_spacing = float(request.form.get('tab_spacing', 6.0))
 
         # Save uploaded file
-        input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
-        file.save(input_path)
+        input_path = None
+        if file is not None and file.filename:
+            input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
+            file.save(input_path)
 
         # For tube mode, extract DXF bounds to determine tube dimensions
         tube_width = None
         tube_length = None
-        if is_aluminum_tube:
+        if use_tube_pattern:
+            # The tube is described, not measured: its face width follows from the size
+            # and its length is what the operator typed.
+            tube_width, _ = FRCPostProcessor._parse_tube_size(None, tube_size)
+            tube_length = pattern_length
+            log(f"\U0001f4d0 Pre-designed {tube_size} pattern on a {tube_length:.3f}\" tube "
+                f"(face {tube_width:.3f}\")")
+        elif is_aluminum_tube:
             tube_width, tube_length = _detect_tube_dims(input_path, rotation)
             if tube_width is not None:
                 log(f"📏 Detected tube dimensions (after {rotation}° rotation): {tube_width:.3f}\" x {tube_length:.3f}\"")
@@ -814,10 +841,13 @@ def process_file():
             # Use Onshape-derived name
             base_name = suggested_filename
             log(f"📝 Using Onshape filename base: {base_name}")
-        else:
+        elif file is not None and file.filename:
             # Use DXF filename
             base_name = Path(file.filename).stem
-            log(f"📝 Using DXF filename base: {base_name}")
+            log(f"Using DXF filename base: {base_name}")
+        else:
+            base_name = f"tube_{tube_size}_{tube_length:g}in".replace('.', '_')
+            log(f"Using generated tube pattern name: {base_name}")
 
         log(f"🚀 Running post-processor API...")
 
@@ -853,12 +883,33 @@ def process_file():
                     face_pp.classify_holes()
                     return face_pp
 
-                pp = _prepare_tube_face(input_path)
+                if use_tube_pattern:
+                    # Generated geometry: no DXF, no rotation (the pattern is authored in
+                    # the tube frame already), and no second face - the pattern is
+                    # symmetric about the face centreline, so the mirrored copy lands on
+                    # the same hole centres.
+                    pp = FRCPostProcessor(
+                        material_thickness=thickness,
+                        tool_diameter=tool_diameter,
+                        units='inch',
+                        config=team_config
+                    )
+                    pp.tube_height = tube_height
+                    pp.apply_material_preset(material, machine_id)
+                    if user_name:
+                        pp.user_name = user_name
+                    pattern_warnings = pp.load_tube_pattern(
+                        tube_width, tube_length, pockets=pattern_pockets)
+                else:
+                    pp = _prepare_tube_face(input_path)
+                    pattern_warnings = []
 
                 # Optional distinct second face. When absent, face 1 is mirrored onto the
                 # opposite side (one-face mode).
                 second_face_pp = None
                 face2 = request.files.get('file_face2')
+                if use_tube_pattern:
+                    face2 = None          # a generated pattern mirrors onto face 2
                 if face2 is not None and face2.filename:
                     if not face2.filename.lower().endswith('.dxf'):
                         return jsonify({'error': 'Second face must be a DXF file'}), 400
@@ -975,6 +1026,12 @@ def process_file():
             'console': console_output,
             'parameters': parameters
         }
+
+        # Pattern warnings are advice, not failures - a pocket dropped because the tool
+        # will not fit still leaves a machinable program, but the operator has to be told
+        # that the lightening they asked for is not in the file.
+        if is_aluminum_tube and pattern_warnings:
+            response_data['warnings'] = list(pattern_warnings)
 
         # Add cycle time if available
         if 'cycle_time_display' in result.stats:

@@ -23,6 +23,7 @@ PenguinCAM is **deployed and production-ready** at https://penguincam.popcornpen
 - ✅ Non-standard holes milled as circular pockets
 - ✅ Smart tab placement and automatic removal
 - ✅ Tubing support - makes square ends and mirror-image pattern in opposing faces
+- ✅ **Pre-designed tube patterns** - 1x1 and 2x1 get #10 clearance holes on 1/2" centres and right-triangle truss lightening with no DXF at all (docs/TUBE_PATTERNS.md)
 - ✅ Tool compensation
 - ✅ **Multiple tools per part** - an ordered operation list per part, each operation with its own tool and scope; the job groups work by tool and pauses for a manual tool change at each switch
 - ✅ **Chamfering** - V-tool edge break on the perimeter, holes, or pockets

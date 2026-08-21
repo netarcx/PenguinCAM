@@ -140,6 +140,7 @@ Detailed documentation lives in the `docs/` directory. **Read these before modif
 |------|--------------|
 | `MULTI_TOOL_STATUS.md` | **Read first when resuming multi-tool work** - what is unverified and what is left |
 | `MULTI_TOOL_GUIDE.md` | Changing `tooling.py`, the multi-tool routes, `static/multitool.js`, drilling or the chamfer code |
+| `TUBE_PATTERNS.md` | Changing `tube_patterns.py`, `load_tube_pattern`, or the tube branch of `/process` |
 | `LOCAL_MODE.md` | Changing `local_mode.py`, `penguincam_local.py`, or any authentication gate |
 | `Z_COORDINATE_SYSTEM.md` | Modifying Z-axis calculations, safe heights, cut depths, or plunge moves |
 | `TOOL_COMPENSATION_GUIDE.md` | Changing offset logic for perimeters, pockets, or holes |

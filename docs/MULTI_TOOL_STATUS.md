@@ -94,7 +94,14 @@ Each exists because it was actually violated at some point in development:
 
 4. Multi-tool is **2D only**. 2.5D takes depths from CAD layers and tubing runs a fixed
    program; both would need their own design. Guarded server-side, hidden in the UI, on
-   the roadmap.
+   the roadmap. (Tubing has since gained *pre-designed patterns* - see
+   `TUBE_PATTERNS.md` - but those still run the fixed single-tool tube program.)
+
+4b. **Nothing from `tube_patterns.py` has been cut on real stock either**, and tube
+   programs get only the frame-independent half of `gcode_audit.py`: the ZMIN and
+   rapid-below-top checks assume the plate Z-frame and do not run on a tube job. So the
+   warning at the top of this file applies to generated tube patterns with full force -
+   the depth claims in a tube header are checked by nothing.
 5. **Unauthenticated CPU-heavy endpoints** — `/process`, `/process-job`,
    `/process-multitool`, `/part-outline`, `/part-features` have never been behind the
    OAuth gate, which only ever covered the two HTML page routes. Pre-existing; flagged and

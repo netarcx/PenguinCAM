@@ -43,6 +43,11 @@
     tubeHeight_text: '1"',
     squareEnd: false,
     cutToLength: false,
+    tubeSize: '2x1-flat',
+    tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
+    tubePatternLength: 0,
+    tubePatternLength_text: '',
+    tubePatternPockets: true,
     // The machine envelope is a read-only constraint; the parts' combined bounding box
     // is the stock (G54 origin = its lower-left).
     machine: { width: CFG.bed.width || 24, height: CFG.bed.height || 24, name: CFG.machineName || 'Machine' },
@@ -465,7 +470,7 @@
   }
 
   function canLeave(name) {
-    if (name === 'parts' && state.parts.length === 0) {
+    if (name === 'parts' && state.parts.length === 0 && !tubePatternOn()) {
       alert('Add at least one part before continuing.');
       return false;
     }
@@ -526,6 +531,31 @@
     bindLengthField($('#f-tube-height'),
       function () { return state.tubeHeight_text; },
       function (inches, text) { state.tubeHeight = inches; state.tubeHeight_text = text; });
+    var sizeSel = $('#f-tube-size');
+    if (sizeSel) {
+      state.tubeSize = sizeSel.value;
+      sizeSel.addEventListener('change', function () {
+        state.tubeSize = this.value; applyTubePatternUI();
+      });
+    }
+    var patSel = $('#f-tube-pattern');
+    if (patSel) {
+      patSel.addEventListener('change', function () {
+        state.tubePattern = this.value; applyTubePatternUI(); updatePartsModeNote();
+      });
+    }
+    bindLengthField($('#f-tube-pattern-length'),
+      function () { return state.tubePatternLength_text; },
+      function (inches, text) {
+        state.tubePatternLength = inches; state.tubePatternLength_text = text;
+        applyTubePatternUI();
+      });
+    var pocketsBox = $('#f-tube-pattern-pockets');
+    if (pocketsBox) {
+      pocketsBox.addEventListener('change', function () {
+        state.tubePatternPockets = this.checked; applyTubePatternUI();
+      });
+    }
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
     var mt = $('#f-multitool');
@@ -601,6 +631,38 @@
   // Reshape the Setup form for the selected mode. Tubing forces the aluminum-tube
   // material (hiding the selector), relabels thickness as wall thickness, and reveals
   // the tube-only fields; 2.5D hides thickness (derived from CAD).
+  /* True when the tube pattern is generated rather than drawn, which is the one flow in
+     the wizard that needs no part file at all. */
+  function tubePatternOn() {
+    return state.mode === 'tubing' && state.tubePattern !== 'none';
+  }
+
+  /* Mirror the pattern controls, and say up front how many holes the tube will get -
+     the count follows from the length, and an operator who typed the wrong length would
+     otherwise not find out until they read the program. */
+  function applyTubePatternUI() {
+    var box = $('#tube-pattern-fields');
+    if (box) box.hidden = !tubePatternOn();
+    var note = $('#tube-pattern-note');
+    if (!note) return;
+    if (!tubePatternOn()) { note.textContent = ''; return; }
+    var len = state.tubePatternLength;
+    if (!(len > 0)) { note.textContent = 'Enter the tube length to see the hole count.'; return; }
+    var SPACING = 0.5, END_MARGIN = 0.375;
+    var usable = len - 2 * END_MARGIN;
+    if (usable < 0) {
+      note.textContent = 'Too short to hole at least ' + END_MARGIN + '" from both ends.';
+      return;
+    }
+    var perRow = Math.floor(usable / SPACING) + 1;
+    var rows = state.tubeSize === '2x1-flat' ? 2 : 1;
+    var bits = perRow * rows + ' holes per face, ' + perRow + ' per row';
+    if (rows === 1) bits = perRow + ' holes per face, one centred row';
+    if (state.tubePatternPockets && rows === 2) bits += ', plus lightening pockets';
+    else if (state.tubePatternPockets && rows === 1) bits += '. No room to lighten a single-row face';
+    note.textContent = bits + '.';
+  }
+
   function applyModeUI() {
     var is25 = state.mode === '2.5d';
     var isTube = state.mode === 'tubing';
@@ -614,6 +676,7 @@
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
     var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
+    applyTubePatternUI();
     // Several tools per part is a 2D-only plan for now: 2.5D takes its depths from the
     // CAD layers and tubing runs a fixed program of its own.
     var mtToggle = $('#multitool-toggle'); if (mtToggle) mtToggle.style.display = (is25 || isTube) ? 'none' : '';
@@ -1138,25 +1201,45 @@
   }
 
   function generateTube() {
+    var generated = tubePatternOn();
     var p = state.parts[0];
-    if (!p) { $('#preview-errors').textContent = 'Add a tube face first.'; $('#gen-status').textContent = ''; return Promise.resolve(); }
+    if (!p && !generated) {
+      $('#preview-errors').textContent = 'Add a tube face first.';
+      $('#gen-status').textContent = '';
+      return Promise.resolve();
+    }
+    if (generated && !(state.tubePatternLength > 0)) {
+      $('#preview-errors').textContent =
+        'Enter the tube length - a generated pattern has no drawing to measure.';
+      $('#gen-status').textContent = '';
+      return Promise.resolve();
+    }
     var fd = new FormData();
-    fd.append('file', p.file, p.name + '.dxf');
+    // A generated pattern carries its own geometry, so no DXF is sent even if one was
+    // added: the server would ignore it, and uploading it would only imply otherwise.
+    if (p && !generated) fd.append('file', p.file, p.name + '.dxf');
     // A second face (optional) machines a distinct pattern on the opposite side; with
-    // only one face, the server mirrors it onto the other side.
-    if (state.parts[1]) fd.append('file_face2', state.parts[1].file, state.parts[1].name + '.dxf');
+    // only one face, the server mirrors it onto the other side. A generated pattern is
+    // symmetric about the face centreline, so it never needs one.
+    if (state.parts[1] && !generated) fd.append('file_face2', state.parts[1].file, state.parts[1].name + '.dxf');
     fd.append('material', 'aluminum_tube');
     if (state.machine_id) fd.append('machine_id', state.machine_id);
     fd.append('tool_diameter', state.tool_diameter);
     fd.append('thickness', state.thickness);       // tube wall thickness
     // Both faces share one orientation on the jig; the backend applies this single
     // rotation to every face. Tube rotation is hard-snapped to 90 deg in the Layout step.
-    fd.append('rotation', ((Math.round((p.rotation || 0) / 90) * 90) % 360 + 360) % 360);
+    fd.append('rotation', p ? ((Math.round((p.rotation || 0) / 90) * 90) % 360 + 360) % 360 : 0);
     fd.append('tube_height', state.tubeHeight);
     fd.append('square_end', state.squareEnd ? '1' : '0');
     fd.append('cut_to_length', state.cutToLength ? '1' : '0');
+    fd.append('tube_size', state.tubeSize);
+    fd.append('tube_pattern', state.tubePattern);
+    if (generated) {
+      fd.append('tube_pattern_length', state.tubePatternLength);
+      fd.append('tube_pattern_pockets', state.tubePatternPockets ? '1' : '0');
+    }
     fd.append('timestamp', timestamp());
-    fd.append('suggested_filename', p.name);
+    if (p) fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'tube');
   }
 
@@ -1269,7 +1352,12 @@
     $('#preview-result').hidden = false;
     var t = resp.cycle_time ? ('Estimated cycle time: ' + resp.cycle_time) : '';
     var n;
-    if (state.mode === 'tubing') { n = state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'); }
+    if (tubePatternOn()) {
+      // Counting faces would report "0 faces" here: a generated pattern has no uploaded
+      // face to count. Describe the tube that was machined instead.
+      n = state.tubeSize + ' tube, ' + (state.tubePatternLength_text || state.tubePatternLength + '"');
+    }
+    else if (state.mode === 'tubing') { n = state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'); }
     else { n = resp.parts ? (resp.parts.length + ' part(s)') : '1 part'; }
     var bits = [n, t];
     if (resp.tools && resp.tools.length) {

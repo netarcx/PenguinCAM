@@ -113,6 +113,36 @@
                         <input type="text" id="f-tube-height" inputmode="text" autocomplete="off" spellcheck="false"
                                placeholder='e.g. 1" or 25mm' value="1.0">
                     </label>
+                    <label class="field">
+                        <span>Tube size</span>
+                        <select id="f-tube-size">
+                            <option value="2x1-flat">2x1 - machining the 2" face</option>
+                            <option value="2x1-standing">2x1 - machining the 1" face</option>
+                            <option value="1x1">1x1</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span>Pattern</span>
+                        <select id="f-tube-pattern">
+                            <option value="none">From my DXF</option>
+                            <option value="standard">Standard - #10 clearance holes on 1/2" centres</option>
+                        </select>
+                    </label>
+                    <!-- Pre-designed pattern only: with no DXF there is nothing to measure
+                         the tube against, so its length has to be stated. -->
+                    <div id="tube-pattern-fields" hidden>
+                        <label class="field">
+                            <span>Tube length (in or mm)</span>
+                            <input type="text" id="f-tube-pattern-length" inputmode="text"
+                                   autocomplete="off" spellcheck="false"
+                                   placeholder='e.g. 24" or 600mm'>
+                        </label>
+                        <label class="field inline">
+                            <input type="checkbox" id="f-tube-pattern-pockets" checked>
+                            <span>Triangular lightening pockets, where the face is wide enough</span>
+                        </label>
+                        <p class="hint" id="tube-pattern-note"></p>
+                    </div>
                     <label class="field inline">
                         <input type="checkbox" id="f-square-end">
                         <span>Square the tube end before machining</span>

@@ -1105,6 +1105,56 @@ class FRCPostProcessor:
         # Sort holes to minimize travel time
         self._sort_holes()
 
+    def load_tube_pattern(self, face_width: float, tube_length: float,
+                          hole_diameter: float = None, spacing: float = None,
+                          pockets: bool = True):
+        """Load a pre-designed tube pattern instead of a DXF.
+
+        Standard FRC tubing gets the same pattern every time - #10 clearance holes on
+        half-inch centres, plus triangular lightening pockets on a face wide enough to
+        hold them - so tube_patterns generates it directly and this method feeds it in
+        where load_dxf's geometry would have gone. See tube_patterns for the layout and
+        the coordinate frame.
+
+        The generated circles go through classify_holes() rather than being turned into
+        holes here. That is the whole point of routing them this way: a pattern hole gets
+        the same too-small-for-the-tool rejection and the same peck-vs-helical decision as
+        a drawn one, so there is no second code path that could disagree with the first.
+
+        Returns the pattern's warnings (an oversized tool that will not fit the pockets,
+        a tube too short to hole) so the caller can show them. They are advice, not
+        errors: the pattern is still machinable without whatever was dropped.
+        """
+        import tube_patterns
+
+        kwargs = {'pockets': pockets}
+        if hole_diameter is not None:
+            kwargs['hole_diameter'] = hole_diameter
+        if spacing is not None:
+            kwargs['spacing'] = spacing
+        pattern = tube_patterns.generate(face_width, tube_length, self.tool_diameter,
+                                         **kwargs)
+
+        # Stand in for load_dxf's parsed geometry. No perimeter: the tube face IS the
+        # boundary and the tube flow passes skip_perimeter=True, so inventing one here
+        # would only risk something downstream trying to cut the tube in half.
+        self.circles = pattern['circles']
+        self.lines = []
+        self.arcs = []
+        self.polylines = []
+        self.layer_data = None
+        self.perimeter = None
+        self.pockets = [list(ring) for ring in pattern['pockets']]
+
+        self.classify_holes()
+        self._sort_pockets()
+
+        print(f"\nLoaded tube pattern: {len(self.holes)} holes, "
+              f"{len(self.pockets)} lightening pockets")
+        for warning in pattern['warnings']:
+            print(f"  ⚠ {warning}")
+        return pattern['warnings']
+
     def _optimize_route(self, items, item_type="items"):
         """
         Generic route optimization using nearest neighbor + 2-opt algorithm.
@@ -4937,7 +4987,7 @@ class FRCPostProcessor:
         gcode.append('( SETUP INSTRUCTIONS: )')
         gcode.append('( 1. Mount tube in jig with end facing user )')
         gcode.append(self._tube_wcs_setup_comment())
-        gcode.append('( 3. Z=0 is at bottom of tube [jig surface] )')
+        gcode.append('( 3. Z=0 is at bottom of tube, jig surface )')
         gcode.append('( 4. Y=0 is at nominal end face of tube )')
         gcode.append('( )')
 
@@ -5210,10 +5260,10 @@ class FRCPostProcessor:
         gcode.append('( Machine pattern on first face )')
         gcode.append('( Machining holes and pockets only - perimeter is tube face )')
         z_offset = tube_height - self.material_thickness
-        gcode.append(f'( Z offset: +{z_offset:.3f}" [tube_height - wall_thickness] )')
+        gcode.append(f'( Z offset: +{z_offset:.3f}", tube_height minus wall_thickness )')
         # Y offset for first face: matches facing offset so holes align with face
         y_offset_first_face = self.tube_facing_offset if square_end else 0.0
-        gcode.append(f'( Y offset: +{y_offset_first_face:.3f}" [rough end will be milled back] )')
+        gcode.append(f'( Y offset: +{y_offset_first_face:.3f}", rough end will be milled back )')
         gcode.append('')
         gcode.extend(self._generate_toolpath_gcode(skip_perimeter=True, z_offset=z_offset, y_offset=y_offset_first_face))
 
@@ -5263,15 +5313,15 @@ class FRCPostProcessor:
         # face 1's pattern mirrored onto the opposite side.
         if two_face:
             gcode.append('( Machine second face pattern - X-mirrored )')
-            gcode.append('( Distinct second-face pattern, X-mirrored [tube flipped end-for-end] )')
+            gcode.append('( Distinct second-face pattern, X-mirrored, tube flipped end-for-end )')
         else:
             gcode.append('( Machine pattern on second face - X-mirrored )')
-            gcode.append('( Pattern is X-mirrored [tube flipped end-for-end] so holes align opposite )')
+            gcode.append('( Pattern is X-mirrored, tube flipped end-for-end, so holes align opposite )')
         z_offset = tube_height - self.material_thickness
-        gcode.append(f'( Z offset: +{z_offset:.3f}" [tube_height - wall_thickness] )')
+        gcode.append(f'( Z offset: +{z_offset:.3f}", tube_height minus wall_thickness )')
         # Y offset: 0 for Phase 2 - work zero is re-established after flip, face is at Y=0"
         y_offset_phase2 = 0.0
-        gcode.append(f'( Y offset: {y_offset_phase2:.4f}" [face at Y=0, no offset needed] )')
+        gcode.append(f'( Y offset: {y_offset_phase2:.4f}", face at Y=0, no offset needed )')
         gcode.append('')
 
         # Mirror X coordinates around tube centerline (tube flipped end-for-end). The
@@ -5545,12 +5595,12 @@ class FRCPostProcessor:
             else:
                 y_cut = tube_length + self.tool_radius
             z_start = tube_height  # Top of tube (tube sits on sacrifice board at Z=0)
-            gcode.append(f'( Cut to length at Y={y_cut:.4f}" [Phase 1: before flip] )')
+            gcode.append(f'( Cut to length at Y={y_cut:.4f}", Phase 1: before flip )')
         else:
             # Phase 2: Cut at tube_length + tool radius compensation (no facing offset)
             y_cut = tube_length + self.tool_radius
             z_start = tube_height  # Top of tube
-            gcode.append(f'( Cut to length at Y={y_cut:.4f}" [Phase 2: after flip] )')
+            gcode.append(f'( Cut to length at Y={y_cut:.4f}", Phase 2: after flip )')
 
         # For cut to length, the tool's -Y edge defines the kept part boundary
         # (opposite of tube facing where +Y edge defines the face)
@@ -6085,6 +6135,14 @@ def main():
                        help='Tube face width (X dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
     parser.add_argument('--tube-length', type=float,
                        help='Tube face length (Y dimension) in inches for tube-pattern mode (optional, calculated from DXF if not provided)')
+    parser.add_argument('--tube-pattern', type=str, default='none',
+                        choices=['none', 'standard'],
+                        help="Use a pre-designed tube pattern instead of a DXF. "
+                             "'standard' is #10 clearance holes on 0.5in centres plus "
+                             "triangular lightening pockets where the face is wide "
+                             "enough. Requires --tube-length.")
+    parser.add_argument('--tube-pattern-no-pockets', action='store_true',
+                        help='With --tube-pattern, generate holes only (no lightening)')
     parser.add_argument('--square-end', action='store_true',
                        help='Square the tube end before machining pattern (tube-pattern mode)')
     parser.add_argument('--cut-to-length', action='store_true',
@@ -6165,9 +6223,15 @@ def main():
             print(f'  {note}')
 
     elif args.mode == 'tube-pattern':
-        # Tube pattern mode - machine DXF pattern on both tube faces
-        if not args.input_dxf:
-            parser.error("input_dxf is required for tube-pattern mode")
+        # Tube pattern mode - machine a pattern on both tube faces. The pattern comes
+        # either from a DXF the user drew or, with --tube-pattern, from tube_patterns.
+        use_pattern = args.tube_pattern != 'none'
+        if not use_pattern and not args.input_dxf:
+            parser.error("input_dxf is required for tube-pattern mode "
+                         "(or pass --tube-pattern standard to generate one)")
+        if use_pattern and not args.tube_length:
+            parser.error("--tube-length is required with --tube-pattern "
+                         "(it decides how many holes fit)")
         if not args.output_gcode:
             parser.error("output_gcode is required for tube-pattern mode")
 
@@ -6191,11 +6255,28 @@ def main():
         if args.plunge_rate is not None:
             pp.plunge_rate = args.plunge_rate
 
-        # Load and process DXF (shared logic)
-        pp.load_dxf(args.input_dxf)
-        pp.transform_coordinates('bottom-left', args.rotation)  # Tube jig is always bottom-left
-        pp.classify_holes()
-        pp.identify_perimeter_and_pockets()
+        # Load the pattern - generated or drawn.
+        pattern_warnings = []
+        if use_pattern:
+            # The face being machined and the tube height both follow from the tube size;
+            # --tube-width / --tube-height still win when given, so an odd extrusion or a
+            # tube standing on edge can be described exactly.
+            size_width, size_height = pp._parse_tube_size(args.tube_size)
+            face_width = args.tube_width if args.tube_width else size_width
+            # Squaring the end needs the real face width; without this it would be
+            # re-derived from the pattern's own extents and come up narrow.
+            args.tube_width = face_width
+            if not any(a.startswith('--tube-height') for a in sys.argv):
+                args.tube_height = size_height
+                pp.tube_height = size_height
+            pattern_warnings = pp.load_tube_pattern(
+                face_width, args.tube_length,
+                pockets=not args.tube_pattern_no_pockets)
+        else:
+            pp.load_dxf(args.input_dxf)
+            pp.transform_coordinates('bottom-left', args.rotation)  # Tube jig is always bottom-left
+            pp.classify_holes()
+            pp.identify_perimeter_and_pockets()
 
         # Debug: Check what was classified
         hole_count = len(pp.holes) if hasattr(pp, 'holes') else 0
