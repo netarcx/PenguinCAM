@@ -1,0 +1,42 @@
+# Build context excludes. Everything here is either useless inside the image or
+# actively dangerous to bake into one.
+
+# VCS / tooling
+.git
+.github
+.claude
+.editorconfig
+uv.lock
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Credentials and anything that looks like them. These are gitignored too, but a
+# build context is not a git checkout - an untracked google-creds.txt sitting in
+# the working directory would otherwise be copied straight into the image layer.
+.env
+*-creds.txt
+google-creds.txt
+staging-oauth
+onshape_config.json
+
+# Team configs. Deliberately NOT shipped in the image, including the tracked
+# PenguinCAM-config-2129.yaml. local_mode.find_local_config_path() auto-discovers
+# any PenguinCAM-config-*.yaml sitting in the working directory, so baking one in
+# would have every container silently run on that team's feeds and machine limits.
+# Mount the config you actually want at /app/PenguinCAM-config.yaml instead.
+PenguinCAM-config.yaml
+PenguinCAM-config-*.yaml
+PenguinCAM-config.yml
+PenguinCAM-config-*.yml
+new-config.yaml
+
+# Generated artifacts
+*.nc
+debug_*.dxf
+test_output_*.nc
+*-output*.nc
+*.bak
+*.backup
