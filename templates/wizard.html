@@ -155,13 +155,14 @@
             <section class="step" data-step="parts" hidden>
                 <h2>Parts</h2>
                 <div id="upload-source">
-                    <div id="dropzone" tabindex="0">
+                    <div id="dropzone" role="button" tabindex="0" aria-controls="f-dxf"
+                         aria-label="Add a DXF file: drop one here, or activate to browse">
                         <p>Drop a DXF here or click to browse</p>
                         <input type="file" id="f-dxf" accept=".dxf" hidden>
                     </div>
                 </div>
                 <div id="onshape-source" hidden>
-                    <div id="select-status" class="select-status">Select a face in Onshape…</div>
+                    <div id="select-status" class="select-status" aria-live="polite">Select a face in Onshape…</div>
                     <p class="hint">Pick a planar face in the model — it imports automatically, then you can pick another.</p>
                 </div>
                 <p class="hint" id="parts-mode-note"></p>
@@ -217,8 +218,10 @@
                 <div id="layout-toolbar">
                     <button type="button" class="btn small" id="btn-flip" disabled>Flip over</button>
                     <span class="spacer"></span>
-                    <button type="button" class="btn small" id="btn-zoom-out" title="Zoom out">&minus;</button>
-                    <button type="button" class="btn small" id="btn-zoom-in" title="Zoom in">+</button>
+                    <button type="button" class="btn small" id="btn-zoom-out" title="Zoom out"
+                            aria-label="Zoom out">&minus;</button>
+                    <button type="button" class="btn small" id="btn-zoom-in" title="Zoom in"
+                            aria-label="Zoom in">+</button>
                 </div>
                 <canvas id="layout-canvas" width="600" height="400"></canvas>
                 <div id="layout-errors" class="errors" aria-live="polite"></div>
@@ -227,7 +230,7 @@
             <!-- ===== PREVIEW ===== -->
             <section class="step" data-step="preview" hidden>
                 <h2>Preview &amp; Save</h2>
-                <div id="gen-status" class="hint"></div>
+                <div id="gen-status" class="hint" role="status" aria-live="polite"></div>
                 <div id="preview-result" hidden>
                     <div id="preview-stats"></div>
                     <div id="viewer-container">
@@ -239,11 +242,14 @@
                             <span id="scrubber-label">Move 1 of 1</span>
                             <span id="scrubber-op" class="scrubber-op"></span>
                         </div>
-                        <input type="range" id="toolpath-scrubber" min="0" max="100" value="0" step="1">
+                        <input type="range" id="toolpath-scrubber" min="0" max="100" value="0" step="1"
+                               aria-label="Toolpath position">
                     </div>
                     <div class="playback-controls" id="playback-controls" style="display:none">
-                        <button type="button" class="btn small" id="play-button" title="Play/Pause">&#9654; / &#10073;&#10073;</button>
-                        <button type="button" class="btn small" id="restart-button" title="Restart">&#9198;</button>
+                        <button type="button" class="btn small" id="play-button" title="Play/Pause"
+                                aria-label="Play or pause">&#9654; / &#10073;&#10073;</button>
+                        <button type="button" class="btn small" id="restart-button" title="Restart"
+                                aria-label="Restart">&#9198;</button>
                         <label class="speed">Speed
                             <select id="playback-speed">
                                 <option value="10">0.25x</option>
@@ -276,8 +282,12 @@
                 <button type="button" id="btn-do" class="btn primary" disabled>Download Program</button>
                 <button type="button" id="btn-do-caret" class="btn primary split-caret" aria-label="Choose action" hidden>&#9662;</button>
                 <ul id="do-menu" class="do-menu" role="menu" hidden>
-                    <li role="menuitem" data-action="download">Download Program</li>
-                    <li role="menuitem" data-action="drive">Send to Google Drive</li>
+                    <li role="none" data-action="download">
+                        <button type="button" role="menuitem" class="do-menu-item">Download Program</button>
+                    </li>
+                    <li role="none" data-action="drive">
+                        <button type="button" role="menuitem" class="do-menu-item">Send to Google Drive</button>
+                    </li>
                 </ul>
             </div>
         </footer>

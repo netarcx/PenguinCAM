@@ -43,6 +43,8 @@
     tubeHeight_text: '1"',
     squareEnd: false,
     cutToLength: false,
+    thicknessTouched: false,
+    thicknessBeforeTube: null,
     tubeSize: '2x1-flat',
     tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
     tubePatternLength: 0,
@@ -298,8 +300,10 @@
     var tooBig = false;
     if (bbox && (bbox.w > state.machine.width + 1e-6 || bbox.h > state.machine.height + 1e-6)) {
       tooBig = true;
+      // toFixed: the machine size comes from a mm config, so the one message the user is
+      // meant to act on read "31.496062992125985" x 19.68503937007874".
       msgs.push('Parts (' + bbox.w.toFixed(2) + '" x ' + bbox.h.toFixed(2) + '") exceed the machine (' +
-                state.machine.width + '" x ' + state.machine.height + '").');
+                state.machine.width.toFixed(2) + '" x ' + state.machine.height.toFixed(2) + '").');
     }
     var items = state.parts.map(function (p) { return { id: p.id, name: p.name, box: footprint(p), poly: placedPolygon(p) }; });
     for (var i = 0; i < items.length; i++) {
@@ -484,6 +488,15 @@
       alert('Add at least one part before continuing.');
       return false;
     }
+    if (name === 'parts' && partsOverCap()) {
+      var cap = partCapForMode();
+      alert(state.mode === '2.5d'
+        ? '2.5D machines one part per job, and ' + state.parts.length + ' are loaded. '
+          + 'Remove ' + partsOverCap() + ' before continuing, or switch to 2D.'
+        : 'Tubing machines at most two faces, and ' + state.parts.length + ' are loaded. '
+          + 'Remove ' + partsOverCap() + ' before continuing.');
+      return false;
+    }
     if (name === 'tools' && multiToolOn()) {
       var problems = window.PCMultiTool.validate();
       if (problems.length) {
@@ -516,6 +529,8 @@
   }
 
   /* --------------------------------------------------------------- setup */
+  var thicknessBound = false;
+
   function bindSetup() {
     var machineSel = $('#f-machine');
     if (machineSel) {
@@ -533,11 +548,23 @@
 
     bindLengthField($('#f-tool'),
       function () { return state.tool_diameter_text; },
-      function (inches, text) { state.tool_diameter = inches; state.tool_diameter_text = text; });
+      function (inches, text) {
+        state.tool_diameter = inches; state.tool_diameter_text = text;
+        invalidatePreview();
+      });
     bindLengthField($('#f-thickness'),
       function () { return state.thickness_text; },
-      function (inches, text) { state.thickness = inches; state.thickness_text = text; });
-    $('#f-material').addEventListener('change', function () { if (state.mode !== 'tubing') state.material = this.value; });
+      function (inches, text) {
+        state.thickness = inches; state.thickness_text = text;
+        // Once it is theirs, no mode switch may overwrite it in either direction.
+        if (thicknessBound) state.thicknessTouched = true;
+        invalidatePreview();
+      });
+    thicknessBound = true;   // bindLengthField commits the rendered default first
+    $('#f-material').addEventListener('change', function () {
+      if (state.mode !== 'tubing') state.material = this.value;
+      invalidatePreview();
+    });
     bindLengthField($('#f-tube-height'),
       function () { return state.tubeHeight_text; },
       function (inches, text) { state.tubeHeight = inches; state.tubeHeight_text = text; });
@@ -545,7 +572,7 @@
     if (sizeSel) {
       state.tubeSize = sizeSel.value;
       sizeSel.addEventListener('change', function () {
-        state.tubeSize = this.value; applyTubePatternUI(); invalidateTubePreview();
+        state.tubeSize = this.value; applyTubePatternUI(); invalidatePreview();
         refreshTubePatternGeometry();
       });
     }
@@ -553,14 +580,14 @@
     if (patSel) {
       patSel.addEventListener('change', function () {
         state.tubePattern = this.value; applyTubePatternUI(); updatePartsModeNote();
-        invalidateTubePreview(); refreshTubePatternGeometry();
+        invalidatePreview(); refreshTubePatternGeometry();
       });
     }
     bindLengthField($('#f-tube-pattern-length'),
       function () { return state.tubePatternLength_text; },
       function (inches, text) {
         state.tubePatternLength = inches; state.tubePatternLength_text = text;
-        applyTubePatternUI(); invalidateTubePreview(); refreshTubePatternGeometry();
+        applyTubePatternUI(); invalidatePreview(); refreshTubePatternGeometry();
       });
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
@@ -647,11 +674,13 @@
      the count follows from the length, and an operator who typed the wrong length would
      otherwise not find out until they read the program. */
   /* A generated program belongs to the settings that produced it. In full-page grid
-     mode the Setup panel stays live while Preview is on screen, so changing the tube
-     size or length left the previous program sitting there with Download still enabled -
-     the panel said 48" 1x1 while the button handed over a 24" 2x1. Anything that changes
-     what would be generated must therefore retire what already was. */
-  function invalidateTubePreview() {
+     mode the Setup panel stays live while Preview is on screen, so ANY input that feeds
+     the generator can be changed while a finished program sits there with Download still
+     enabled - the panel reading Aluminium / 0.5" / 1/4" beside a button handing over the
+     plywood 4mm program. Anything that changes what would be generated must retire what
+     already was. Wired to every such input, not just the tube ones: material, thickness,
+     tool, tab spacing, the mode-specific tube fields, and adding or removing a part. */
+  function invalidatePreview() {
     if (state.step !== 'preview' && $('#preview-result').hidden) return;
     resetPreview();
     $('#btn-do').disabled = true;
@@ -733,6 +762,16 @@
     }
   }
 
+  //: The wall thickness a tube job starts from. Real 1x1/2x1 is 1/16"-1/8".
+  var TUBE_WALL_DEFAULT_TEXT = '0.0625"';
+
+  function setThicknessField(inches, text) {
+    state.thickness = inches;
+    state.thickness_text = text;
+    var field = $('#f-thickness');
+    if (field) field.value = text;
+  }
+
   function applyModeUI() {
     var is25 = state.mode === '2.5d';
     var isTube = state.mode === 'tubing';
@@ -750,10 +789,17 @@
     // WALL thickness. Real 1x1 and 2x1 is 1/16"-1/8", so every tube job quoted a cycle
     // time three to four times too long and pecked four times as often as it needed to.
     // Only the untouched default is replaced - a value the user typed is theirs.
-    if (isTube && state.thickness_text === '0.25"') {
-      state.thickness = 0.0625;
-      state.thickness_text = '0.0625"';
-      var tfield = $('#f-thickness'); if (tfield) tfield.value = state.thickness_text;
+    // Swapped BOTH ways, and only while the user has not typed their own value. Applying
+    // the tube default without ever undoing it left a 1/4" plate set to 1/16" after a
+    // trip through Tubing and back - the program then cut 1/16" deep and never freed the
+    // part, with nothing on screen to say so.
+    if (isTube && !state.thicknessTouched && state.thickness_text !== TUBE_WALL_DEFAULT_TEXT) {
+      state.thicknessBeforeTube = state.thickness_text;
+      setThicknessField(0.0625, TUBE_WALL_DEFAULT_TEXT);
+    } else if (!isTube && !state.thicknessTouched && state.thicknessBeforeTube) {
+      var back = state.thicknessBeforeTube;
+      state.thicknessBeforeTube = null;
+      setThicknessField(parseLength(back) || 0.25, back);
     }
     applyTubePatternUI();
     // Several tools per part is a 2D-only plan for now: 2.5D takes its depths from the
@@ -796,6 +842,10 @@
     } else {
       note.textContent = 'Add as many parts as fit on the sheet.';
     }
+    if (partsOverCap()) {
+      note.textContent += '  ** ' + state.parts.length + ' loaded but only '
+        + partCapForMode() + ' will be machined - remove ' + partsOverCap() + '. **';
+    }
   }
 
   /* --------------------------------------------------------------- parts */
@@ -825,6 +875,23 @@
       ul.appendChild(li);
     });
     renderDebug();
+  }
+
+  /* How many parts the CURRENT mode will actually machine. 2.5D generates from one part
+     and tubing posts at most two faces, and both limits were enforced only when adding -
+     so loading three parts in 2D and then switching mode left three on screen, three in
+     the summary, and one or two in the program. Silently machining a subset is the worst
+     of the options; the extras are kept and the step is blocked instead, so nothing the
+     user loaded is thrown away behind their back. */
+  function partCapForMode() {
+    if (state.mode === '2.5d') return 1;
+    if (state.mode === 'tubing') return tubePatternOn() ? Infinity : 2;
+    return Infinity;
+  }
+
+  function partsOverCap() {
+    var cap = partCapForMode();
+    return cap === Infinity ? 0 : Math.max(0, state.parts.length - cap);
   }
 
   function addPartFromOutline(data, file) {
@@ -863,14 +930,31 @@
     p.cy = s.h / 2;
     state.parts.push(p);
     renderParts();
+    partListChanged();
     dbg('part-added', { name: p.name, w: p.width, h: p.height });
+  }
+
+  /* The part list feeds the operation plan and the generated program, and in grid mode
+     both can already be on screen when it changes. Without this, a part dropped while
+     standing on Preview was invisible to the multi-tool editor - no row, no "this part
+     has no operations" error - and Download still handed over the program from before it
+     existed. */
+  function partListChanged() {
+    if (multiToolOn() && window.PCMultiTool) {
+      window.PCMultiTool.render();
+      window.PCMultiTool.refreshFeatures();
+    }
+    updateSummary();
+    updatePartsModeNote();   // the over-cap warning depends on the count
+    invalidatePreview();
+    if (state.step === 'layout') { refitView(); drawLayout(); }
   }
 
   function removePart(id) {
     state.parts = state.parts.filter(function (p) { return p.id !== id; });
     state.selectedIds = state.selectedIds.filter(function (sid) { return sid !== id; });
     renderParts();
-    if (state.step === 'layout') drawLayout();
+    partListChanged();
   }
 
   function uploadDxf(file) {

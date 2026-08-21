@@ -11,6 +11,9 @@
   --line: #30363d;
   --canvas-bg: #11161d;      /* 2D layout / 3D viewer background */
   --canvas-grid: #30363d;
+  --hover: #2c3644;          /* pill / row hover fill */
+  --warn: #d29922;           /* "using defaults" and other soft warnings */
+  --scrim: rgba(15, 20, 25, 0.96);   /* full-screen overlay behind a modal card */
 }
 
 /* Light theme — tied to Onshape's theme (?theme=light|dark) or standalone default. */
@@ -27,6 +30,9 @@
   --line: #d0d7de;
   --canvas-bg: #f2f4f7;
   --canvas-grid: #c7cfd8;
+  --hover: #dde3ea;
+  --warn: #8a6100;
+  --scrim: rgba(246, 248, 250, 0.94);
   color-scheme: light;
 }
 
@@ -77,8 +83,20 @@ html, body {
    sequence, not done/active state, so they never renumber as you advance. */
 #stepbar li::before { content: attr(data-num) ". "; opacity: 0.65; }
 #stepbar li[hidden] { display: none; }
-#stepbar li:hover { background: #2c3644; color: var(--ink); }
-#stepbar li:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#stepbar li:hover { background: var(--hover); color: var(--ink); }
+/* One focus ring for the whole app: the UA default is a thin dark outline that
+   all but vanishes on the dark panels. */
+#stepbar li:focus-visible,
+.btn:focus-visible,
+#dropzone:focus-visible,
+.do-menu-item:focus-visible,
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 #stepbar li.done { color: var(--ok); }
 #stepbar li.done::after { content: " \2713"; }  /* completed check, kept separate from the number */
 #stepbar li.active { color: var(--accent-ink); background: var(--accent); }
@@ -123,10 +141,26 @@ html, body {
   margin: 0;
   min-height: 0;
   overflow: auto;            /* quadrant content scrolls within its cell */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: var(--panel);
+  /* A quadrant is a fixed-height box and on most platforms its scrollbar is an
+     overlay that only appears once you are already scrolling - so a panel with
+     more below the fold looked simply finished. Tubing mode is the bad case:
+     five extra fields, and only the first two fit. These are the classic
+     scroll shadows: the `local` layers scroll away with the content, the
+     `scroll` layers stay pinned, so a soft edge shows exactly while there is
+     more in that direction and vanishes at the ends. */
+  background:
+    linear-gradient(var(--panel) 30%, transparent) top    / 100% 20px local no-repeat,
+    linear-gradient(transparent, var(--panel) 70%) bottom / 100% 20px local no-repeat,
+    radial-gradient(farthest-side at 50% 0,
+                    rgba(0, 0, 0, 0.4), transparent) top    / 100% 8px scroll no-repeat,
+    radial-gradient(farthest-side at 50% 100%,
+                    rgba(0, 0, 0, 0.4), transparent) bottom / 100% 8px scroll no-repeat,
+    var(--panel);
 }
 #wizard.grid .step[data-step="setup"]   { grid-column: 1; grid-row: 1; }
 #wizard.grid .step[data-step="parts"]   { grid-column: 1; grid-row: 2; }
@@ -136,12 +170,53 @@ html, body {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
+
+/* ---- Fitting the two big canvases into their quadrant ----------------------
+   A quadrant is a fixed-height cell. Both canvases were sized for width alone
+   (the layout canvas is a 600x400 backing store stretched by `width: 100%`, the
+   3D viewer a flat 320px), so on every real screen size the bottom of the stock
+   and the whole playback strip - scrubber, speed, Reset view, Toolpath - sat
+   below the fold. Lay the two panels out as columns and let the canvas take what
+   is left over rather than pushing the controls out of the box. */
+#wizard.grid .step[data-step="layout"],
+#wizard.grid .step[data-step="preview"] { display: flex; flex-direction: column; }
+
+#wizard.grid #layout-canvas {
+  flex: 0 1 auto;
+  align-self: center;
+  /* Both dimensions auto so the max-* clamps scale it instead of squashing it:
+     drag hit-testing maps x and y by separate scale factors, so a distorted
+     canvas would still be clickable but would draw the stock out of proportion. */
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 3 / 2;   /* = the 600x400 backing store */
+  min-height: 140px;     /* smaller than this is not a layout tool; scroll instead */
+}
+
+#wizard.grid #preview-result {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* `display: flex` above overrides the HTML `hidden` attribute; restore it. */
+#wizard.grid #preview-result[hidden] { display: none; }
+#wizard.grid #viewer-container { flex: 1 1 auto; height: auto; min-height: 140px; }
 /* Narrow full-page widths: fall back to a single column, all steps still shown. */
+/* Narrow full-page widths: one column, all steps still shown, body scrolls.
+   The rows have to be max-content, NOT minmax(220px, auto): #wiz-body has a
+   definite height (flex child of the 100vh column), so an auto/max-content
+   MAXIMUM only grows a track when there is spare height to hand out. Stacked
+   four deep there never is, and every panel froze at its 220px minimum with
+   its content clipped - Setup lost Material and Thickness entirely. */
 @media (max-width: 900px) {
   #wizard.grid #wiz-body {
     grid-template-columns: 1fr;
     grid-template-rows: none;
-    grid-auto-rows: minmax(220px, auto);
+    grid-auto-rows: max-content;
+    align-content: start;
     overflow-y: auto;
   }
   #wizard.grid .step[data-step] { grid-column: 1; grid-row: auto; }
@@ -286,15 +361,25 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
   z-index: 200;
 }
-.do-menu li {
+.do-menu li { list-style: none; }
+/* The row is a real button so the menu is not mouse-only; the click still
+   bubbles to the <li data-action> the wizard delegates from. */
+.do-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  background: none;
+  border: 0;
   padding: 8px 10px;
   border-radius: 4px;
+  font: inherit;
   font-size: 13px;
   color: var(--ink);
   cursor: pointer;
   white-space: nowrap;
 }
-.do-menu li:hover { background: var(--panel-2); }
+.do-menu-item:hover { background: var(--panel-2); }
 
 #preview-stats { margin: 10px 0; color: var(--muted); font-size: 13px; }
 
@@ -302,7 +387,7 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
 .config-status { margin: 0; font-size: 12px; color: var(--muted); }
 .config-status a { color: var(--accent); text-decoration: none; }
 .config-status a:hover { text-decoration: underline; }
-.config-status-default { color: #d29922; }
+.config-status-default { color: var(--warn); }
 /* Deliberately understated: a reload affordance for the rare config change, not a
    call-to-action. Nearly invisible until hovered. */
 .config-status a.config-refresh { color: var(--muted); opacity: 0.35; margin-left: 5px; font-size: 0.9em; text-decoration: none; transition: opacity 0.15s ease; }
@@ -342,7 +427,7 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
 #connect-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 20, 25, 0.96);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -371,7 +456,8 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   max-width: 90vw;
   max-height: 40vh;
   overflow: auto;
-  background: rgba(0,0,0,0.85);
+  background: var(--panel);
+  color: var(--ink);
   border: 1px solid var(--accent);
   border-radius: 6px;
   padding: 6px 8px;
@@ -459,7 +545,14 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
 @media (max-width: 1200px) {
   #wizard.grid.has-tools #wiz-body {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr minmax(220px, auto);
+    /* Not `1fr 1fr minmax(220px, auto)`: the container height is definite, so the
+       two 1fr rows only got what the 220px operations row left over - about 78px
+       each at 1280x800, i.e. a heading and a sliver. Five panels never fit a
+       viewport this size anyway (the operations list alone is 600px), so size
+       every row to its content and scroll the body once, rather than clipping
+       all five panels independently. */
+    grid-template-rows: max-content max-content max-content;
+    align-content: start;
     overflow-y: auto;              /* the third row can exceed the viewport */
   }
   #wizard.grid.has-tools .step[data-step="tools"] { grid-column: 1 / span 2; grid-row: 3; }
@@ -475,7 +568,8 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   #wizard.grid.has-tools #wiz-body {
     grid-template-columns: 1fr;
     grid-template-rows: none;
-    grid-auto-rows: minmax(220px, auto);
+    grid-auto-rows: max-content;
+    align-content: start;
     overflow-y: auto;
   }
   #wizard.grid.has-tools .step[data-step] { grid-column: 1; grid-row: auto; }
@@ -497,7 +591,7 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
 }
 .mt-drills .btn { margin-left: auto; }
 .mt-have { color: var(--ok); }
-.mt-have::before { content: "¹3 "; }
+.mt-have::before { content: "\2713\00a0"; }
 .mt-need { color: var(--accent); }
 .mt-need::before { content: "+ "; }
 .mt-warn { color: var(--danger); }
