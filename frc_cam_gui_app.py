@@ -896,6 +896,12 @@ def process_file():
         log(f"🚀 Running post-processor API...")
 
         # Get team config from session (if available)
+        # In local mode the config lives in a file, and only a PAGE RENDER seeds it into
+        # the session. A request that never rendered a page - a script, a curl, the
+        # wizard after a cookie reset - therefore fell back to the built-in Team 6238
+        # defaults, whose 24x24 envelope is not this machine's. That is how a 24" tube
+        # passed the envelope check on a machine with 19.7" of Y travel. Seed it here too.
+        _ensure_local_team_config()
         config_data = session.get('team_config_data', {})
         log(f"🔍 DEBUG: Session team_config_data keys: {list(config_data.keys()) if config_data else 'EMPTY'}")
         log(f"🔍 DEBUG: Session has {len(config_data)} top-level keys in team_config_data")
