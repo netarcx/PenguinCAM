@@ -294,6 +294,8 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
 .part-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .part-item .dims { color: var(--muted); font-size: 12px; }
 .part-item .remove { color: var(--danger); background: none; border: none; cursor: pointer; font-size: 18px; }
+.part-item .duplicate { color: var(--muted); background: none; border: none; cursor: pointer; font-size: 15px; }
+.part-item .duplicate:hover { color: var(--accent); }
 
 #layout-info {
   display: flex;

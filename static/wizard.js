@@ -953,8 +953,10 @@
       li.innerHTML = thumbnailSVG(p) +
         '<div class="meta"><div class="name"></div><div class="dims">' +
         p.width.toFixed(2) + '" x ' + p.height.toFixed(2) + '"</div></div>' +
+        '<button class="duplicate" title="Duplicate" aria-label="Duplicate">&#10064;</button>' +
         '<button class="remove" title="Remove" aria-label="Remove">&times;</button>';
       li.querySelector('.name').textContent = p.name;
+      li.querySelector('.duplicate').addEventListener('click', function () { duplicatePart(p.id); });
       li.querySelector('.remove').addEventListener('click', function () { removePart(p.id); });
       ul.appendChild(li);
     });
@@ -1036,6 +1038,50 @@
     // on the next visit to Layout. Harmless in narrow mode - the canvas is just hidden.
     refitView();
     drawLayout();
+  }
+
+  /* Clone a loaded part: same geometry and file (never mutated - flip and rotation are
+     flags applied at draw/submit time, so sharing the arrays is safe), its own id and a
+     name of its own, placed clear of everything like a fresh import. The operation plan
+     is copied too - a duplicate almost always wants cutting the same way - but the
+     survey results are not: the name is part of the survey key, so the editor re-reads
+     the copy on its own. The name gets no parentheses on purpose - part names end up in
+     G-code comments, where parens nest and break controllers. */
+  function duplicatePart(id) {
+    var src = state.parts.filter(function (p) { return p.id === id; })[0];
+    if (!src) return;
+    if (state.mode === '2.5d') {
+      alert('2.5D machines one part per job, so a duplicate cannot be added. Switch to 2D mode to cut several.');
+      return;
+    }
+    if (state.mode === 'tubing' && state.parts.length >= 2) {
+      alert('Tubing allows at most two faces (one per side). Remove a face first.');
+      return;
+    }
+    var names = state.parts.map(function (p) { return p.name; });
+    var base = src.name.replace(/ copy( \d+)?$/, '');
+    var name = base + ' copy', n = 2;
+    while (names.indexOf(name) >= 0) name = base + ' copy ' + (n++);
+    var p = {
+      id: ++partSeq,
+      name: name,
+      width: src.width, height: src.height,
+      outline: src.outline, holes: src.holes, inner: src.inner,
+      file: src.file,
+      cx: 0, cy: 0, rotation: src.rotation, flipped: src.flipped,
+    };
+    if (src.ops) p.ops = JSON.parse(JSON.stringify(src.ops));
+    // Same initial placement rule as addPartFromOutline: bottom edge on Y=0, stacked to
+    // the right of every existing part with a kerf between.
+    var s = placedShape(p);
+    var startX = 0;
+    state.parts.forEach(function (q) { startX = Math.max(startX, footprint(q).maxX + state.tool_diameter); });
+    p.cx = startX + s.w / 2;
+    p.cy = s.h / 2;
+    state.parts.push(p);
+    renderParts();
+    partListChanged();
+    dbg('part-duplicated', { from: src.name, name: name });
   }
 
   function removePart(id) {
