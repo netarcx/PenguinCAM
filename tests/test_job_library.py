@@ -25,9 +25,14 @@ import local_mode
 DXF = b'0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
 
 
-def _part(name, x=0.0, y=0.0, rotation=0.0, blob=DXF):
+def _part(name, x=0.0, y=0.0, rotation=0.0, blob=DXF, mirror=False, ops=None,
+          cx=None, cy=None):
+    # mirror and ops are parameters, not constants. Hardcoding them False/None made the
+    # round-trip test unable to fail for either field: dropping `mirror` entirely from
+    # the writer left every test green, and a re-cut nest came back un-mirrored.
     return {'name': name, 'dxf_bytes': blob, 'place_x': x, 'place_y': y,
-            'rotation': rotation, 'mirror': False, 'ops': None}
+            'center_x': x if cx is None else cx, 'center_y': y if cy is None else cy,
+            'rotation': rotation, 'mirror': mirror, 'ops': ops}
 
 
 class JobLibraryTest(unittest.TestCase):
@@ -153,3 +158,119 @@ class JobLibraryTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SavedJobFidelityTest(unittest.TestCase):
+    """What a saved job has to bring back, beyond "it loaded"."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='jobfid_')
+        self.config = os.path.join(self.dir, 'PenguinCAM-config.yaml')
+        io.open(self.config, 'w', encoding='utf-8').write('version: 2\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_mirrored_part_comes_back_mirrored(self):
+        """Re-cutting a saved nest with a part silently un-mirrored produces a left
+        bracket where a right one was wanted, and it looks correct on screen."""
+        parts = [_part('GEARBOX-R', 1.0, 2.0, mirror=True)]
+        job_id, _ = job_library.save_job(self.config, 'Mirrored', {}, parts)
+        loaded = job_library.load_job(self.config, job_id)
+        self.assertTrue(loaded['parts'][0]['mirror'])
+
+    def test_per_part_operations_come_back(self):
+        ops = [{'op_type': 'profile', 'tool_slot': 1, 'depth': None, 'scope': {}},
+               {'op_type': 'drill', 'tool_slot': 2, 'depth': 0.3, 'scope': {}}]
+        job_id, _ = job_library.save_job(self.config, 'Multi', {}, [_part('P', ops=ops)])
+        loaded = job_library.load_job(self.config, job_id)
+        self.assertEqual(loaded['parts'][0]['ops'], ops)
+
+    def test_both_placement_anchors_survive(self):
+        """The corner AND the centre. Writing only the corner and reading it back as a
+        centre moved every part by half its own footprint, compounding on each cycle."""
+        parts = [_part('P', x=2.0, y=3.0, cx=4.0, cy=5.5)]
+        job_id, _ = job_library.save_job(self.config, 'Anchors', {}, parts)
+        back = job_library.load_job(self.config, job_id)['parts'][0]
+        self.assertEqual((back['place_x'], back['place_y']), (2.0, 3.0))
+        self.assertEqual((back['center_x'], back['center_y']), (4.0, 5.5))
+
+    def test_a_placement_that_is_not_a_number_is_refused_at_the_door(self):
+        """NaN survives float() and json.dump writes it as bare NaN, which json.load
+        accepts - so the job saves, opens, and places a part nowhere."""
+        for bad in (float('nan'), float('inf')):
+            with self.assertRaises(job_library.JobLibraryError):
+                job_library.save_job(self.config, 'Bad', {},
+                                     [_part('P', x=bad)])
+
+
+class JobRouteTest(unittest.TestCase):
+    """The routes, over HTTP. save -> list -> open -> delete, the way the browser does
+    it. None of this had a test: the base64 decode, the part assembly and the status
+    mapping were all only exercised by hand."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='jobroute_')
+        self.path = os.path.join(self.dir, 'PenguinCAM-config-2129.yaml')
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        shutil.copy(os.path.join(repo, 'PenguinCAM-config-2129.yaml'), self.path)
+        self._env = {k: os.environ.get(k) for k in (local_mode.CONFIG_ENV_VAR,
+                                                    local_mode.LOCAL_ENV_VAR)}
+        os.environ[local_mode.CONFIG_ENV_VAR] = self.path
+        os.environ[local_mode.LOCAL_ENV_VAR] = '1'
+        import frc_cam_gui_app as gui
+        self.gui = gui
+        self._local = gui.LOCAL_MODE
+        gui.LOCAL_MODE = True
+        self._limiter = gui.limiter.enabled
+        gui.limiter.enabled = False
+        self.client = gui.app.test_client()
+
+    def tearDown(self):
+        self.gui.LOCAL_MODE = self._local
+        self.gui.limiter.enabled = self._limiter
+        for key, value in self._env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _spec(self, name='Gearbox nest'):
+        return {'name': name,
+                'setup': {'material': 'aluminum', 'thickness': 0.25},
+                'parts': [{'name': 'GEARBOX-L', 'dxf_base64': base64.b64encode(DXF).decode(),
+                           'place_x': 0.25, 'place_y': 0.25,
+                           'center_x': 2.25, 'center_y': 1.75,
+                           'rotation': 90, 'mirror': True, 'ops': None}]}
+
+    def test_save_list_open_delete(self):
+        response = self.client.post('/jobs/save', json=self._spec())
+        self.assertEqual(response.status_code, 200, msg=response.get_data(as_text=True))
+        job_id = response.get_json()['saved_id']
+
+        listing = self.client.get('/jobs').get_json()
+        self.assertIn('Gearbox nest', [j['name'] for j in listing['jobs']])
+
+        opened = self.client.post('/jobs/open', json={'id': job_id}).get_json()
+        part = opened['job']['parts'][0]
+        self.assertEqual(part['name'], 'GEARBOX-L')
+        self.assertEqual(base64.b64decode(part['dxf_base64']), DXF)
+        self.assertEqual((part['center_x'], part['center_y']), (2.25, 1.75))
+        self.assertTrue(part['mirror'])
+        self.assertEqual(part['rotation'], 90)
+
+        self.assertEqual(self.client.post('/jobs/delete', json={'id': job_id}).status_code, 200)
+        self.assertEqual([j['name'] for j in self.client.get('/jobs').get_json()['jobs']], [])
+
+    def test_a_part_that_did_not_arrive_intact_is_refused(self):
+        spec = self._spec()
+        spec['parts'][0]['dxf_base64'] = 'not base64 at all!!'
+        response = self.client.post('/jobs/save', json=spec)
+        self.assertEqual(response.status_code, 400)
+
+    def test_opening_a_job_that_is_not_there(self):
+        self.assertEqual(self.client.post('/jobs/open', json={'id': 'nope'}).status_code, 404)
+
+    def test_a_job_needs_a_name_and_a_part(self):
+        self.assertEqual(self.client.post('/jobs/save', json={'name': '', 'parts': []}).status_code, 400)

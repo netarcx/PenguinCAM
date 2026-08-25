@@ -199,3 +199,132 @@ class DryRunMultiToolTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DryRunReachesTheRoutesTest(unittest.TestCase):
+    """The flag's journey from the tick box to the program.
+
+    Everything above tests the post-processor once `set_dry_run` has been called. None
+    of it notices if the route never calls it - so "dry run" could be ticked and a
+    program that cuts for real handed back, with the whole suite green. Two mutations
+    proved exactly that: dropping the flag in `/process-job`, and swapping `dry_run`
+    with `engrave` in `/process`. Both survived. This class kills them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp(prefix='dryroute_')
+        cls.dxf = _plate(os.path.join(cls.dir, 'plate.dxf'))
+        import frc_cam_gui_app as gui
+        cls.gui = gui
+        cls.client = gui.app.test_client()
+        # The rate limiter counts per process, so these requests would otherwise eat
+        # the budget the other route tests are already close to spending.
+        cls._limiter = gui.limiter.enabled
+        gui.limiter.enabled = False
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.gui.limiter.enabled = cls._limiter
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def _post(self, dry, engrave=False):
+        with open(self.dxf, 'rb') as fh:
+            data = {'file': (io.BytesIO(fh.read()), 'plate.dxf'),
+                    'material': 'plywood', 'thickness': '0.25',
+                    'tool_diameter': '0.125', 'orientation': 'bottom-left'}
+        if dry:
+            data['dry_run'] = '1'
+        if engrave:
+            data['engrave'] = '1'
+        response = self.client.post('/process', data=data,
+                                    content_type='multipart/form-data')
+        body = response.get_json() or {}
+        # The route hands back an opaque token, so the name the operator will see has
+        # to be resolved the same way the download route resolves it.
+        info = self.gui.file_token_manager.get_file(body.get('filename', '')) or {}
+        body['real_filename'] = info.get('filename', '')
+        return body
+
+    def _job(self, dry):
+        job = {'material': 'plywood', 'thickness': 0.25, 'tool_diameter': 0.125,
+               'name': 'nest',
+               'parts': [{'file_index': 0, 'name': 'plate', 'place_x': 0.0,
+                          'place_y': 0.0, 'rotation': 0}]}
+        if dry:
+            job['dry_run'] = '1'
+        with open(self.dxf, 'rb') as fh:
+            data = {'file_0': (io.BytesIO(fh.read()), 'plate.dxf'),
+                    'job': __import__('json').dumps(job), 'timestamp': '2026-01-01 00:00'}
+        response = self.client.post('/process-job', data=data,
+                                    content_type='multipart/form-data')
+        return response.get_json() or {}
+
+    def test_the_flag_reaches_the_single_part_route(self):
+        body = self._post(dry=True)
+        self.assertTrue(body.get('success'), msg=body)
+        self.assertIn('DRY RUN', body['gcode'])
+        self.assertIsNone(re.search(r'^S\d+ M3', body['gcode'], re.M),
+                          'the spindle was started in a dry run')
+        self.assertIn('_DRYRUN', body['real_filename'])
+
+    def test_without_the_flag_the_same_route_cuts_for_real(self):
+        """The other half of the pair: a test that only ever posts the flag cannot tell
+        a route that honours it from one that dry-runs everything."""
+        body = self._post(dry=False)
+        self.assertTrue(body.get('success'), msg=body)
+        self.assertNotIn('DRY RUN', body['gcode'])
+        self.assertIsNotNone(re.search(r'^S\d+ M3', body['gcode'], re.M))
+        self.assertNotIn('_DRYRUN', body['real_filename'])
+
+    def test_the_engrave_flag_is_not_the_dry_run_flag(self):
+        """Swapping the two form fields left every other test passing."""
+        body = self._post(dry=False, engrave=True)
+        self.assertTrue(body.get('success'), msg=body)
+        self.assertNotIn('DRY RUN', body['gcode'])
+        self.assertIsNotNone(re.search(r'^S\d+ M3', body['gcode'], re.M))
+
+    def test_the_flag_reaches_the_multi_part_route(self):
+        body = self._job(dry=True)
+        self.assertTrue(body.get('success'), msg=body)
+        self.assertIn('DRY RUN', body['gcode'])
+        self.assertIsNone(re.search(r'^S\d+ M3', body['gcode'], re.M),
+                          'the spindle was started in a dry run')
+
+    def test_without_the_flag_the_multi_part_route_cuts_for_real(self):
+        body = self._job(dry=False)
+        self.assertTrue(body.get('success'), msg=body)
+        self.assertNotIn('DRY RUN', body['gcode'])
+        self.assertIsNotNone(re.search(r'^S\d+ M3', body['gcode'], re.M))
+
+
+class DryRunKeepsEverythingElseOffTest(unittest.TestCase):
+    def test_coolant_stays_off_when_nothing_is_being_cut(self):
+        """Flood coolant over a part nobody is cutting, on the one run the operator is
+        standing next to. The default config has no coolant at all, so a test that does
+        not configure one asserts nothing."""
+        pp = FRCPostProcessor(0.25, 0.125, config=TeamConfig())
+        pp.machine_coolant = 'flood'      # the default config has none configured
+        pp.set_dry_run(LIFT)
+        with io.StringIO() as buf:
+            path = _plate(os.path.join(tempfile.mkdtemp(prefix='cool_'), 'p.dxf'))
+            import contextlib
+            with contextlib.redirect_stdout(buf):
+                pp.load_dxf(path)
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                result = pp.generate_gcode()
+        self.assertNotIn('M8', result.gcode, 'coolant ran during a dry run')
+        self.assertNotIn('M7', result.gcode, 'coolant ran during a dry run')
+
+    def test_the_operator_gets_a_pause_to_confirm_nothing_is_turning(self):
+        """The spindle line is replaced, not deleted: M5 plus a dwell, so someone can
+        look at the tool and see it is stationary before the moves start."""
+        pp = FRCPostProcessor(0.25, 0.125, config=TeamConfig())
+        pp.set_dry_run(LIFT)
+        lines = pp._spindle_start_gcode()
+        self.assertTrue(any(l.startswith('M5') for l in lines))
+        self.assertTrue(any('G4 P' in l for l in lines),
+                        'no dwell to confirm the spindle is stopped')

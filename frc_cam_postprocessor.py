@@ -357,6 +357,15 @@ class FRCPostProcessor:
         self.machine_controller = config.machine_controller  # Controller type
         self.machine_coolant = config.machine_coolant  # Coolant type
 
+        # How deep one pass may cut. Every route applies a material preset, which sets
+        # this from the material and then derates it for the tool; the default here only
+        # exists so that a caller who generates WITHOUT a preset gets a conservative
+        # single-pass depth rather than an AttributeError from inside a toolpath. The
+        # flag, not hasattr, is what tells the derating code a preset has been applied -
+        # the attribute now always exists.
+        self.max_slotting_depth = MATERIAL_PRESETS['plywood']['max_slotting_depth']
+        self._material_preset_applied = False
+
         # Helix entry radius multiplier (applied to tool diameter)
         # Overridden by material presets
         self.helix_radius_multiplier = 0.75  # Default 75% of tool radius
@@ -380,6 +389,7 @@ class FRCPostProcessor:
             print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
             preset = self.config.get_material_preset('plywood', machine_id)
 
+        self._material_preset_applied = True
         self.material_name = preset.get('name', material.capitalize())  # Store material name for header
         self.material_id = material            # preset key, for scale_feeds_to_tool
         self.machine_preset_id = machine_id    # machine key, for the spindle-power clamp
@@ -479,7 +489,7 @@ class FRCPostProcessor:
         """
         import feeds_speeds
 
-        if not hasattr(self, 'max_slotting_depth'):
+        if not self._material_preset_applied:
             # No preset applied yet - there is nothing tested to scale down from.
             return []
 
@@ -3497,14 +3507,20 @@ class FRCPostProcessor:
         per level and must return a list of G-code lines.
         """
         total_depth = self.material_top - self.cut_depth
-        levels = self.passes_for_depth(total_depth, self.max_slotting_depth)
+        # `max_slotting_depth` arrives with the material preset. Every route applies one,
+        # but a caller that builds a post-processor and generates without one used to
+        # reach this line and crash with an AttributeError rather than cut conservatively.
+        limit = getattr(self, 'max_slotting_depth', None)
+        if not limit or not math.isfinite(limit) or limit <= 0:
+            limit = total_depth       # one pass: no ceiling was ever configured
+        levels = self.passes_for_depth(total_depth, limit)
         if levels <= 1:
             return emit()
 
         saved_top, saved_bottom = self.material_top, self.cut_depth
         step = total_depth / levels
         gcode = [f"(Depth levels: {levels} at {step:.4f}\" each, "
-                 f"max {self.max_slotting_depth:.4f}\" per pass)"]
+                 f"max {limit:.4f}\" per pass)"]
         try:
             for level in range(1, levels + 1):
                 # Each level is its own slab: the previous floor is this pass's "top", so

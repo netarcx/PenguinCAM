@@ -2918,6 +2918,42 @@ class TestMultiPartEngine(unittest.TestCase):
         small = [{'name': 'A', 'bbox': (0, 0, 10, 10)}]
         self.assertEqual(validate_job_layout(small, 24, 24), [])  # fits, single part is its own stock
 
+    def test_validate_against_a_sheet_catches_a_part_off_the_material(self):
+        """With a sheet chosen the placements are absolute on it, so "does it fit" stops
+        being a question about the parts' own bounding box. This was browser-only: the
+        server explicitly called the stock field advisory and re-derived it from the
+        parts, so a direct post - or any regression in that JS - cut off the material."""
+        parts = [{'name': 'A', 'bbox': (20.0, 0.0, 26.0, 4.0)}]
+        errors = validate_job_layout(parts, 48, 48, stock=(24.0, 18.0))
+        self.assertTrue(any('do not fit on the' in e['error'] for e in errors),
+                        msg=str(errors))
+        inside = [{'name': 'A', 'bbox': (1.0, 1.0, 7.0, 5.0)}]
+        self.assertEqual(validate_job_layout(inside, 48, 48, stock=(24.0, 18.0)), [])
+
+    def test_validate_against_a_sheet_counts_the_kerf(self):
+        """The profile pass rides half a kerf OUTSIDE the outline, so a part flush with
+        the sheet edge still cuts past it - into the spoilboard, or through X0 into a
+        soft limit mid-cut."""
+        flush = [{'name': 'A', 'bbox': (0.0, 0.0, 6.0, 4.0)}]
+        self.assertEqual(validate_job_layout(flush, 48, 48, stock=(24.0, 18.0)), [])
+        errors = validate_job_layout(flush, 48, 48, min_gap=0.25, stock=(24.0, 18.0))
+        self.assertTrue(any('do not fit on the' in e['error'] for e in errors),
+                        msg=str(errors))
+
+    def test_validate_rejects_a_sheet_bigger_than_the_machine(self):
+        parts = [{'name': 'A', 'bbox': (1.0, 1.0, 5.0, 5.0)}]
+        errors = validate_job_layout(parts, 31.5, 19.7, stock=(48.0, 48.0))
+        self.assertTrue(any('exceeds the machine' in e['error'] for e in errors),
+                        msg=str(errors))
+
+    def test_validate_checks_absolute_travel_not_just_size(self):
+        """Checking the bounding box's WIDTH was only ever equivalent while placements
+        were bbox-relative. A 4" part at X42 is 4" wide and 46" away."""
+        far = [{'name': 'A', 'bbox': (42.0, 42.0, 46.0, 46.0)}]
+        errors = validate_job_layout(far, 31.5, 19.7)
+        self.assertTrue(any('past the machine' in e['error'] for e in errors),
+                        msg=str(errors))
+
     def test_validate_passes_clean_layout(self):
         parts = [
             {'name': 'A', 'bbox': (0, 0, 4, 4)},

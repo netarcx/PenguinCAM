@@ -246,7 +246,11 @@ class SavedToolsPreserveTest(unittest.TestCase):
     def test_comments_above_and_below_the_block_are_kept(self):
         text = self._save_an_unrelated_bit()
         self.assertIn("own documentation, written ABOVE", text)
-        self.assertIn('Notes the team wrote BELOW the block', text)
+        # BOTH comment lines. Asserting only the second one meant a writer that ate
+        # exactly one trailing line - which is what two earlier versions of _block_span
+        # did - deleted a team's heading with the test still green.
+        self.assertIn('# ------------------------------------------------------------------\n'
+                      '# Notes the team wrote BELOW the block (notebook p.42)', text)
 
     def test_the_block_stays_where_the_team_put_it(self):
         """Appending at the end instead of replacing in place is how the notes below it

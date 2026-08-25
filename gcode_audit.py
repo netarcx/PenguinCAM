@@ -71,6 +71,7 @@ def simulate(gcode):
                 'drill_lateral': [], 'g83_without_g80': 0, 'spindle_on': False,
                 'unsafe_after_m0': []}
     material_top = None
+    z_known = False          # has the program actually said where Z is yet?
     in_drill = False
     pending_g80 = 0
     just_resumed = False
@@ -96,7 +97,16 @@ def simulate(gcode):
             nx, ny = words.get('X', x), words.get('Y', y)
             nz = words.get('Z', z)
             moved_xy = abs(nx - x) > 1e-9 or abs(ny - y) > 1e-9
-            findings['min_z'] = min(findings['min_z'], nz, z)
+            # `z` is seeded at 0.0 before the program says where the tool is. A cutting
+            # program's depths are negative so the seed never dominates, but a dry run's
+            # are all positive - and the fake 0.0 then became the reported minimum,
+            # contradicting the header on every raised program.
+            if 'Z' in words:
+                findings['min_z'] = min(findings['min_z'], nz,
+                                        z if z_known else nz)
+                z_known = True
+            elif z_known:
+                findings['min_z'] = min(findings['min_z'], z)
 
             if head == 'G83':
                 pending_g80 += 1
@@ -115,6 +125,7 @@ def simulate(gcode):
         elif head == 'G80':
             pending_g80 = max(0, pending_g80 - 1)
     findings['g83_without_g80'] = pending_g80
+    findings['material_top'] = material_top
     return findings
 
 
@@ -402,10 +413,32 @@ def audit(name, job, expect_drill=False, max_engagement=None):
         fail(name, f'M0 count {g.count("M0")} does not match pauses '
                    f'({g.count("=== TOOL CHANGE")} changes + '
                    f'{g.count("PAUSE FOR FIXTURING")} fixturing)')
+    dry = 'DRY RUN' in g
+    if dry:
+        # The whole claim of a dry run, checked independently: nothing reaches the work.
+        # The header's "material top" is the LIFTED, fictional one - the program does
+        # descend within the raised frame, which is the point of "the same program,
+        # raised". The real work sits a lift below that, and that is what must be clear.
+        lift = re.search(r'raised (\d+\.?\d*) in above the work', g)
+        if sim['material_top'] is not None and lift:
+            real_top = sim['material_top'] - float(lift.group(1))
+            if sim['min_z'] < real_top - 1e-6:
+                fail(name, f'dry run reaches Z{sim["min_z"]:.4f}, into work whose top '
+                           f'is at {real_top:.4f}')
+        elif sim['material_top'] is not None:
+            fail(name, 'dry run header does not state the lift')
+        if re.search(r'^S\d+ M3', g, re.M):
+            fail(name, 'dry run starts the spindle')
     for i, l in enumerate(lines):
         if l.startswith('M0'):
             after = '\n'.join(lines[i:i + 12])
-            if 'M3' not in after:
+            # A dry run deliberately violates "every pause restarts the spindle" - the
+            # whole point is that it never starts. Inverted rather than skipped, so the
+            # property is still checked: after a dry run's pause, M3 must be ABSENT.
+            if dry:
+                if re.search(r'^S\d+ M3', after, re.M):
+                    fail(name, 'spindle started after a pause in a dry run')
+            elif 'M3' not in after:
                 fail(name, 'spindle not restarted after a pause')
             break
 
@@ -559,6 +592,41 @@ def main():
 
     for label in ('GEARBOX-L', 'Bracket (left) [v2]', 'ARM_2129#3'):
         audit(f'engrave/{label[:12]}', engraved_run(label))
+
+    # Dry runs. Nothing in the corpus audited one, so the audit had no independent
+    # opinion on the feature whose entire job is to be trustworthy: 13 separate
+    # mutations of the dry-run code produced no audit finding at all. The frame here is
+    # entirely positive, which is what caught the simulator seeding min_z at a Z the
+    # program never visits.
+    def dry_run_single(thickness, tool=0.125):
+        def _go():
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool,
+                                      units='inch')
+                pp.apply_material_preset('aluminum', 'omio_x8')
+                pp.set_dry_run(2.0)
+                pp.load_dxf(plate(HOLES, POCKET))
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                return pp.generate_gcode(suggested_filename='dry',
+                                         timestamp='2026-08-25 03:00:00')
+        return _go
+
+    # Thin stock, where the requested 2" lift dominates, and thick stock, where it does
+    # not - a fixed lift over a 2.5" block cut 0.5" deep with a stationary cutter.
+    audit('dryrun/thin', dry_run_single(0.25))
+    audit('dryrun/thick', dry_run_single(2.5))
+
+    audit('dryrun/multitool', MultiToolJob(
+        material='aluminum', thickness=0.25, machine_id='omio_x8', max_pass_depth=1 / 32,
+        dry_run_lift=2.0, tools=drill_set,
+        parts=[PartOps(dxf_path=plate(HOLES + BORE, POCKET), name='p', operations=[
+            Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+            Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+            Operation('pockets', 2),
+            Operation('perimeter', 2)])]),
+          expect_drill=True, max_engagement=1 / 32)
 
     # Standard-mode (single-tool) programs with the deburr / chamfer pass appended:
     # the same physical checks, on the non-multitool path that generates them. Two
