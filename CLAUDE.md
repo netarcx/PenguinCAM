@@ -139,10 +139,10 @@ Detailed documentation lives in the `docs/` directory. **Read these before modif
 | File | When to Read |
 |------|--------------|
 | `MULTI_TOOL_STATUS.md` | **Read first when resuming multi-tool work** - what is unverified and what is left |
-| `MULTI_TOOL_GUIDE.md` | Changing `tooling.py`, the multi-tool routes, `static/multitool.js`, drilling or the chamfer code |
+| `MULTI_TOOL_GUIDE.md` | Changing `tooling.py`, the multi-tool routes, `static/multitool.js`, drilling, the chamfer code, or saved bits (the `tools:` config block and `/tools/save`) |
 | `TUBE_PATTERNS.md` | Changing `tube_patterns.py`, `load_tube_pattern`, or the tube branch of `/process` |
 | `LOCAL_MODE.md` | Changing `local_mode.py`, `penguincam_local.py`, or any authentication gate |
-| `Z_COORDINATE_SYSTEM.md` | Modifying Z-axis calculations, safe heights, cut depths, or plunge moves |
+| `Z_COORDINATE_SYSTEM.md` | Modifying Z-axis calculations, safe heights, cut depths, plunge moves, or the Z datum (`z_datum` / `--z-zero`) |
 | `TOOL_COMPENSATION_GUIDE.md` | Changing offset logic for perimeters, pockets, or holes |
 | `ASSUMPTIONS.md` | Adding/changing G-code output; lists controller compatibility requirements |
 | `MACHINE_CHECKLIST.md` | Updating G-code header comments or safety checks |

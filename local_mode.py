@@ -19,6 +19,7 @@ gate means anyone who can reach the port can use it.
 
 import glob
 import os
+import re
 
 from logging_config import log
 
@@ -144,3 +145,153 @@ def load_local_team_config():
     log(f"[LOCAL] Loaded team config from {path}: "
         f"{config.team_name} (#{config.team_number})")
     return config, path
+
+
+# --------------------------------------------------------------------------- saved bits
+
+#: The one comment line the saved-bits writer owns. Anything else above the block is
+#: the team's own documentation and is never touched.
+TOOLS_BLOCK_SENTINEL = ('# --- PenguinCAM saved bits: written by the Tools panel, '
+                        'safe to edit by hand ---')
+
+
+def config_is_writable() -> bool:
+    """True when there is a local config file the app is allowed to rewrite.
+
+    Saving a bit edits the team's config file, so it is offered only when there IS one
+    and the filesystem will take a write. The hosted app's config comes from Onshape and
+    is not ours to rewrite; there the UI hands over YAML to paste instead."""
+    path = find_local_config_path()
+    return bool(path) and os.access(path, os.W_OK)
+
+
+def _yaml_quoted(value) -> str:
+    """A double-quoted YAML scalar. Diameters are the reason this exists: 1/4" ends in
+    the quote character, and pasting it raw produced `diameter: "1/4""`, which is not
+    YAML at all."""
+    text = str(value).replace('\\', '\\\\').replace('"', '\\"')
+    return f'"{text}"'
+
+
+def _render_tools_block(tools) -> str:
+    """The `tools:` block, written the way a person would write it.
+
+    Hand-rolled rather than yaml.safe_dump'd so the block reads like the rest of the
+    file (block sequences, quoted names, no !!python tags, keys in a fixed order) and so
+    a diff of the config after saving a bit is one readable hunk."""
+    lines = [TOOLS_BLOCK_SENTINEL, 'tools:']
+    if not tools:
+        lines.append('  []')
+        return '\n'.join(lines) + '\n'
+    for tool in tools:
+        diameter = tool.get('diameter_text') or tool.get('diameter')
+        lines.append(f'  - name: {_yaml_quoted(tool.get("name", ""))}')
+        lines.append(f'    diameter: {_yaml_quoted(diameter)}')
+        lines.append(f'    flutes: {int(tool.get("flutes", 1))}')
+        lines.append(f'    type: {tool.get("type", "endmill")}')
+        if tool.get('type') == 'vbit' or tool.get('included_angle') is not None:
+            angle = tool.get('included_angle')
+            if angle is not None:
+                lines.append(f'    included_angle: {float(angle):g}')
+    return '\n'.join(lines) + '\n'
+
+
+def _strip_tools_block(text: str) -> str:
+    """Remove an existing top-level `tools:` block from the config text, leaving
+    everything else byte-for-byte.
+
+    Only ONE comment line is ever taken with it: the sentinel this module writes. The
+    first version of this swallowed every comment line above `tools:`, which on a config
+    whose saved-bits section is preceded by a page of hand-written documentation meant
+    the second save deleted the documentation. A managed block gets to own exactly the
+    line it wrote."""
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r'^tools\s*:', line):
+            start = i
+            break
+    if start is None:
+        return text
+    head = start
+    if head > 0 and lines[head - 1].rstrip('\n') == TOOLS_BLOCK_SENTINEL:
+        head -= 1
+        # Blank lines between the previous content and our own block are ours too, so
+        # repeated saves do not push the file down one line at a time.
+        while head > 0 and not lines[head - 1].strip():
+            head -= 1
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        # The block ends at the next line that starts in column 0 and is not a comment,
+        # a blank, or part of the sequence.
+        if line.strip() and not line[0].isspace() and not line.lstrip().startswith('#'):
+            break
+        end += 1
+    # Trailing blank lines after the block belong to it too, so repeated saves do not
+    # accumulate empty lines.
+    while end < len(lines) and not lines[end].strip():
+        end += 1
+    return ''.join(lines[:head] + lines[end:])
+
+
+def save_tools_to_config(tools):
+    """Write the saved-bit list into the local team config file.
+
+    Everything except the `tools:` block is preserved character for character - the
+    config is full of hand-written comments that took someone an afternoon and a
+    yaml.safe_dump round trip would delete every one of them.
+
+    The result is re-parsed before it replaces the file, and the parse is compared with
+    the original: if ANY key other than `tools` moved, the write is refused. A tool list
+    is not worth a damaged machine config.
+
+    Returns (ok, message_or_path).
+    """
+    path = find_local_config_path()
+    if not path:
+        return False, 'No local team config file to save into.'
+    if not os.access(path, os.W_OK):
+        return False, f'{os.path.basename(path)} is read-only.'
+
+    import yaml
+
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            original = fh.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        return False, f'Could not read {os.path.basename(path)}: {exc}'
+
+    try:
+        before = yaml.safe_load(original) or {}
+    except yaml.YAMLError as exc:
+        return False, f'{os.path.basename(path)} is not valid YAML, so it was left alone: {exc}'
+
+    body = _strip_tools_block(original)
+    if body and not body.endswith('\n'):
+        body += '\n'
+    updated = body.rstrip('\n') + '\n\n' + _render_tools_block(tools)
+
+    try:
+        after = yaml.safe_load(updated) or {}
+    except yaml.YAMLError as exc:
+        return False, f'Refused to save: the edit would not parse ({exc})'
+
+    before_rest = {k: v for k, v in before.items() if k != 'tools'}
+    after_rest = {k: v for k, v in after.items() if k != 'tools'}
+    if before_rest != after_rest:
+        return False, ('Refused to save: rewriting the bit list would have changed the '
+                       'rest of the config. Add the bits by hand instead.')
+
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(updated)
+        os.replace(tmp, path)     # atomic: a crash mid-write cannot truncate the config
+    except OSError as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False, f'Could not write {os.path.basename(path)}: {exc}'
+    return True, path

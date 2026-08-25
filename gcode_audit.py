@@ -440,6 +440,34 @@ def main():
                     Operation('pockets', 2), Operation('perimeter', 2)])]),
                   expect_drill=True)
 
+    # The stock-top Z datum, on the same shapes: every cutting move is below zero
+    # here, so the "no rapid below the material top" and engagement checks are read
+    # against a negative top face. The audit takes the top face from the header, so it
+    # is not told which datum it is looking at - which is the point.
+    for thickness in (0.125, 0.5):
+        audit(f'mill/stock-top/{thickness}', MultiToolJob(
+            material='aluminum', thickness=thickness, tools=mill, machine_id='omio_x8',
+            z_datum='stock_top',
+            parts=[PartOps(dxf_path=plate(HOLES + BORE, POCKET), name='p', operations=[
+                Operation('holes', 1, scope={'max_diameter': 0.4}),
+                Operation('holes', 2, scope={'min_diameter': 0.4}),
+                Operation('pockets', 2), Operation('perimeter', 2),
+                Operation('chamfer', 3, scope={'targets': ['perimeter'], 'width': 0.02})])]))
+
+    # Partial-depth work on the stock-top datum, where every Z is negative and
+    # "is this through the stock?" cannot be read off the sign. A pocket that stops
+    # short must still be cleared, and a drilled hole must only break through when it
+    # is meant to.
+    audit('mill/stock-top/partial-depth', MultiToolJob(
+        material='aluminum', thickness=0.25, tools=drill_set, machine_id='omio_x8',
+        z_datum='stock_top',
+        parts=[PartOps(dxf_path=plate(HOLES + BORE, POCKET), name='p', operations=[
+            Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+            Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+            Operation('pockets', 2, 'Relief', depth=0.1),
+            Operation('perimeter', 2)])]),
+          expect_drill=True)
+
     # multi-part, with the fixturing pause on
     pause_cfg = TeamConfig({'machining': {'fixturing': {'pause_before_perimeter': True}}})
     dxf = plate(HOLES + BORE, POCKET)
@@ -483,11 +511,11 @@ def main():
     # real metal.
     from frc_cam_postprocessor import parse_chamfer_spec
 
-    def standard_chamfer_run(material, thickness, angle):
+    def standard_chamfer_run(material, thickness, angle, z_datum=None):
         def _go():
             with redirect_stdout(io.StringIO()):
                 pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=0.157,
-                                      units='inch')
+                                      units='inch', z_datum=z_datum)
                 pp.apply_material_preset(material)
                 pp.load_dxf(plate(HOLES + BORE, POCKET))
                 pp.transform_coordinates('bottom-left', 0)
@@ -504,6 +532,10 @@ def main():
         for angle in (60, 90):
             audit(f'std-chamfer/{material}/{angle}deg',
                   standard_chamfer_run(material, 0.25, angle))
+
+    # The single-tool path on the stock-top datum, deburr pass and all.
+    audit('std-chamfer/stock-top/90deg',
+          standard_chamfer_run('aluminum', 0.25, 90, z_datum='stock_top'))
 
     # Pre-designed tube patterns (1x1 and 2x1, with and without lightening).
     for face_width, height, label in ((1.0, 1.0, '1x1'), (2.0, 1.0, '2x1-flat'),

@@ -403,7 +403,9 @@
     var m0 = this.moves[0];
     // A program that starts at Z0 has not touched the work yet; park the first vertex at
     // the rapid height so the opening move is not drawn through the stock.
-    var z0 = (!m0.from.z || m0.from.z === 0) ? this.stockHeight + 0.5 : m0.from.z;
+    var z0 = (!m0.from.z || m0.from.z === 0)
+             ? (this.stockTopZ === undefined ? this.stockHeight : this.stockTopZ) + 0.5
+             : m0.from.z;
     pts[0] = m0.from.x; pts[1] = z0; pts[2] = -m0.from.y;
     for (var i = 0; i < n; i++) {
       var to = this.moves[i].to;
@@ -491,7 +493,14 @@
     var stockW = num(opts.stockWidth, 0) || (maxX - minX) || 1;
     var stockD = num(opts.stockDepth, 0) || (maxY - minY) || 1;
     var stockH = num(opts.stockHeight, 0) || 0.25;
+    // Where the top face sits on the Z axis. Zeroing on the sacrifice board puts it at
+    // +thickness (the default); zeroing on the stock puts it at 0, with the whole part
+    // hanging below. Without this the box was drawn above a toolpath that runs beneath
+    // it, which is a picture of the one mistake this option can cause.
+    var stockTopZ = opts.stockTopZ === undefined || opts.stockTopZ === null
+                    ? stockH : num(opts.stockTopZ, stockH);
     this.stockHeight = stockH;
+    this.stockTopZ = stockTopZ;
     if (isTube) {
       // A real model of the part, not a box standing in for it.
       this.stockHeight = tube.height;
@@ -504,7 +513,7 @@
           color: 0xe8f0ff, transparent: true, opacity: 0.15,
           metalness: 0.3, roughness: 0.7, side: THREE.DoubleSide, depthWrite: false
         }));
-      stockMesh.position.set(stockW / 2, stockH / 2, -stockD / 2);
+      stockMesh.position.set(stockW / 2, stockTopZ - stockH / 2, -stockD / 2);
       stockMesh.renderOrder = -1;
       this.scene.add(stockMesh);
     }

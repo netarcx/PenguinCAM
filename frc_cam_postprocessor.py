@@ -173,9 +173,41 @@ def build_output_filename(suggested_filename: str, timestamp: str, fallback: str
     return f"{base_name}_{stamped}.nc"
 
 
+# Where the operator sets Z zero. 'board' (the default, and what every program this
+# tool has ever produced used) means Z0 is the sacrifice board, so the stock top is at
+# +thickness and a through-cut is a shallow negative. 'stock_top' means Z0 is the top
+# face of the stock, so cutting is negative all the way down - the convention Fusion and
+# most textbooks use, and the one to pick when the stock is held in a vise or the board
+# is not a reliable reference.
+Z_DATUM_BOARD = 'board'
+Z_DATUM_STOCK_TOP = 'stock_top'
+_Z_DATUM_ALIASES = {
+    'board': Z_DATUM_BOARD, 'sacrifice': Z_DATUM_BOARD, 'sacrifice_board': Z_DATUM_BOARD,
+    'sacrifice-board': Z_DATUM_BOARD, 'spoilboard': Z_DATUM_BOARD, 'bottom': Z_DATUM_BOARD,
+    'top': Z_DATUM_STOCK_TOP, 'stock_top': Z_DATUM_STOCK_TOP, 'stock-top': Z_DATUM_STOCK_TOP,
+    'material_top': Z_DATUM_STOCK_TOP, 'material-top': Z_DATUM_STOCK_TOP,
+}
+
+
+def normalize_z_datum(value, default: str = Z_DATUM_BOARD) -> str:
+    """Map any accepted spelling of the Z datum onto 'board' or 'stock_top'.
+
+    Empty/None means "unspecified" and returns the default. Anything else that is not
+    recognised raises: a mistyped datum silently falling back would zero the program a
+    material thickness away from where the operator set the tool, which is the one class
+    of mistake this whole option exists to make explicit."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    key = str(value).strip().lower().replace(' ', '_')
+    if key in _Z_DATUM_ALIASES:
+        return _Z_DATUM_ALIASES[key]
+    raise ValueError(f"Unknown Z datum {value!r}: expected 'board' (sacrifice board) "
+                     f"or 'stock_top'")
+
+
 class FRCPostProcessor:
     def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch",
-                 config: Optional[TeamConfig] = None):
+                 config: Optional[TeamConfig] = None, z_datum: Optional[str] = None):
         """
         Initialize the post-processor
 
@@ -185,6 +217,8 @@ class FRCPostProcessor:
             units: "inch" or "mm"
             config: Optional TeamConfig instance for team-specific settings.
                    If not provided, uses Team 6238 defaults.
+            z_datum: Where the operator zeros Z - 'board' (sacrifice board, the default)
+                   or 'stock_top'. None takes the team config's setting.
         """
         # Use provided config or create default (Team 6238 defaults)
         if config is None:
@@ -234,15 +268,14 @@ class FRCPostProcessor:
         # Multi-layer support
         self.layer_data = None  # Set by load_dxf for multi-layer DXFs
 
-        # Z-axis reference: Z=0 is at BOTTOM (sacrifice board surface)
-        # This allows zeroing to the sacrifice board instead of material top
+        # Z-axis reference. Which surface Z0 sits on is the operator's choice
+        # (see normalize_z_datum); everything downstream is written against
+        # material_top / cut_depth rather than against zero, so the datum only has
+        # to be applied once, here.
         self.sacrifice_board_depth = config.sacrifice_board_depth  # How far to cut into sacrifice board (inches)
         self.clearance_height = config.clearance_height  # Clearance above material top for rapid moves (inches)
-
-        # Calculated Z positions (Z=0 at sacrifice board)
-        self.retract_height = material_thickness + self.clearance_height  # Retract above material for operations
-        self.material_top = material_thickness  # Top surface of material
-        self.cut_depth = -self.sacrifice_board_depth  # Cut slightly into sacrifice board
+        self.z_datum = normalize_z_datum(z_datum if z_datum is not None else config.z_datum)
+        self._apply_z_frame()   # sets material_top, retract_height, cut_depth
 
         # True when the tool is parked at safe height (above the clearance plane) and the
         # next feature must first rapid down to the clearance plane before its slow plunge
@@ -843,8 +876,7 @@ class FRCPostProcessor:
             max_depth = max((info['depth'] for info in self.layer_data.values()), default=0.0)
             if max_depth > 0:
                 self.material_thickness = max_depth
-                self.material_top = max_depth
-                self.retract_height = max_depth + self.clearance_height
+                self._apply_z_frame()
                 print(f"  Derived stock thickness from CAD layers: {max_depth:.4f}\"")
 
     def _chain_entities_to_paths(self, lines, arcs, splines, unclosed_polylines=None, ellipses=None):
@@ -1681,9 +1713,8 @@ class FRCPostProcessor:
         if self.holes:
             gcode.append("(===== HOLES =====)")
 
-            # Check if this is a through-cut (to sacrifice board)
             # Only contour through-cuts; partial-depth features must be fully cleared
-            is_through_cut = self.cut_depth <= 0  # At or below Z=0 means cutting into sacrifice board
+            is_through_cut = self.is_through_cut()
 
             # Separate holes into contoured and cleared based on size
             contoured_holes = []
@@ -1750,9 +1781,8 @@ class FRCPostProcessor:
         if self.pockets:
             gcode.append("(===== POCKETS =====)")
 
-            # Check if this is a through-cut (to sacrifice board)
             # Only contour through-cuts; partial-depth features must be fully cleared
-            is_through_cut = self.cut_depth <= 0  # At or below Z=0 means cutting into sacrifice board
+            is_through_cut = self.is_through_cut()
 
             # Separate pockets into contoured and fully cleared based on size
             contoured_pockets = []
@@ -2005,12 +2035,66 @@ class FRCPostProcessor:
     # ONLY when a coolant type is configured - so the default output runs on GRBL, Easel,
     # WinCNC, Mach, etc.
 
+    # ---- Z datum ---------------------------------------------------------------
+    # Three numbers place the whole program on the Z axis: where the stock's top face
+    # is, where a through-cut ends, and how high a retract goes. Every toolpath in this
+    # class is written relative to those, so changing the datum is a matter of moving
+    # all three together - and the two datums then differ by exactly the stock
+    # thickness, move for move (tests/test_unit.py asserts that).
+
+    def _apply_z_frame(self):
+        """Place material_top / retract_height / cut_depth for the current datum and
+        stock thickness. Called from __init__ and again whenever the thickness or the
+        sacrifice depth changes (2.5D derives thickness from the CAD layers)."""
+        top = 0.0 if self.z_datum == Z_DATUM_STOCK_TOP else self.material_thickness
+        self.material_top = top                                  # top face of the stock
+        self.retract_height = top + self.clearance_height        # rapid height over it
+        self.cut_depth = top - self.material_thickness - self.sacrifice_board_depth
+
+    @property
+    def stock_bottom(self) -> float:
+        """Z of the stock's bottom face - the sacrifice board surface. Zero on the board
+        datum, -thickness on the stock-top datum."""
+        return self.material_top - self.material_thickness
+
+    def is_through_cut(self, z: float = None) -> bool:
+        """Does a cut at this Z reach the bottom face of the stock?
+
+        A through-cut can be contoured (the offcut falls away); anything shallower has to
+        be cleared out completely, and a drilled hole only gets the point-length
+        break-through allowance when it is going all the way. Written against the bottom
+        face rather than against Z=0, which is the same thing ONLY on the board datum -
+        on the stock-top datum every cut is negative and this read as "always through",
+        which would have left partial-depth pockets contoured but never cleared."""
+        return (self.cut_depth if z is None else z) <= self.stock_bottom + 1e-9
+
+    def set_z_datum(self, datum):
+        """Switch which surface Z0 sits on, re-placing the Z frame around it."""
+        self.z_datum = normalize_z_datum(datum)
+        self._apply_z_frame()
+
+    @property
+    def z_shift(self) -> float:
+        """How far this program's Z zero sits below the sacrifice-board zero: 0 for the
+        board datum, -thickness for the stock-top datum. Applies to the few heights that
+        are configured as absolute board-frame numbers rather than derived from the
+        stock."""
+        return self.material_top - self.material_thickness
+
+    def z_zero_surface(self) -> str:
+        """What the operator touches off on, in operator words."""
+        return ('the top of the stock' if self.z_datum == Z_DATUM_STOCK_TOP
+                else 'the sacrifice board surface')
+
     def _safe_z(self) -> float:
-        """Work-coordinate (G54) safe retract height above Z=0 (sacrifice board). Uses the
-        configured machine ceiling when set, but never below the material + clearance so a
-        thick part can't collide on the retract."""
+        """Work-coordinate (G54) safe retract height. Uses the configured machine ceiling
+        when set, but never below the material + clearance so a thick part can't collide
+        on the retract. The ceiling is configured as a height over the sacrifice board,
+        so it is shifted with the datum - both datums then retract to the same physical
+        height, not to the same number."""
         floor = self.retract_height  # material_thickness + clearance (or max_depth + clearance in 2.5D)
-        return max(floor, self.safe_clearance_height or 0.0)
+        ceiling = (self.safe_clearance_height or 0.0) + self.z_shift
+        return max(floor, ceiling)
 
     def _coolant_on_gcode(self):
         """Coolant-start line for the configured coolant type, or None if no coolant is set.
@@ -2035,6 +2119,16 @@ class FRCPostProcessor:
             f'G53 G0 Z{pz:.4f}  ; {comment}: raise to safe machine Z',
             f'G53 G0 X{px} Y{py}  ; {comment}: move gantry to park position',
         ]
+
+    def _force_board_datum_for_tube(self):
+        """Tube programs are zeroed to the tube in its jig, not to a sheet on a spoilboard.
+        Their Z frame is built by lifting the plate toolpath by (tube_height - wall
+        thickness), which only works from the board datum - so a stock-top setting is
+        dropped here, loudly, instead of shifting every tube program by a wall thickness."""
+        if self.z_datum != Z_DATUM_BOARD:
+            self.set_z_datum(Z_DATUM_BOARD)
+            print("  Note: tube jobs are zeroed to the tube in its jig; the stock-top Z "
+                  "datum does not apply and was not used.")
 
     def _tube_wcs_activate_gcode(self) -> str:
         """The work-coordinate-system line that opens a tube program. Default G54 (the
@@ -2154,7 +2248,7 @@ class FRCPostProcessor:
             for line in tool_table:
                 gcode.append(f"(  {line})")
             gcode.append("(The program pauses and parks at each change - swap the tool,)")
-            gcode.append("(re-zero Z to the sacrifice board, then press CYCLE START.)")
+            gcode.append(f"(re-zero Z to {self.z_zero_surface()}, then press CYCLE START.)")
             gcode.append("(** Do NOT touch the X or Y zero between tools **)")
         else:
             gcode.append(f"(Tool: {self.tool_diameter}\" diam Flat End Mill)")
@@ -2212,10 +2306,11 @@ class FRCPostProcessor:
             gcode.append("")
 
             gcode.append("(Z-AXIS REFERENCE:)")
-            gcode.append("(  Z=0 is at SACRIFICE BOARD surface)")
+            gcode.append("(  Z=0 is at " + ("TOP OF STOCK" if self.z_datum == Z_DATUM_STOCK_TOP
+                                            else "SACRIFICE BOARD surface") + ")")
             gcode.append(f"(  Material top: Z={self.material_top:.4f}\")")
             gcode.append(f"(  Cuts {self.sacrifice_board_depth:.4f}\" into sacrifice board)")
-            gcode.append("(  ** VERIFY Z-ZERO BEFORE RUNNING **)")
+            gcode.append(f"(  ** ZERO Z TO {self.z_zero_surface().upper()}, VERIFY BEFORE RUNNING **)")
             gcode.append("")
 
         # Modal G-code setup
@@ -2667,9 +2762,17 @@ class FRCPostProcessor:
         # Process each depth layer (deepest to shallowest, excluding top/perimeter)
         for layer_name, layer_info in depth_layers:
             depth = layer_info['depth']
-            print(f"\nGenerating toolpaths for {layer_name} at Z={depth:.4f}\"")
+            # The DXF's layer depths are heights above the sacrifice board (the deepest
+            # is the stock thickness - that is where load_dxf gets the thickness from),
+            # so they are Z coordinates in the BOARD frame. Move them into whichever
+            # frame this program is being written in; z_shift is 0 unless the operator
+            # is zeroing on the stock top, in which case every layer drops by the stock
+            # thickness. Without this the layers were cut at their board-frame numbers -
+            # a full thickness above the material, i.e. in the air over it.
+            layer_z = depth + self.z_shift
+            print(f"\nGenerating toolpaths for {layer_name} at Z={layer_z:.4f}\"")
 
-            gcode.append(f"(===== LAYER: {layer_name} | DEPTH: Z={depth:.4f}\" =====)")
+            gcode.append(f"(===== LAYER: {layer_name} | DEPTH: Z={layer_z:.4f}\" =====)")
 
             # === SHAPELY POLYGON APPROACH ===
             # Get Shapely Polygons for this layer
@@ -2792,19 +2895,20 @@ class FRCPostProcessor:
             self.perimeter = None
             self.pockets = self.polylines.copy() if self.polylines else []
 
-            # NEW COORDINATE SYSTEM: DXF depths are already in machine coordinates
-            # Z=0 is sacrifice board in both DXF and G-code
-            # Pocket at DXF Z=0.050" → cut to machine Z=0.050"
+            # The DXF layer height, expressed in this program's Z frame (see layer_z
+            # above). A pocket on the DXF's Z=0.050" layer is 0.050" above the board
+            # whichever surface the operator zeroed on; only the number changes.
             saved_cut_depth = self.cut_depth
-            self.cut_depth = depth
+            self.cut_depth = layer_z
 
             # Generate toolpaths at this depth
             # Apply same contouring logic as 2D mode
             threshold_area = self._contour_threshold_area()
 
-            # Check if this layer is a through-cut (at or below Z=0)
-            # Only contour through-cuts; partial-depth layers must be fully cleared
-            is_through_cut = self.cut_depth <= 0
+            # A through-cut is one that reaches the bottom face of the stock - which is
+            # Z=0 only in the board frame. Only through-cuts are contoured; a
+            # partial-depth layer has to be cleared out completely.
+            is_through_cut = self.is_through_cut()
 
             if self.holes:
                 gcode.append(f"(Layer {layer_name}: {len(self.holes)} holes)")
@@ -2880,10 +2984,11 @@ class FRCPostProcessor:
         layer_name, layer_info = bottom_layer
         depth = layer_info['depth']
         print(f"\nGenerating perimeter from {layer_name}")
+        bottom_z = depth + self.z_shift
         if has_true_bottom:
-            print(f"  Bottom face is at Z={depth:.4f}\" - cutting perimeter through material")
+            print(f"  Bottom face is at Z={bottom_z:.4f}\" - cutting perimeter through material")
         else:
-            print(f"  Using deepest layer Z={depth:.4f}\" for perimeter outline only")
+            print(f"  Using deepest layer Z={bottom_z:.4f}\" for perimeter outline only")
 
         gcode.append(f"(===== LAYER: {layer_name} | PERIMETER =====)")
 
@@ -2900,7 +3005,7 @@ class FRCPostProcessor:
         # Generate holes and pockets ONLY if this is a true bottom face (through-cuts)
         # Otherwise they were already processed as depth layers
         if has_true_bottom:
-            gcode.append(f"(Bottom face at Z={depth:.4f}\" - through-holes and through-pockets)")
+            gcode.append(f"(Bottom face at Z={bottom_z:.4f}\" - through-holes and through-pockets)")
 
             # Apply contouring logic to bottom face (same as depth layers)
             threshold_area = self._contour_threshold_area()
@@ -3203,7 +3308,7 @@ class FRCPostProcessor:
                  f"{(point_angle or self.DEFAULT_DRILL_POINT_ANGLE):.0f} deg point)",
                  "(Axial plunge only - no lateral cutting moves)",
                  ""]
-        through = self.cut_depth <= 0
+        through = self.is_through_cut()
         for i, hole in enumerate(holes, 1):
             cx, cy = hole['center']
             gcode.append(f"(Hole {i} of {len(holes)})")
@@ -5065,7 +5170,7 @@ class FRCPostProcessor:
             instructions = [f"Remove the {bit_desc}",
                             f"Install the {mill_desc} for tab removal"]
         instructions += [
-            'Re-zero Z to the sacrifice board surface with the new tool',
+            f'Re-zero Z to {self.z_zero_surface()} with the new tool',
             'Do NOT change the X or Y zero',
         ]
         return self._generate_pause_and_park_gcode(title, instructions)
@@ -5454,6 +5559,8 @@ class FRCPostProcessor:
         Returns:
             PostProcessorResult with gcode string and stats
         """
+        self._force_board_datum_for_tube()
+
         # Parse tube dimensions
         tube_width, tube_height = self._parse_tube_size(tube_size)
 
@@ -5659,6 +5766,8 @@ class FRCPostProcessor:
         Returns:
             PostProcessorResult with gcode string and stats
         """
+        self._force_board_datum_for_tube()
+
         # Squaring the end and cutting to length are MILLING operations: they feed the
         # tool sideways, full width, a quarter inch deep. A drilled hole pattern has a
         # twist drill in the spindle and there is no tool change in this program, so the
@@ -6813,14 +6922,18 @@ def main():
                        help='Square the tube end before machining pattern (tube-pattern mode)')
     parser.add_argument('--cut-to-length', action='store_true',
                        help='Machine tube to length after pattern (tube-pattern mode)')
-    parser.add_argument('--material', type=str, default='plywood',
-                       help='Material preset (default: plywood). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
+    parser.add_argument('--material', type=str, default='aluminum',
+                       help='Material preset (default: aluminum). Built-in: plywood, aluminum, polycarbonate. Custom materials from config also supported.')
     parser.add_argument('--thickness', type=float, default=0.25,
                        help='Material thickness in inches (default: 0.25)')
-    parser.add_argument('--tool-diameter', type=float, default=0.157,
-                       help='Tool diameter in inches (default: 0.157" = 4mm)')
+    parser.add_argument('--tool-diameter', type=float, default=0.25,
+                       help='Tool diameter in inches (default: 0.25 = 1/4 in endmill)')
     parser.add_argument('--sacrifice-depth', type=float, default=0.02,
                        help='How far to cut into sacrifice board in inches (default: 0.02")')
+    parser.add_argument('--z-zero', choices=['board', 'stock-top'], default=None,
+                       help='Which surface the operator zeros Z on: "board" (the sacrifice '
+                            'board, the default) or "stock-top" (the top face of the stock, '
+                            'so cutting Z is negative throughout). Omit to use the team config.')
     parser.add_argument('--units', choices=['inch', 'mm'], default='inch',
                        help='Units (default: inch)')
     parser.add_argument('--chamfer-width', type=float, default=None,
@@ -7030,7 +7143,8 @@ def main():
         pp = FRCPostProcessor(material_thickness=args.thickness,
                               tool_diameter=args.tool_diameter,
                               units=args.units,
-                              config=load_cli_config(args.config))
+                              config=load_cli_config(args.config),
+                              z_datum=args.z_zero)
 
         # Apply material preset and user parameters (shared logic). The preset is tuned
         # for the 4 mm reference tool; scale it to the tool actually specified. An
@@ -7055,7 +7169,7 @@ def main():
         # Standard mode specific parameters
         pp.tab_spacing = args.tab_spacing
         pp.sacrifice_board_depth = args.sacrifice_depth
-        pp.cut_depth = -pp.sacrifice_board_depth
+        pp._apply_z_frame()   # the sacrifice depth moves the bottom of every through-cut
 
         # Optional deburr / chamfer pass with a user-specified V-bit.
         if args.chamfer_width is not None:
@@ -7099,7 +7213,7 @@ def main():
         print(f"  Feed rate: {pp.feed_rate:.1f} {args.units}/min")
         print(f"  Plunge rate: {pp.plunge_rate:.1f} {args.units}/min")
         print(f"\nZ-AXIS SETUP:")
-        print(f"  ** Zero your Z-axis to the SACRIFICE BOARD surface **")
+        print(f"  ** Zero your Z-axis to {pp.z_zero_surface().upper()} **")
         print(f"  Material top will be at Z={pp.material_top:.4f}\"")
         print(f"  Cut depth: Z={pp.cut_depth:.4f}\" ({pp.sacrifice_board_depth:.4f}\" into sacrifice board)")
         print(f"  Retract height: Z={pp.retract_height:.4f}\"")

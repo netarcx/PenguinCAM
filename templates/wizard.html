@@ -4,22 +4,37 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PenguinCAM</title>
+    <link rel="icon" href="{{ url_for('static', filename='popcornlogo.svg') }}">
+    <!-- Barlow is the DIN-adjacent industrial grotesk the UI is set in; the semi
+         condensed cut carries the headings and title-block labels. Both degrade to
+         the system stack if the shop has no network. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
     <link rel="stylesheet" href="{{ url_for('static', filename='wizard.css') }}">
 </head>
 <body data-source="{{ source }}">
     <div id="wizard">
         <header id="wiz-header">
-            <div class="brand">PenguinCAM</div>
+            <div class="brand">
+                <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path class="bm-fill" d="M12 12V3.5A8.5 8.5 0 0 0 3.5 12z"></path>
+                    <path class="bm-fill" d="M12 12v8.5a8.5 8.5 0 0 0 8.5-8.5z"></path>
+                    <circle class="bm-ring" cx="12" cy="12" r="8.5"></circle>
+                    <path class="bm-ring" d="M12 0.5v23M0.5 12h23"></path>
+                </svg>
+                <span class="brand-name">Penguin<b>CAM</b></span>
+            </div>
             <!-- Loaded team configuration (so the user can confirm it resolved correctly,
                  even in the Onshape panel). Clickable when we know the config file URL. -->
             <div class="config-info">
                 {% if not session.get('using_default_config') and session.get('team_config') and session.get('team_config').get('team_number') %}
                 {% set _config_url = session.get('team_config_url') %}
-                <p class="config-status">Config:
+                <p class="config-status">Team
                     {% if _config_url %}
-                    <a href="{{ _config_url }}" target="_blank" rel="noopener">{{ session.get('team_config').get('team_number') }} ({{ session.get('team_config').get('team_name', 'Unknown') }})</a>
+                    <a href="{{ _config_url }}" target="_blank" rel="noopener">{{ session.get('team_config').get('team_number') }} &middot; {{ session.get('team_config').get('team_name', 'Unknown') }}</a>
                     {% else %}
-                    {{ session.get('team_config').get('team_number') }} ({{ session.get('team_config').get('team_name', 'Unknown') }})
+                    {{ session.get('team_config').get('team_number') }} &middot; {{ session.get('team_config').get('team_name', 'Unknown') }}
                     {% endif %}
                     <a href="/config/refresh" class="config-refresh"
                        title="{% if local_mode %}Re-read PenguinCAM-config.yaml from disk{% else %}Reload team configuration from Onshape{% endif %}"
@@ -29,7 +44,7 @@
                 {# The reload control belongs here too, not only in the success branch:
                    "using defaults" is exactly the state you need to escape after dropping
                    a config file in next to the app. #}
-                <p class="config-status config-status-default">Using default configuration
+                <p class="config-status config-status-default">Default configuration
                     {% if local_mode %}
                     <a href="/config/refresh" class="config-refresh"
                        title="Re-read PenguinCAM-config.yaml from disk"
@@ -38,22 +53,23 @@
                 </p>
                 {% endif %}
             </div>
-            <ol id="stepbar" aria-label="Steps">
-                <li data-step="setup" data-num="1" class="active" role="button" tabindex="0">Setup</li>
-                <li data-step="parts" data-num="2" role="button" tabindex="0">Parts</li>
-                <li data-step="tools" data-num="3" role="button" tabindex="0" hidden>Tools &amp; Ops</li>
-                <li data-step="layout" data-num="3" role="button" tabindex="0">Layout</li>
-                <li data-step="preview" data-num="4" role="button" tabindex="0">Preview</li>
-            </ol>
         </header>
 
         <main id="wiz-body">
-            <!-- Running summary of decisions made on earlier steps (grows as you advance). -->
+            <!-- Running summary of decisions made on earlier steps (grows as you advance).
+                 Hidden in full-page grid mode, where every panel is already on screen. -->
             <div id="wiz-summary" hidden aria-label="Job summary"></div>
+
+            <!-- The two form panels share one scroll on a wide screen (see .rail in
+                 wizard.css): they hold different amounts depending on the mode, and
+                 splitting a fixed height between them clipped whichever one was
+                 fuller. Everywhere else the wrapper is display:contents and the panels
+                 place themselves in the grid individually. -->
+            <div class="rail">
 
             <!-- ===== SETUP ===== -->
             <section class="step" data-step="setup">
-                <h2>Setup</h2>
+                <div class="panel-head"><h2>Setup</h2></div>
 
                 {% if machines and machines|length > 1 %}
                 <label class="field">
@@ -66,68 +82,119 @@
                 </label>
                 {% endif %}
 
-                <fieldset class="field">
-                    <legend>Mode</legend>
-                    <label class="radio"><input type="radio" name="mode" value="2d" autocomplete="off" checked> 2D — flat plate (one or more parts)</label>
-                    <label class="radio" id="opt-mode-25d"><input type="radio" name="mode" value="2.5d" autocomplete="off"> 2.5D — derive thickness from CAD (single part)</label>
-                    <label class="radio"><input type="radio" name="mode" value="tubing" autocomplete="off"> Tubing — machine both faces of a tube</label>
-                </fieldset>
+                <div class="field">
+                    <span id="mode-label">Job type</span>
+                    <div class="seg" role="radiogroup" aria-labelledby="mode-label">
+                        <label class="seg-item">
+                            <input type="radio" name="mode" value="2d" autocomplete="off" checked>
+                            <span class="seg-t">2D</span>
+                            <span class="seg-d">Flat plate, one or more parts</span>
+                        </label>
+                        <label class="seg-item" id="opt-mode-25d">
+                            <input type="radio" name="mode" value="2.5d" autocomplete="off">
+                            <span class="seg-t">2.5D</span>
+                            <span class="seg-d">Thickness from CAD, one part</span>
+                        </label>
+                        <label class="seg-item">
+                            <input type="radio" name="mode" value="tubing" autocomplete="off">
+                            <span class="seg-t">Tubing</span>
+                            <span class="seg-d">Both faces of a tube</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="fieldgrid">
+                    <label class="field" id="tool-field">
+                        <span>Tool diameter</span>
+                        <input type="text" id="f-tool" inputmode="text" autocomplete="off" spellcheck="false"
+                               placeholder='1/4" or 6mm' value="{{ default_tool_diameter_text }}">
+                    </label>
+
+                    <label class="field" id="tool-bit-field">
+                        <span>Saved bits</span>
+                        <select id="f-tool-bit" autocomplete="off"></select>
+                    </label>
+
+                    <label class="field" id="material-field">
+                        <span>Material</span>
+                        <select id="f-material" autocomplete="off">
+                            {% for mid, m in materials.items() if mid != 'aluminum_tube' %}
+                            <option value="{{ mid }}" {% if mid == default_material|default('aluminum') %}selected{% endif %}>{{ m.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+
+                    <label class="field" id="thickness-field">
+                        <span id="thickness-label">Material thickness</span>
+                        <input type="text" id="f-thickness" inputmode="text" autocomplete="off" spellcheck="false"
+                               placeholder='0.25" or 6mm' value="0.25">
+                    </label>
+
+                    <label class="field" id="max-pass-field">
+                        <span>Max pass depth</span>
+                        <input type="text" id="f-max-pass" inputmode="text" autocomplete="off"
+                               spellcheck="false" placeholder="automatic">
+                    </label>
+                </div>
+
+                <div class="field" id="zzero-field">
+                    <span id="zzero-label">Zero Z on</span>
+                    <div class="seg" role="radiogroup" aria-labelledby="zzero-label">
+                        <label class="seg-item compact">
+                            <input type="radio" name="z_datum" value="board" autocomplete="off"
+                                   {% if z_datum|default('board') != 'stock_top' %}checked{% endif %}>
+                            <span class="seg-t">Sacrifice board</span>
+                        </label>
+                        <label class="seg-item compact">
+                            <input type="radio" name="z_datum" value="stock_top" autocomplete="off"
+                                   {% if z_datum|default('board') == 'stock_top' %}checked{% endif %}>
+                            <span class="seg-t">Top of stock</span>
+                        </label>
+                    </div>
+                </div>
+                <p class="hint" id="zzero-hint"></p>
+
+                <p class="hint" id="thickness-derived" style="display:none">
+                    Thickness is derived from the CAD part in 2.5D mode.
+                </p>
+                <p class="hint" id="max-pass-hint">
+                    Blank lets PenguinCAM pick the depth; set it to force shallower
+                    passes for a fragile cutter.
+                </p>
 
                 <label class="field inline" id="multitool-toggle">
                     <input type="checkbox" id="f-multitool" autocomplete="off">
-                    <span>Use several tools &mdash; plan an operation list per part</span>
+                    <span>Use several tools per part</span>
                 </label>
                 <p class="hint" id="multitool-note" style="display:none">
-                    The Tools &amp; Ops step replaces the single tool below. The program
+                    The Tools &amp; Ops panel replaces the single tool above. The program
                     pauses for a manual tool change, and you re-zero Z, at every switch.
-                </p>
-
-                <label class="field" id="tool-field">
-                    <span>Tool diameter (in or mm)</span>
-                    <input type="text" id="f-tool" inputmode="text" autocomplete="off" spellcheck="false"
-                           placeholder='e.g. 0.157" or 4mm' value="{{ default_tool_diameter_text }}">
-                </label>
-
-                <label class="field" id="material-field">
-                    <span>Material</span>
-                    <select id="f-material" autocomplete="off">
-                        {% for mid, m in materials.items() if mid != 'aluminum_tube' %}
-                        <option value="{{ mid }}" {% if mid == 'plywood' %}selected{% endif %}>{{ m.name }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-
-                <label class="field" id="thickness-field">
-                    <span id="thickness-label">Material thickness (in or mm)</span>
-                    <input type="text" id="f-thickness" inputmode="text" autocomplete="off" spellcheck="false"
-                           placeholder='e.g. 0.25" or 6mm' value="0.25">
-                </label>
-                <p class="hint" id="thickness-derived" style="display:none">
-                    Thickness is derived from the CAD part in 2.5D mode.
                 </p>
 
                 <!-- Deburr / chamfer pass (2D standard mode only). -->
                 <div id="chamfer-fields">
                     <label class="field inline">
                         <input type="checkbox" id="f-chamfer" autocomplete="off">
-                        <span>Deburring / chamfer pass (break the top edges with a V-bit)</span>
+                        <span>Deburr the top edges with a V-bit</span>
                     </label>
-                    <div id="chamfer-options" hidden>
-                        <label class="field">
-                            <span>V-bit diameter (in or mm)</span>
-                            <input type="text" id="f-chamfer-bit" inputmode="text" autocomplete="off"
-                                   spellcheck="false" placeholder='e.g. 1/2" or 6mm' value='1/2"'>
-                        </label>
-                        <label class="field">
-                            <span>V-bit included angle (degrees)</span>
-                            <input type="number" id="f-chamfer-angle" min="10" max="170" step="1"
-                                   autocomplete="off" value="90">
-                        </label>
-                        <label class="field">
-                            <span>Chamfer width (in or mm)</span>
-                            <input type="text" id="f-chamfer-width" inputmode="text" autocomplete="off"
-                                   spellcheck="false" placeholder='e.g. 0.02"' value='0.02"'>
-                        </label>
+                    <div id="chamfer-options" class="subpanel" hidden>
+                        <div class="fieldgrid">
+                            <label class="field">
+                                <span>V-bit diameter</span>
+                                <input type="text" id="f-chamfer-bit" inputmode="text" autocomplete="off"
+                                       spellcheck="false" placeholder='1/2" or 6mm' value='1/2"'>
+                            </label>
+                            <label class="field">
+                                <span>Included angle</span>
+                                <input type="number" id="f-chamfer-angle" min="10" max="170" step="1"
+                                       autocomplete="off" value="90">
+                            </label>
+                            <label class="field">
+                                <span>Chamfer width</span>
+                                <input type="text" id="f-chamfer-width" inputmode="text" autocomplete="off"
+                                       spellcheck="false" placeholder='0.02"' value='0.02"'>
+                            </label>
+                        </div>
                         <label class="radio"><input type="checkbox" id="f-chamfer-perimeter"
                                autocomplete="off" checked> Break the outside profile edge</label>
                         <label class="radio"><input type="checkbox" id="f-chamfer-holes"
@@ -142,49 +209,40 @@
                     </div>
                 </div>
 
-                <label class="field" id="max-pass-field">
-                    <span>Max depth per pass (in or mm, blank = automatic)</span>
-                    <input type="text" id="f-max-pass" inputmode="text" autocomplete="off"
-                           spellcheck="false" placeholder='e.g. 0.05"'>
-                </label>
-                <p class="hint" id="max-pass-hint">
-                    Profiles and pockets split into more, shallower passes. Lower this to
-                    baby fragile or multi-flute cutters; it only ever reduces the
-                    automatic depth.
-                </p>
-
                 <!-- Tubing-only settings (shown when mode = tubing). -->
-                <div id="tube-fields" hidden>
-                    <label class="field">
-                        <span>Tube height (in or mm)</span>
-                        <input type="text" id="f-tube-height" inputmode="text" autocomplete="off" spellcheck="false"
-                               placeholder='e.g. 1" or 25mm' value="1.0">
-                    </label>
-                    <label class="field">
-                        <span>Tube size</span>
-                        <select id="f-tube-size" autocomplete="off">
-                            <option value="2x1-flat">2x1 - machining the 2" face</option>
-                            <option value="2x1-standing">2x1 - machining the 1" face</option>
-                            <option value="1x1">1x1</option>
-                        </select>
-                    </label>
+                <div id="tube-fields" class="subpanel" hidden>
+                    <div class="fieldgrid">
+                        <label class="field">
+                            <span>Tube height</span>
+                            <input type="text" id="f-tube-height" inputmode="text" autocomplete="off" spellcheck="false"
+                                   placeholder='1" or 25mm' value="1.0">
+                        </label>
+                        <label class="field">
+                            <span>Tube size</span>
+                            <select id="f-tube-size" autocomplete="off">
+                                <option value="2x1-flat">2x1 &mdash; machining the 2" face</option>
+                                <option value="2x1-standing">2x1 &mdash; machining the 1" face</option>
+                                <option value="1x1">1x1</option>
+                            </select>
+                        </label>
+                    </div>
                     <label class="field">
                         <span>Pattern</span>
                         <select id="f-tube-pattern" autocomplete="off">
                             <option value="none">From my DXF</option>
-                            <option value="holes">Mounting holes - drilled, #10 clearance on 1/2" centres</option>
-                            <option value="lightening">Lightening - triangular truss pockets</option>
-                            <option value="custom">Custom - place holes and pockets yourself</option>
+                            <option value="holes">Mounting holes &mdash; drilled, #10 clearance on 1/2" centres</option>
+                            <option value="lightening">Lightening &mdash; triangular truss pockets</option>
+                            <option value="custom">Custom &mdash; place holes and pockets yourself</option>
                         </select>
                     </label>
                     <!-- Pre-designed pattern only: with no DXF there is nothing to measure
                          the tube against, so its length has to be stated. -->
                     <div id="tube-pattern-fields" hidden>
                         <label class="field">
-                            <span>Tube length (in or mm)</span>
+                            <span>Tube length</span>
                             <input type="text" id="f-tube-pattern-length" inputmode="text"
                                    autocomplete="off" spellcheck="false"
-                                   placeholder='e.g. 24" or 600mm'>
+                                   placeholder='24" or 600mm'>
                         </label>
                         <p class="hint" id="tube-pattern-note"></p>
                     </div>
@@ -201,22 +259,23 @@
 
             <!-- ===== PARTS ===== -->
             <section class="step" data-step="parts" hidden>
-                <h2>Parts</h2>
+                <div class="panel-head"><h2>Parts</h2></div>
                 <div id="upload-source">
                     <div id="dropzone" role="button" tabindex="0" aria-controls="f-dxf"
                          aria-label="Add a DXF file: drop one here, or activate to browse">
-                        <p>Drop a DXF here or click to browse</p>
+                        <p>Drop a DXF here</p>
+                        <span class="dz-sub">or click to browse &mdash; one file per part</span>
                         <input type="file" id="f-dxf" accept=".dxf" hidden>
                     </div>
                 </div>
                 <div id="onshape-source" hidden>
-                    <div id="select-status" class="select-status" aria-live="polite">Select a face in Onshape…</div>
-                    <p class="hint">Pick a planar face in the model — it imports automatically, then you can pick another.</p>
+                    <div id="select-status" class="select-status" aria-live="polite">Select a face in Onshape&hellip;</div>
+                    <p class="hint">Pick a planar face in the model &mdash; it imports automatically, then you can pick another.</p>
                 </div>
                 <p class="hint" id="parts-mode-note"></p>
 
-                <!-- The custom tube designer. It lives in the Parts quadrant because
-                     that quadrant is idle for a generated tube pattern - there is no
+                <!-- The custom tube designer. It lives in the Parts panel because
+                     that panel is idle for a generated tube pattern - there is no
                      part file to add. static/tube_designer.js owns everything inside
                      it; the Layout canvas is where features are actually placed. -->
                 <div id="tube-designer" hidden>
@@ -244,11 +303,13 @@
                 <ul id="parts-list" aria-live="polite"></ul>
             </section>
 
+            </div><!-- /.rail -->
+
             <!-- ===== TOOLS & OPERATIONS ===== -->
             <!-- Only in the flow when "Use several tools" is checked (2D mode); see
                  static/multitool.js, which owns everything inside this section. -->
             <section class="step" data-step="tools" hidden>
-                <h2>Tools &amp; Operations</h2>
+                <div class="panel-head"><h2>Tools &amp; Ops</h2></div>
                 <p class="hint">
                     List the tools you will load, then say what each one cuts. Operations run
                     in the order shown; the program groups them by tool across parts without
@@ -283,33 +344,47 @@
 
             <!-- ===== LAYOUT ===== -->
             <section class="step" data-step="layout" hidden>
-                <h2>Layout</h2>
-                <p class="hint" id="layout-hint">↔ Widen the panel for easier layout. Click to select (Shift-click for multiple), drag to move, drag the round handle to rotate (snaps to 45°). The dotted box is the stock; its lower-left is the G54 origin.</p>
-                <div id="layout-info">
-                    <span><strong id="info-machine-name"></strong></span>
-                    <span>Bed: <span id="info-machine-size"></span></span>
-                    <span>Tool: <span id="info-tool"></span> kerf</span>
+                <div class="panel-head">
+                    <h2>Layout</h2>
+                    <div id="layout-toolbar" class="panel-actions">
+                        <button type="button" class="btn small" id="btn-flip" disabled>Flip over</button>
+                        <button type="button" class="btn small icon" id="btn-zoom-out" title="Zoom out"
+                                aria-label="Zoom out">&minus;</button>
+                        <button type="button" class="btn small icon" id="btn-zoom-in" title="Zoom in"
+                                aria-label="Zoom in">+</button>
+                    </div>
                 </div>
-                <div id="layout-toolbar">
-                    <button type="button" class="btn small" id="btn-flip" disabled>Flip over</button>
-                    <span class="spacer"></span>
-                    <button type="button" class="btn small" id="btn-zoom-out" title="Zoom out"
-                            aria-label="Zoom out">&minus;</button>
-                    <button type="button" class="btn small" id="btn-zoom-in" title="Zoom in"
-                            aria-label="Zoom in">+</button>
+                <div id="layout-info" class="dro-strip">
+                    <div class="dro">
+                        <span class="dro-k">Machine</span>
+                        <span class="dro-v" id="info-machine-name"></span>
+                    </div>
+                    <div class="dro">
+                        <span class="dro-k">Bed</span>
+                        <span class="dro-v" id="info-machine-size"></span>
+                    </div>
+                    <div class="dro">
+                        <span class="dro-k">Tool kerf</span>
+                        <span class="dro-v" id="info-tool"></span>
+                    </div>
                 </div>
-                <canvas id="layout-canvas" width="600" height="400"></canvas>
+                <div class="canvas-wrap">
+                    <canvas id="layout-canvas" width="600" height="400"></canvas>
+                </div>
+                <p class="hint" id="layout-hint">Click to select (Shift-click for multiple), drag to move, drag the round handle to rotate (snaps to 45&deg;). The dotted box is the stock; its lower-left is the G54 origin.</p>
                 <div id="layout-errors" class="errors" aria-live="polite"></div>
             </section>
 
             <!-- ===== PREVIEW ===== -->
             <section class="step" data-step="preview" hidden>
-                <h2>Preview &amp; Save</h2>
-                <div id="gen-status" class="hint" role="status" aria-live="polite"></div>
+                <div class="panel-head">
+                    <h2>Preview &amp; Save</h2>
+                    <div id="gen-status" role="status" aria-live="polite"></div>
+                </div>
                 <div id="preview-result" hidden>
                     <div id="preview-stats"></div>
                     <div id="viewer-container">
-                        <div class="empty-state" id="viewer-empty">G-code preview will appear here</div>
+                        <div class="empty-state" id="viewer-empty">Toolpath appears here once the program is generated.</div>
                         <canvas id="gcode-canvas"></canvas>
                     </div>
                     <div class="scrubber-container" id="scrubber-container" style="display:none">
@@ -342,28 +417,43 @@
                         <label class="speed"><input type="checkbox" id="show-toolpath" autocomplete="off" checked>
                             Toolpath</label>
                     </div>
-                    <p class="hint">Origin (0,0,0) = lower-left, sacrifice board. Drag to orbit, scroll to zoom.</p>
+                    <p class="hint" id="viewer-origin-note">Origin (0,0,0) is the lower-left of the stock, on top of the sacrifice board. Drag to orbit, scroll to zoom.</p>
                 </div>
                 <div id="preview-errors" class="errors" aria-live="polite"></div>
+                <!-- Replaced by the result above as soon as there is a program. -->
+                <div class="panel-empty">
+                    <strong>No program yet</strong>
+                    <span>Add a part and lay it out, then come back here. PenguinCAM cuts the
+                          program and plays the toolpath before you save anything.</span>
+                </div>
             </section>
         </main>
 
         <footer id="wiz-nav">
-            <button type="button" id="btn-back" class="btn" disabled>Back</button>
-            <button type="button" id="btn-next" class="btn primary">Next</button>
-            <!-- Final action (Preview step). Split button: main action + a caret to switch
-                 between Download and Send to Google Drive (caret only when Drive is configured). -->
-            <div id="final-action" class="split-btn" hidden>
-                <button type="button" id="btn-do" class="btn primary" disabled>Download Program</button>
-                <button type="button" id="btn-do-caret" class="btn primary split-caret" aria-label="Choose action" hidden>&#9662;</button>
-                <ul id="do-menu" class="do-menu" role="menu" hidden>
-                    <li role="none" data-action="download">
-                        <button type="button" role="menuitem" class="do-menu-item">Download Program</button>
-                    </li>
-                    <li role="none" data-action="drive">
-                        <button type="button" role="menuitem" class="do-menu-item">Send to Google Drive</button>
-                    </li>
-                </ul>
+            <ol id="stepbar" aria-label="Steps">
+                <li data-step="setup" data-num="1" class="active" role="button" tabindex="0">Setup</li>
+                <li data-step="parts" data-num="2" role="button" tabindex="0">Parts</li>
+                <li data-step="tools" data-num="3" role="button" tabindex="0" hidden>Tools &amp; Ops</li>
+                <li data-step="layout" data-num="3" role="button" tabindex="0">Layout</li>
+                <li data-step="preview" data-num="4" role="button" tabindex="0">Preview</li>
+            </ol>
+            <div class="nav-actions">
+                <button type="button" id="btn-back" class="btn ghost" disabled>Back</button>
+                <button type="button" id="btn-next" class="btn primary">Next</button>
+                <!-- Final action (Preview step). Split button: main action + a caret to switch
+                     between Download and Send to Google Drive (caret only when Drive is configured). -->
+                <div id="final-action" class="split-btn" hidden>
+                    <button type="button" id="btn-do" class="btn primary" disabled>Download Program</button>
+                    <button type="button" id="btn-do-caret" class="btn primary split-caret" aria-label="Choose action" hidden>&#9662;</button>
+                    <ul id="do-menu" class="do-menu" role="menu" hidden>
+                        <li role="none" data-action="download">
+                            <button type="button" role="menuitem" class="do-menu-item">Download Program</button>
+                        </li>
+                        <li role="none" data-action="drive">
+                            <button type="button" role="menuitem" class="do-menu-item">Send to Google Drive</button>
+                        </li>
+                    </ul>
+                </div>
             </div>
         </footer>
     </div>
@@ -392,10 +482,12 @@
         machineName: {{ ((machines.get(current_machine_id) or {}).get('name') or 'Machine')|tojson }},
         machines: {{ (machines_info if machines_info is defined else {})|tojson }},
         defaultTool: {{ default_tool_diameter|tojson }},
-        defaultToolText: {{ (default_tool_diameter_text if default_tool_diameter_text is defined else '4mm')|tojson }},
+        defaultMaterial: {{ (default_material if default_material is defined else 'aluminum')|tojson }},
+        defaultToolText: {{ (default_tool_diameter_text if default_tool_diameter_text is defined else '1/4"')|tojson }},
         driveEnabled: {{ (drive_enabled if drive_enabled is defined else False)|tojson }},
         localMode: {{ (local_mode if local_mode is defined else False)|tojson }},
         toolLibrary: {{ (tool_library if tool_library is defined else {})|tojson }},
+        toolsWritable: {{ (tools_writable if tools_writable is defined else False)|tojson }},
         tubeDesigner: {{ (tube_designer_cfg if tube_designer_cfg is defined else {})|tojson }},
       };
     </script>

@@ -6,7 +6,9 @@
 (function () {
   'use strict';
 
-  var CFG = window.PenguinCAM || { source: 'upload', bed: { width: 24, height: 24 }, defaultTool: 0.157, defaultToolText: '4mm', machines: {} };
+  var CFG = window.PenguinCAM || { source: 'upload', bed: { width: 24, height: 24 },
+                                   defaultTool: 0.25, defaultToolText: '1/4"',
+                                   defaultMaterial: 'aluminum', machines: {} };
   var DEBUG = /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
 
   var ALL_STEPS = ['setup', 'parts', 'tools', 'layout', 'preview'];
@@ -32,9 +34,9 @@
     step: 'setup',
     mode: '2d',
     machine_id: null,
-    material: 'plywood',
-    tool_diameter: parseFloat(CFG.defaultTool) || 0.157,
-    tool_diameter_text: CFG.defaultToolText || '4mm',  // user's raw input, shown verbatim (e.g. "4mm")
+    material: CFG.defaultMaterial || 'aluminum',
+    tool_diameter: parseFloat(CFG.defaultTool) || 0.25,
+    tool_diameter_text: CFG.defaultToolText || '1/4"',  // user's raw input, shown verbatim (e.g. "4mm")
     thickness: 0.25,
     thickness_text: '0.25"',
     tab_spacing: 6.0,
@@ -44,6 +46,11 @@
     chamfer: { on: false, bit: 0.5, bit_text: '1/2"', angle: 90,
                width: 0.02, width_text: '0.02"',
                perimeter: true, holes: true, pockets: false },
+    // Which surface the operator zeros Z on: 'board' (the sacrifice board, the
+    // default this app has always used) or 'stock_top'. It changes only the numbers in
+    // the program, never the motion - but zeroing on the wrong one puts every cut a
+    // material thickness out, so it is stated on the setup panel and in the summary.
+    zDatum: 'board',
     // Optional ceiling on the depth of one contour pass (inches; null = automatic).
     // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
     max_pass_depth: null,
@@ -74,6 +81,37 @@
     saveAction: 'download',   // 'download' | 'drive' (final-step action)
     lastResponse: null,
   };
+  // Canvas text uses the same two faces as the chrome around it (the canvas has
+  // no stylesheet of its own, so the stacks are repeated here).
+  var CANVAS_FONT = "'Barlow', system-ui, -apple-system, sans-serif";
+  var CANVAS_MONO = "ui-monospace, 'Roboto Mono', Menlo, Consolas, monospace";
+  // The bits on the shelf: the team's saved cutters merged over the built-ins, as the
+  // server assembled them. Kept on CFG so the Tools panel and the Setup picker are
+  // always looking at the same list - saving a bit in one refreshes the other.
+  function toolLibrary() { return CFG.toolLibrary || {}; }
+  function setToolLibrary(library) {
+    CFG.toolLibrary = library || {};
+    renderBitPicker();
+    if (window.PCMultiTool && window.PCMultiTool.render) window.PCMultiTool.render();
+  }
+  /* Bits in the order a person looks for one: smallest first, ties by name. The
+     library arrives as a JSON object, and JSON objects come back key-sorted, which put
+     the 3mm cutter after the 3/8 in one. */
+  function sortedBitIds(lib, ids) {
+    return ids.slice().sort(function (a, b) {
+      var da = lib[a].diameter || 0, db = lib[b].diameter || 0;
+      if (Math.abs(da - db) > 1e-6) return da - db;
+      return String(lib[a].name).localeCompare(String(lib[b].name));
+    });
+  }
+
+  // Must agree with slugify_tool_id in team_config.py: the id is how the browser asks
+  // "is this row already saved?" without carrying the whole list around.
+  function bitId(name) {
+    return String(name || '').trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'bit';
+  }
+
   var partSeq = 0;
   var debugEvents = [];
   var viewer = null;
@@ -384,6 +422,10 @@
     if (state.max_pass_depth && state.mode !== 'tubing') {
       chips.push('≤ ' + state.max_pass_depth_text + ' per pass');
     }
+    // Always shown, both ways round: this is the number the operator has to match on
+    // the machine, so it should never be something you have to remember choosing.
+    chips.push(state.mode === 'tubing' ? 'Z0 = tube origin'
+               : (state.zDatum === 'stock_top' ? 'Z0 = stock top' : 'Z0 = spoilboard'));
     if (state.mode === 'tubing') {
       if (!tubePatternOn()) chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
     } else {
@@ -573,6 +615,23 @@
       });
     });
 
+    var bitSel = $('#f-tool-bit');
+    if (bitSel) {
+      bitSel.addEventListener('change', function () {
+        if (this.value) applyBit(this.value);
+        this.value = '';           // a picker, not a setting: the field is the truth
+      });
+    }
+
+    $all('input[name="z_datum"]').forEach(function (r) {
+      r.addEventListener('change', function () {
+        state.zDatum = this.value;
+        updateZDatumUI();
+        invalidatePreview();
+        dbg('z_datum', state.zDatum);
+      });
+    });
+
     bindLengthField($('#f-tool'),
       function () { return state.tool_diameter_text; },
       function (inches, text) {
@@ -585,6 +644,7 @@
         state.thickness = inches; state.thickness_text = text;
         // Once it is theirs, no mode switch may overwrite it in either direction.
         if (thicknessBound) state.thicknessTouched = true;
+        updateZDatumUI();   // the stock-top hint quotes the depth it will cut to
         invalidatePreview();
       });
     thicknessBound = true;   // bindLengthField commits the rendered default first
@@ -750,7 +810,9 @@
       sel.appendChild(opt);
       ids.push(m.id);
     });
-    var pick = ids.indexOf(prev) >= 0 ? prev : (ids.indexOf('plywood') >= 0 ? 'plywood' : ids[0]);
+    var fallback = CFG.defaultMaterial || 'aluminum';
+    var pick = ids.indexOf(prev) >= 0 ? prev
+               : (ids.indexOf(fallback) >= 0 ? fallback : ids[0]);
     sel.value = pick;
     if (state.mode !== 'tubing') state.material = pick;
   }
@@ -915,9 +977,10 @@
   function applyModeUI() {
     var is25 = state.mode === '2.5d';
     var isTube = state.mode === 'tubing';
+    updateZDatumUI();   // tubing has a jig zero of its own; the choice is hidden there
     $('#thickness-field').style.display = is25 ? 'none' : '';
     $('#thickness-derived').style.display = is25 ? '' : 'none';
-    var tl = $('#thickness-label'); if (tl) tl.textContent = isTube ? 'Tube wall thickness (in or mm)' : 'Material thickness (in or mm)';
+    var tl = $('#thickness-label'); if (tl) tl.textContent = isTube ? 'Tube wall thickness' : 'Material thickness';
     var mf = $('#material-field'); if (mf) mf.style.display = isTube ? 'none' : '';
     if (isTube) {
       state.material = 'aluminum_tube';
@@ -974,6 +1037,9 @@
   function applyMultiToolUI() {
     var on = multiToolOn();
     var toolField = $('#tool-field'); if (toolField) toolField.style.display = on ? 'none' : '';
+    // The picker fills the single-tool field, so it goes wherever that field goes: in a
+    // multi-tool job the bits are chosen per row in the Tools panel instead.
+    var bitField = $('#tool-bit-field'); if (bitField) bitField.style.display = on ? 'none' : '';
     var note = $('#multitool-note'); if (note) note.style.display = on ? '' : 'none';
     // The deburr checkbox stays in both flavors of 2D; entering multi-tool mode with
     // it already checked materializes the V-bit + chamfer ops in the editor.
@@ -1021,16 +1087,84 @@
     }
   }
 
+  /* The saved-bits picker beside the tool diameter. Choosing a bit fills the field -
+     the single-tool flow only cuts with a diameter, and the rest of a bit's spec (flutes,
+     type, V angle) is what the Tools panel uses. Team bits are listed first: those are
+     the cutters actually in the drawer. */
+  function renderBitPicker() {
+    var sel = $('#f-tool-bit'), field = $('#tool-bit-field');
+    if (!sel || !field) return;
+    var lib = toolLibrary();
+    var ids = Object.keys(lib);
+    // `hidden` here, style.display in applyMultiToolUI - they must not fight, so this
+    // one only ever hides an EMPTY list and leaves a populated one to the mode logic.
+    field.hidden = !ids.length;
+    if (!ids.length) return;
+    var team = ids.filter(function (id) { return lib[id].source === 'team'; });
+    var builtin = ids.filter(function (id) { return lib[id].source !== 'team'; });
+    sel.innerHTML = '';
+    sel.appendChild(new Option('Pick a bit\u2026', ''));
+    [[team, 'Saved by your team'], [builtin, 'Built in']].forEach(function (pair) {
+      if (!pair[0].length) return;
+      var group = document.createElement('optgroup');
+      group.label = pair[1];
+      sortedBitIds(lib, pair[0]).forEach(function (id) {
+        var bit = lib[id];
+        var size = bit.diameter_text || (Math.round(bit.diameter * 10000) / 10000) + '"';
+        group.appendChild(new Option(bit.name + '  \u00b7  ' + size, id));
+      });
+      sel.appendChild(group);
+    });
+    sel.value = '';
+  }
+
+  function applyBit(id) {
+    var bit = toolLibrary()[id];
+    var field = $('#f-tool');
+    if (!bit || !field) return;
+    field.value = bit.diameter_text || String(bit.diameter);
+    // Commit through the field's own handler so the value is parsed, validated and
+    // shown exactly as a typed one would be.
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /* Says what the operator will have to do at the machine, in the order they do it.
+     Tubing has a jig zero of its own, so the choice does not apply there and the panel
+     says so rather than showing a control that would be ignored. */
+  function updateZDatumUI() {
+    var field = $('#zzero-field'), hint = $('#zzero-hint');
+    if (!field || !hint) return;
+    var isTube = state.mode === 'tubing';
+    var top = state.zDatum === 'stock_top';
+    field.hidden = isTube;
+    hint.textContent = isTube
+      ? 'Tube jobs are zeroed to the tube in its jig, so this does not apply.'
+      : (top
+         ? 'Touch off the top face of the material. Cutting Z is negative throughout, '
+           + 'down to about Z-' + (state.thickness + 0.02).toFixed(3) + '" to cut through.'
+         : 'Touch off the spoilboard, through the stock. The same zero works whatever '
+           + 'the material measures.');
+    // The 3D preview names the origin too, and it is the same origin.
+    var originNote = $('#viewer-origin-note');
+    if (originNote) {
+      originNote.textContent = (isTube
+        ? 'Origin (0,0,0) is the tube origin in the jig, at the bottom-left of the face'
+        : 'Origin (0,0,0) is the lower-left of the stock, '
+          + (top ? 'at its top face' : 'on top of the sacrifice board'))
+        + '. Drag to orbit, scroll to zoom.';
+    }
+  }
+
   /* --------------------------------------------------------------- parts */
   function thumbnailSVG(part) {
-    var W = 44, H = 44, pad = 4;
+    var W = 50, H = 50, pad = 5;
     var scale = Math.min((W - 2 * pad) / (part.width || 1), (H - 2 * pad) / (part.height || 1));
     function map(x, y) { return [pad + x * scale, H - pad - y * scale]; }
     function ringPath(ring) { return ring.map(function (pt, i) { var m = map(pt[0], pt[1]); return (i ? 'L' : 'M') + m[0].toFixed(1) + ' ' + m[1].toFixed(1); }).join(' ') + ' Z'; }
     var d = ringPath(part.outline);
-    var holes = (part.holes || []).map(function (h) { var m = map(h.cx, h.cy); return '<circle cx="' + m[0].toFixed(1) + '" cy="' + m[1].toFixed(1) + '" r="' + Math.max(1, h.r * scale).toFixed(1) + '" fill="none" stroke="#9aa7b4"/>'; }).join('');
-    var inner = (part.inner || []).map(function (ring) { return '<path d="' + ringPath(ring) + '" fill="none" stroke="#9aa7b4" stroke-width="1"/>'; }).join('');
-    return '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '"><path d="' + d + '" fill="none" stroke="#2f81f7" stroke-width="1.5"/>' + inner + holes + '</svg>';
+    var holes = (part.holes || []).map(function (h) { var m = map(h.cx, h.cy); return '<circle cx="' + m[0].toFixed(1) + '" cy="' + m[1].toFixed(1) + '" r="' + Math.max(1, h.r * scale).toFixed(1) + '" fill="none" stroke="' + cssVar('--muted') + '"/>'; }).join('');
+    var inner = (part.inner || []).map(function (ring) { return '<path d="' + ringPath(ring) + '" fill="none" stroke="' + cssVar('--muted') + '" stroke-width="1"/>'; }).join('');
+    return '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '"><path d="' + d + '" fill="none" stroke="' + cssVar('--ink-2') + '" stroke-width="1.5"/>' + inner + holes + '</svg>';
   }
 
   function renderParts() {
@@ -1245,12 +1379,31 @@
     });
   }
 
+  // Give the canvas the backing store its box actually has. It used to be a fixed
+  // 600x400 bitmap that CSS stretched, so the drawing was soft and locked to 3:2
+  // however much room the panel had. Everything downstream works in canvas.width/
+  // height units already (worldToCanvas, the hit tests, the drag maths).
+  function sizeLayoutCanvas() {
+    var canvas = $('#layout-canvas');
+    if (!canvas) return false;
+    var rect = canvas.getBoundingClientRect();
+    // A hidden panel measures 0x0; keep the last good size rather than
+    // collapsing the drawing to nothing.
+    if (rect.width < 2 || rect.height < 2) return false;
+    var w = Math.round(rect.width), h = Math.round(rect.height);
+    if (canvas.width === w && canvas.height === h) return false;
+    canvas.width = w;
+    canvas.height = h;
+    return true;
+  }
+
   // Fit the parts' combined bounding box to ~80% of the canvas (times zoom), centered.
   // Called only on explicit events (entering Layout, zoom) — NOT every frame, so the
   // view stays put while dragging/rotating and part motion is actually visible.
   function refitView() {
     var canvas = $('#layout-canvas');
     if (!canvas) return;
+    sizeLayoutCanvas();
     var bb = combinedBBox();
     if (tubePatternOn() && tubePatternGeom) {
       // No parts to bound, so fit the tube instead - otherwise the view falls back to a
@@ -1371,7 +1524,7 @@
     ctx.fillStyle = col.ok;
     ctx.beginPath(); ctx.arc(o[0], o[1], 4, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = col.muted;
-    ctx.font = '11px system-ui, sans-serif';
+    ctx.font = '11px ' + CANVAS_FONT;
     ctx.fillText('G54 origin', o[0] + 7, o[1] - 6);
     ctx.restore();
   }
@@ -1431,8 +1584,10 @@
         if (i) ctx.lineTo(pc[0], pc[1]); else ctx.moveTo(pc[0], pc[1]);
       });
       ctx.closePath();
-      ctx.fillStyle = invalid ? 'rgba(248,81,73,0.18)' : (selected ? 'rgba(47,129,247,0.22)' : 'rgba(154,167,180,0.12)');
+      ctx.fillStyle = invalid ? col.danger : (selected ? col.accent : col.muted);
+      ctx.globalAlpha = invalid ? 0.18 : (selected ? 0.2 : 0.12);
       ctx.fill();
+      ctx.globalAlpha = 1;
       ctx.strokeStyle = invalid ? col.danger : (selected ? col.accent : col.muted);
       ctx.lineWidth = selected ? 2 : 1;
       ctx.stroke();
@@ -1449,7 +1604,7 @@
         ctx.closePath(); ctx.strokeStyle = col.muted; ctx.lineWidth = 1; ctx.stroke();
       });
       var lc = worldToCanvas(pl.x, pl.y + pl.h);
-      ctx.fillStyle = col.ink; ctx.font = '11px sans-serif';
+      ctx.fillStyle = col.ink; ctx.font = '11px ' + CANVAS_FONT;
       ctx.fillText(p.name + (p.flipped ? ' (flipped)' : ''), lc[0] + 3, lc[1] + 12);
     });
 
@@ -1487,17 +1642,26 @@
         ctx.lineTo(ex - head * Math.cos(ang - 0.4), ey - head * Math.sin(ang - 0.4));
         ctx.lineTo(ex - head * Math.cos(ang + 0.4), ey - head * Math.sin(ang + 0.4));
         ctx.closePath(); ctx.fill();
-        ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = 'bold 12px ' + CANVAS_FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(label, o[0] + dx * (L + 11), o[1] + dy * (L + 11));
       });
       ctx.restore();
     }
 
-    // Combined size readout, upper-right.
+    // Combined size readout, upper-right - or, with nothing to nest yet, what to
+    // do about it, centred on the sheet it would be nested on.
     ctx.save();
-    ctx.textAlign = 'right'; ctx.font = '12px sans-serif';
-    ctx.fillStyle = v.tooBig ? col.danger : col.muted;
-    ctx.fillText(bb ? (bb.w.toFixed(2) + '" x ' + bb.h.toFixed(2) + '"') : 'no parts', canvas.width - 8, 16);
+    if (bb) {
+      ctx.textAlign = 'right'; ctx.font = '12px ' + CANVAS_MONO;
+      ctx.fillStyle = v.tooBig ? col.danger : col.muted;
+      ctx.fillText(bb.w.toFixed(2) + '" x ' + bb.h.toFixed(2) + '"', canvas.width - 8, 18);
+    } else {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '13px ' + CANVAS_FONT;
+      ctx.fillStyle = col.muted;
+      ctx.fillText('Add a part in the Parts panel and it appears here.',
+                   canvas.width / 2, canvas.height / 2);
+    }
     ctx.restore();
   }
 
@@ -1659,6 +1823,13 @@
     });
     $('#btn-zoom-in').addEventListener('click', function () { state.zoom = Math.min(5, state.zoom * 1.25); refitView(); drawLayout(); });
     $('#btn-zoom-out').addEventListener('click', function () { state.zoom = Math.max(0.2, state.zoom / 1.25); refitView(); drawLayout(); });
+
+    // Re-fit whenever the panel changes size - the window resizing, the Tools
+    // column appearing, or the first layout pass after load, which is what
+    // sizes the canvas in the first place (the observer fires on observe()).
+    function refit() { if (sizeLayoutCanvas()) { refitView(); drawLayout(); } }
+    if (window.ResizeObserver) new ResizeObserver(refit).observe(canvas);
+    else window.addEventListener('resize', refit);
   }
 
   function updateLayoutInfo() {
@@ -1671,7 +1842,7 @@
     if (el) {
       // Show the kerf actually being enforced, not the (hidden) single-tool field.
       el.textContent = multiToolOn()
-        ? '⌀ ' + jobKerf().toFixed(4) + '" widest tool'
+        ? jobKerf().toFixed(4) + '" widest'
         : state.tool_diameter_text;
     }
   }
@@ -1691,7 +1862,7 @@
         'Orient each face so the tube runs vertically (the Y axis) — that is the axis of the ' +
         'tube jig on the machine. Both faces rotate together.';
     } else {
-      el.textContent = '↔ Widen the panel for easier layout. Click to select (Shift-click for multiple), ' +
+      el.textContent = 'Click to select (Shift-click for multiple), ' +
         'drag to move, drag the round handle to rotate (snaps to 45°). The dotted box is the stock; ' +
         'its lower-left is the G54 origin.';
     }
@@ -1811,6 +1982,7 @@
       };
     }
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
+    job.z_datum = state.zDatum;
     state.parts.forEach(function (p, i) {
       var pl = placement(p);
       job.parts.push({
@@ -1876,6 +2048,7 @@
     fd.append('mirror', '0');  // 2.5D never mirrors (flip disabled in this mode)
     fd.append('tab_spacing', state.tab_spacing);
     if (state.max_pass_depth) fd.append('max_pass_depth', state.max_pass_depth);
+    fd.append('z_datum', state.zDatum);
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'process');
@@ -1893,7 +2066,7 @@
   function showResult(resp) {
     $('#gen-status').textContent = '';
     $('#preview-result').hidden = false;
-    var t = resp.cycle_time ? ('Estimated cycle time: ' + resp.cycle_time) : '';
+    var t = resp.cycle_time ? ('~' + resp.cycle_time + ' cycle') : '';
     var n;
     if (tubePatternOn()) {
       // Counting faces would report "0 faces" here: a generated pattern has no uploaded
@@ -1922,7 +2095,10 @@
       }
     }
     else if (state.mode === 'tubing') { n = state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'); }
-    else { n = resp.parts ? (resp.parts.length + ' part(s)') : '1 part'; }
+    else {
+      var np = resp.parts ? resp.parts.length : 1;
+      n = np + ' part' + (np === 1 ? '' : 's');
+    }
     var bits = [n, t];
     if (resp.tools && resp.tools.length) {
       bits.splice(1, 0, resp.tools.length + ' tool' + (resp.tools.length === 1 ? '' : 's')
@@ -1979,6 +2155,8 @@
     }
     viewer.load(resp.gcode, {
       stockWidth: W, stockDepth: D,
+      // Tube jobs keep their own jig frame whatever the sheet setting says.
+      stockTopZ: (state.mode !== 'tubing' && state.zDatum === 'stock_top') ? 0 : stockH,
       stockHeight: stockH, toolDiameter: multiToolOn() ? jobKerf() : state.tool_diameter,
       // Present only for a generated tube pattern, where the server knows the real
       // shape. The viewer then draws the tube itself with the pattern cut through it,
@@ -2171,6 +2349,9 @@
     var matSel = $('#f-material');
     if (matSel && matSel.value && state.mode !== 'tubing') state.material = matSel.value;
 
+    var zRadio = document.querySelector('input[name="z_datum"]:checked');
+    if (zRadio && zRadio.value) state.zDatum = zRadio.value;
+
     var sq = $('#f-square-end'); if (sq) state.squareEnd = sq.checked;
     var ctl = $('#f-cut-to-length'); if (ctl) state.cutToLength = ctl.checked;
 
@@ -2185,6 +2366,8 @@
   function syncUIFromState() {
     adoptControlsIntoState();   // the controls are the truth at startup, not the defaults
     applyModeUI();          // mode-dependent fields, labels, and the tube/multi-tool panels
+    updateZDatumUI();
+    renderBitPicker();
     updatePartsModeNote();
     updateSummary();
     updateLayoutInfo();     // machine name, bed size and kerf in the Layout panel
@@ -2205,8 +2388,12 @@
       window.PCMultiTool.init({
         state: state,
         parseLength: parseLength,
-        cfg: { toolLibrary: CFG.toolLibrary || {}, defaultTool: CFG.defaultTool,
-               defaultToolText: CFG.defaultToolText },
+        cfg: { toolLibrary: toolLibrary, sortBits: sortedBitIds,
+               defaultTool: CFG.defaultTool,
+               defaultToolText: CFG.defaultToolText,
+               toolsWritable: !!CFG.toolsWritable },
+        setToolLibrary: setToolLibrary,
+        bitId: bitId,
         onChange: updateSummary,
       });
     }

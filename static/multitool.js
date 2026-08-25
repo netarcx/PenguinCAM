@@ -32,6 +32,50 @@
   }
   function num(v) { var n = parseFloat(v); return isFinite(n) ? n : null; }
 
+  /* The bits on the shelf. The host passes a getter so that saving a bit here refreshes
+     the Setup panel's picker too, without either side keeping its own copy. */
+  function library() {
+    var lib = ctx.cfg && ctx.cfg.toolLibrary;
+    if (typeof lib === 'function') lib = lib();
+    return lib || {};
+  }
+  function bitId(name) {
+    if (ctx.bitId) return ctx.bitId(name);
+    return String(name || '').trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'bit';
+  }
+  function isSaved(tool) {
+    var entry = library()[bitId(tool.name)];
+    return !!(entry && entry.source === 'team');
+  }
+
+  /* Save this row to the team config, or take it off the shelf again. The whole point is
+     that a cutter you own gets written down once: the server keys it by name, so saving
+     a bit whose name is already there corrects that entry rather than adding a twin. */
+  function toggleSaved(tool) {
+    var errors = $('#mt-errors');
+    var saved = isSaved(tool);
+    var body = saved ? { id: bitId(tool.name) }
+                     : { tool: { name: tool.name, diameter_text: tool.diameter_text || String(tool.diameter),
+                                 flutes: tool.flutes, type: tool.type,
+                                 included_angle: tool.type === 'vbit' ? tool.included_angle : null } };
+    fetch(saved ? '/tools/delete' : '/tools/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        // Only ever WRITE an error here: this element is the operation plan's own
+        // validation output, and clearing it on a successful save would wipe a
+        // "this part has no operations" warning the operator still needs.
+        if (!res.ok && errors) errors.textContent = res.j.error || 'Could not save that bit.';
+        if (res.j && res.j.library && ctx.setToolLibrary) ctx.setToolLibrary(res.j.library);
+        else api.render();
+      })
+      .catch(function (e) {
+        if (errors) errors.textContent = 'Could not reach the server to save that bit: ' + e;
+      });
+  }
+
   var OP_TYPES = [
     { id: 'holes', label: 'Holes' },
     { id: 'pockets', label: 'Pockets' },
@@ -55,7 +99,7 @@
   /* ------------------------------------------------------------------ state */
 
   function defaultTools() {
-    var lib = (ctx.cfg && ctx.cfg.toolLibrary) || {};
+    var lib = library();
     // Seed with the team's configured default cutter, so a job that turns multi-tool on
     // but only ever needs one tool works without opening the tool table at all.
     var dia = parseFloat(ctx.cfg && ctx.cfg.defaultTool) || 0.157;
@@ -171,6 +215,26 @@
 
   /* ----------------------------------------------------------------- render */
 
+  /* One button, two states: this cutter is written down in the team config, or it is
+     not. Disabled where the config cannot be written (the hosted app reads it from
+     Onshape), with the reason in the tooltip rather than a silent no-op. */
+  function saveBitButton(tool) {
+    var writable = !(ctx.cfg && ctx.cfg.toolsWritable === false);
+    var saved = isSaved(tool);
+    return el('button', {
+      type: 'button',
+      class: 'mt-save-bit' + (saved ? ' saved' : ''),
+      text: saved ? '\u2605' : '\u2606',
+      disabled: !writable || !String(tool.name || '').trim(),
+      title: !writable
+        ? 'Saved bits live in the team config file, which this copy cannot write'
+        : (saved ? 'Remove "' + tool.name + '" from the team\u2019s saved bits'
+                 : 'Save "' + tool.name + '" to the team\u2019s saved bits'),
+      'aria-label': (saved ? 'Remove ' : 'Save ') + (tool.name || 'this bit'),
+      onclick: function () { toggleSaved(tool); },
+    });
+  }
+
   function toolRow(tool, index) {
     var isV = tool.type === 'vbit';
     function change(field, cast) {
@@ -204,11 +268,13 @@
         value: tool.included_angle, 'aria-label': 'Included angle',
         oninput: change('included_angle', function (v) { return parseFloat(v) || 90; })
       }) : el('span', { class: 'mt-dim', text: '—' })]),
-      el('td', {}, [el('button', {
-        type: 'button', class: 'mt-remove', title: 'Remove this tool',
-        'aria-label': 'Remove tool T' + tool.slot, text: '×',
-        onclick: function () { removeTool(index); }
-      })]),
+      el('td', { class: 'mt-row-actions' }, [
+        saveBitButton(tool),
+        el('button', {
+          type: 'button', class: 'mt-remove', title: 'Remove this tool',
+          'aria-label': 'Remove tool T' + tool.slot, text: '×',
+          onclick: function () { removeTool(index); }
+        })]),
     ]);
   }
 
@@ -305,13 +371,13 @@
   }
 
   function addToolFromPreset(key) {
-    var lib = (ctx.cfg && ctx.cfg.toolLibrary) || {};
-    var preset = lib[key] || {};
+    var preset = library()[key] || {};
     tools().push({
       slot: nextSlot(),
       name: preset.name || 'End mill',
       diameter: preset.diameter || 0.25,
-      diameter_text: preset.diameter ? String(preset.diameter) : '0.25',
+      // The team's own text ("6mm", '1/4"'), not a re-rendered decimal.
+      diameter_text: preset.diameter_text || (preset.diameter ? String(preset.diameter) : '0.25'),
       flutes: preset.flutes || 1,
       type: preset.type || 'endmill',
       included_angle: preset.included_angle || 90,
@@ -701,11 +767,28 @@
     tools().forEach(function (t, i) { host.appendChild(toolRow(t, i)); });
 
     var preset = $('#mt-tool-preset');
-    if (preset && !preset.options.length) {
-      var lib = (ctx.cfg && ctx.cfg.toolLibrary) || {};
-      Object.keys(lib).forEach(function (key) {
-        preset.appendChild(el('option', { value: key, text: lib[key].name }));
+    if (preset) {
+      // Rebuilt every render, not just when empty: saving a bit has to show up here
+      // immediately, or the list is out of date the moment it becomes useful.
+      var lib = library(), chosen = preset.value;
+      preset.innerHTML = '';
+      var groups = [['team', 'Saved by your team'], ['builtin', 'Built in']];
+      groups.forEach(function (pair) {
+        var keys = Object.keys(lib).filter(function (k) {
+          return (lib[k].source === 'team') === (pair[0] === 'team');
+        });
+        if (!keys.length) return;
+        var group = el('optgroup', { label: pair[1] });
+        if (ctx.cfg && ctx.cfg.sortBits) keys = ctx.cfg.sortBits(lib, keys);
+        keys.forEach(function (key) {
+          var size = lib[key].diameter_text
+                     || (Math.round((lib[key].diameter || 0) * 10000) / 10000) + '"';
+          group.appendChild(el('option', { value: key,
+                                           text: lib[key].name + '  \u00b7  ' + size }));
+        });
+        preset.appendChild(group);
       });
+      if (chosen && lib[chosen]) preset.value = chosen;
     }
 
     var order = $('#mt-runorder');
@@ -939,6 +1022,8 @@
       parts: [],
     };
     if (ctx.state.max_pass_depth) job.max_pass_depth = ctx.state.max_pass_depth;
+    // Job-wide, not per operation: every tool change re-zeros Z to the same surface.
+    job.z_datum = ctx.state.zDatum || 'board';
     ctx.state.parts.forEach(function (part, i) {
       var place = placements[i] || { x: 0, y: 0 };
       job.parts.push({

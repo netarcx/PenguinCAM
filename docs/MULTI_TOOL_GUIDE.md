@@ -18,6 +18,44 @@ a manual tool-change pause at every switch.
 
 ---
 
+## Saved bits
+
+The star beside each row in the Tools table writes that cutter into the team config file,
+under a top-level `tools:` block:
+
+```yaml
+tools:
+  - name: "1/4 in 2-flute endmill"
+    diameter: "1/4\""
+    flutes: 2
+    type: endmill
+  - name: "1/2 in 90 deg V-bit"
+    diameter: "1/2\""
+    flutes: 2
+    type: vbit
+    included_angle: 90
+```
+
+Saved bits then appear ahead of the built-ins everywhere the app offers a cutter: the
+Add-tool menu here, and the *Saved bits* picker beside the tool diameter in Setup. A bit
+is identified by its name, so saving one whose name is already on the list corrects that
+entry instead of adding a second one; the star turns amber once a bit is written down,
+and clicking it again removes it.
+
+`diameter` accepts anything the UI accepts (`0.25`, `1/4"`, `6mm`) and is shown back the
+way you wrote it. `type` is `endmill`, `vbit` or `drill`; `included_angle` only means
+anything on a V-bit.
+
+Two limits worth knowing:
+
+* **Saving needs a config file the app can write**, which means local mode. On the hosted
+  app the config is read from Onshape, so the star is disabled there and the block above
+  is what you paste in by hand.
+* **Everything except the `tools:` block is preserved character for character** when the
+  app writes the file, and the result is re-parsed and compared against the original
+  before it replaces anything - if a save would have changed any other setting, it is
+  refused instead. A team config is a hand-written document and the app treats it as one.
+
 ## The model
 
 Three objects, all in `tooling.py`:

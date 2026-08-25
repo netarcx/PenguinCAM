@@ -61,6 +61,10 @@ general G-code sender rather than importing it into Easel.
 ## 3. Machine Z-Axis Orientation
 
 * Machine Z **increases upward** (standard).
+* Z=0 is the sacrifice board by default, or the top of the stock when the job asks for it
+  (`machining.z_reference.datum`, the wizard's *Zero Z on*, or `--z-zero`). The two differ
+  by exactly the stock thickness and by nothing else; the header names which one is in
+  force. Tube jobs always use their jig zero.
 * The safe retract height is a **work-coordinate** value above Z=0 (the sacrifice board):
   `z_reference.safe_height` if set, else `material_thickness + clearance`. No assumption is
   made about where machine Z=0 sits — that was the old `G53`-based behavior and is gone by

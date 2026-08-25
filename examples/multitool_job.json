@@ -11,6 +11,10 @@
   "material": "plywood",
   "thickness": 0.25,
 
+  "_z_datum": "Optional. Which surface the operator zeros Z on: sacrifice_board (the",
+  "_z_datum_2": "default) or stock_top. Every tool change in the program re-zeros to it.",
+  "z_datum": "sacrifice_board",
+
   "tools": [
     { "slot": 1, "name": "1/8 in 1-flute endmill", "diameter": 0.125, "flutes": 1 },
     { "slot": 2, "name": "1/4 in 1-flute endmill", "diameter": 0.250, "flutes": 1 },

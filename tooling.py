@@ -28,7 +28,8 @@ Layout of the pipeline::
 Tool changes are manual: the program parks, stops the spindle, prints what to load, and
 waits on M0 for CYCLE START. There is no T/M6 or G43 in the output, because the routers
 this targets have no tool changer and no tool-length offset table - the operator re-zeros
-Z to the sacrifice board after each swap, which is also why X/Y zero must not be touched.
+Z to the job's zero surface (the sacrifice board by default, the stock top if the job asks
+for it) after each swap, which is also why X/Y zero must not be touched.
 
 Feeds and speeds are re-derived per tool from `feeds_speeds` rather than taken from the
 material preset, since the presets are all tuned for one 4 mm single-flute cutter and stop
@@ -49,6 +50,7 @@ from frc_cam_postprocessor import (
     FRCPostProcessor,
     PostProcessorResult,
     build_output_filename,
+    normalize_z_datum,
     sanitize_comment,
 )
 from team_config import TeamConfig
@@ -144,6 +146,28 @@ TOOL_LIBRARY = {
     'vbit_60': {'name': '1/2 in 60 deg V-bit',    'diameter': 0.500, 'flutes': 2, 'type': 'vbit',
                 'included_angle': 60.0},
 }
+
+
+def merge_tool_library(saved_tools=None):
+    """The bits offered in the UI: the shop's saved cutters first, then the built-ins.
+
+    A saved bit whose id collides with a built-in replaces it - if a team has written
+    down what their 1/4 in 2-flute actually is, that is the authority, not the generic
+    entry shipped with the app.
+    """
+    library = {}
+    for tool in (saved_tools or []):
+        entry = {k: tool[k] for k in ('name', 'diameter', 'flutes', 'type')
+                 if k in tool}
+        if tool.get('included_angle') is not None:
+            entry['included_angle'] = tool['included_angle']
+        entry['diameter_text'] = tool.get('diameter_text')
+        entry['source'] = 'team'
+        library[tool['id']] = entry
+    for key, entry in TOOL_LIBRARY.items():
+        if key not in library:
+            library[key] = dict(entry, source='builtin')
+    return library
 
 
 class ToolingError(ValueError):
@@ -418,6 +442,10 @@ class MultiToolJob:
     feeds_machine: Optional[str] = None   # None = fall back to machine_id, then the default
     tab_spacing: float = 6.0
     sacrifice_depth: Optional[float] = None
+    #: Which surface the operator zeros Z on - 'board' (sacrifice board) or 'stock_top'.
+    #: None takes the team config's default. It has to be job-wide rather than per
+    #: operation: every tool change in the program re-zeros Z to the same surface.
+    z_datum: Optional[str] = None
     #: Operator ceiling on the depth of one contour pass, inches. Applied to every
     #: milling tool AFTER the model/preset/power clamps, and only ever downward - it
     #: buys more, shallower passes for fragile or multi-flute cutters.
@@ -737,14 +765,14 @@ def build_part_postprocessor(job: MultiToolJob, part: PartOps, tool_diameter: fl
     must not be rejected as "too small for the tool" when a later operation with a smaller
     cutter is the one that will drill it."""
     pp = FRCPostProcessor(material_thickness=job.thickness, tool_diameter=tool_diameter,
-                          units=job.units, config=job.config)
+                          units=job.units, config=job.config, z_datum=job.z_datum)
     pp.apply_material_preset(job.material, job.machine_id)
     if job.user_name:
         pp.user_name = job.user_name
     pp.tab_spacing = job.tab_spacing
     if job.sacrifice_depth is not None:
         pp.sacrifice_board_depth = job.sacrifice_depth
-        pp.cut_depth = -job.sacrifice_depth
+        pp._apply_z_frame()   # a deeper overcut moves the bottom of every through-cut
     pp.load_dxf(part.dxf_path)
     pp.transform_coordinates('bottom-left', part.rotation,
                              placement_offset=(part.place_x, part.place_y),
@@ -1290,7 +1318,7 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     if op.op_type == 'chamfer':
         min_z = pp.material_top - FRCPostProcessor.chamfer_depth(op.chamfer_width,
                                                                  tool.included_angle)
-    elif tool.type == 'drill' and pp.cut_depth <= 0:
+    elif tool.type == 'drill' and pp.is_through_cut():
         deepest = max((h['diameter'] for h in (pp.holes or [])), default=tool.diameter)
         min_z = pp.cut_depth - FRCPostProcessor.drill_point_length(
             deepest, op.drill_point_angle or FRCPostProcessor.DEFAULT_DRILL_POINT_ANGLE)
@@ -1391,7 +1419,7 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
     instructions = [f"Remove {previous.label}" ] if previous else []
     instructions += [
         f"Install {nxt.label}, {nxt.diameter:.4f} in diameter",
-        "Re-zero Z to the sacrifice board surface with the new tool",
+        f"Re-zero Z to {pp.z_zero_surface()} with the new tool",
         "Do NOT change the X or Y zero",
     ]
     instructions.extend(sanitize_comment(i) for i in extra_instructions)
@@ -1716,6 +1744,17 @@ def _expect_positive(value: Any, what: str) -> float:
         raise ToolingError(f"{what}: {exc}") from exc
 
 
+def _expect_z_datum(value: Any) -> Optional[str]:
+    """Validate the Z datum here rather than letting the post-processor raise mid-build:
+    a bad datum is a bad request, and it should read as one."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return normalize_z_datum(value)
+    except ValueError as exc:
+        raise ToolingError(f"z_datum: {exc}") from exc
+
+
 def _expect_int(value: Any, what: str) -> int:
     try:
         return int(_finite(value, what))
@@ -1774,6 +1813,7 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
             'drill_size_tolerance'),
         sacrifice_depth=(_expect_positive(spec['sacrifice_depth'], 'sacrifice_depth')
                          if spec.get('sacrifice_depth') is not None else None),
+        z_datum=_expect_z_datum(spec.get('z_datum')),
         max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
                         if spec.get('max_pass_depth') is not None else None),
         config=config,

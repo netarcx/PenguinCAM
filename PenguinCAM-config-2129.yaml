@@ -73,6 +73,16 @@ machines:
         sacrifice_board_depth: 0.008   # how far past the stock, into the spoilboard
         clearance_height: 0.5          # rapid height above the stock
 
+        # Which surface the operator zeros Z on, and therefore what every Z in
+        # the program is measured from. The wizard can override it per job.
+        #   sacrifice_board (default) - touch off the spoilboard through the
+        #     stock. The same zero works whatever the material measures, and a
+        #     through-cut is a shallow negative.
+        #   stock_top - touch off the top face of the material. Cutting Z is
+        #     negative throughout, the way Fusion writes it. Pick this when the
+        #     stock is in a vise, or the spoilboard is not a reliable surface.
+        # datum: sacrifice_board
+
         # ------------------------------------------------------------- VERIFY 3
         # OPTIONAL "clear everything" height above Z=0, used only for moves that
         # cross the bed. Set this ABOVE YOUR TALLEST CLAMP. Without it those moves
@@ -102,8 +112,12 @@ machines:
       pockets:
         contour_threshold: 510
 
+      # What the wizard opens on. Both are per-job overridable in the UI; these are
+      # just the settings you do not want to change every session.
       default_tool:
-        diameter: "4mm"
+        diameter: "1/4\""
+
+      default_material: aluminum
 
     materials:
       # These are the tested Team 6238 numbers. They already sit under the Omio's
@@ -176,3 +190,23 @@ machines:
       # Local mode has no Google sign-in, so Drive stays off here.
       google_drive:
         enabled: false
+
+# =============================================================================
+# SAVED BITS - the cutters this shop actually owns
+# =============================================================================
+# The wizard writes this block when you press the star beside a tool in the
+# Tools & Ops panel, and reads it back into every bit list in the app. Editing
+# it by hand is fine; keep the shape. `diameter` takes anything the UI takes
+# (0.25, '1/4"', '6mm'), `type` is endmill, vbit or drill, and `included_angle`
+# only means anything on a vbit.
+#
+# tools:
+#   - name: "1/4 in 2-flute endmill"
+#     diameter: "1/4\""
+#     flutes: 2
+#     type: endmill
+#   - name: "1/2 in 90 deg V-bit"
+#     diameter: "1/2\""
+#     flutes: 2
+#     type: vbit
+#     included_angle: 90

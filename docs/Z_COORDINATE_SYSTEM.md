@@ -1,21 +1,59 @@
-# Z-Axis Coordinate System Change
+# Z-Axis Coordinate System
 
-## What Changed
+**Both references are available.** The sacrifice board is the default and everything
+below describes it; the wizard's *Zero Z on* control (Setup panel) switches a job to the
+top of the stock instead, and `machining.z_reference.datum` in the team config sets which
+one a team gets by default.
 
-The Z-axis coordinate system has been updated for practical workflow:
+Whichever you pick, **it is the same cut**: the two programs are identical except that
+every Z is shifted by the stock thickness. Nothing about the toolpath, the feeds or the
+depth of cut changes - only the surface you touch off on.
 
-### OLD System (Top Surface Reference)
-- **Z=0** was at the TOP surface of the material
-- Cut depth was negative (e.g., Z=-0.25")
-- Required zeroing tool to material top (inconsistent thickness)
+| | Sacrifice board (default) | Top of stock |
+|---|---|---|
+| Touch off on | the spoilboard, through the stock | the top face of the material |
+| Material top | `Z = +thickness` | `Z = 0` |
+| Material bottom | `Z = 0` | `Z = -thickness` |
+| Through-cut | `Z = -0.02"` | `Z = -(thickness + 0.02")` |
+| Thickness must be exact? | no | no, but the top face must be where you say |
+| Pick it when | sheet work on a spoilboard, several thicknesses in a session | the stock is in a vise, the board is chewed up, or you want the Fusion convention |
 
-### NEW System (Bottom/Sacrifice Board Reference) ✅
+The choice reaches the operator in three places: the `(Z-AXIS REFERENCE:)` header block,
+the CLI's `Z-AXIS SETUP` printout, and every M0 pause that asks for a re-zero (tool
+changes, the deburr swap). All three name the surface the job actually used.
+
+**Tube jobs ignore the setting.** A tube is zeroed to the tube in its jig, and its Z
+frame is built by lifting the plate toolpath by (tube height - wall thickness); a
+stock-top setting is reset for tube programs rather than applied, and the generator says
+so on the console.
+
+## Setting it per job
+
+- **Wizard:** Setup panel -> *Zero Z on* -> Board / Stock top.
+- **CLI:** `--z-zero board` or `--z-zero stock-top` (omit to take the team config).
+- **Config:** `machining.z_reference.datum: sacrifice_board | stock_top`.
+- **Job JSON (`--ops-file`, `/process-job`, `/process-multitool`):** `"z_datum": "stock_top"`.
+
+An unrecognised value is refused rather than defaulted anywhere it can be: a datum that
+silently fell back would put Z zero a full material thickness from where the operator set
+it. (The one exception is the team config, which warns and uses the board so that one
+team's typo cannot stop the app from starting.)
+
+## Why the sacrifice board is the default
+
+### Sacrifice board reference (default)
 - **Z=0** is at the SACRIFICE BOARD surface (bottom)
 - Material top is at positive Z (e.g., Z=0.25")
 - Cut depth is slightly negative (e.g., Z=-0.02")
-- **Always zero to sacrifice board** (consistent every time)
+- Zero to the sacrifice board, the same way every time
 
-## Why This Is Better
+### Top surface reference (`Zero Z on: Stock top`)
+- **Z=0** is at the TOP surface of the material
+- Material bottom is at negative Z (e.g., Z=-0.25")
+- Cut depth is the full thickness plus the overcut (e.g., Z=-0.27")
+- Zero to the material top, which has to be re-done for each thickness
+
+The reasons the board is the default:
 
 ### 1. Consistent Zeroing
 - You ALWAYS zero to the sacrifice board
@@ -89,9 +127,11 @@ python frc_cam_postprocessor.py part.dxf output.gcode --thickness 0.25 --sacrifi
 4. This is your X/Y reference point for the entire job
 
 ### Step 3: Zero Z-Axis
-1. **Touch off to SACRIFICE BOARD surface**
+1. **Touch off to SACRIFICE BOARD surface** (or the top of the stock, if the job was
+   generated with `Zero Z on: Stock top` - the G-code header says which)
 2. Set this as Z=0 in your controller
-3. DON'T touch off to material top!
+3. Don't mix them up: the two zeros are exactly one material thickness apart, and the
+   program has no way to tell which surface the tool is actually touching
 
 ### Step 4: Run Program
 1. Load G-code

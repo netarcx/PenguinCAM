@@ -265,10 +265,32 @@ class TestLengthParsing(unittest.TestCase):
         self.assertEqual(t.get_material_preset('aluminum', 'm1')['name'], '6061')  # name NOT parsed
         self.assertEqual(cfg['machines']['m1']['machine']['dimensions']['x_max'], '600mm')  # input unmutated
 
-    def test_default_tool_is_4mm(self):
+    def test_default_tool_is_a_quarter_inch_endmill(self):
+        """The cutter and the material the wizard opens on. Both are overridable per job
+        and per team config; this pins what a config that says nothing gets."""
         d = TeamConfig().to_dict()
         self.assertAlmostEqual(d['default_tool_diameter'], DEFAULT_TOOL_DIAMETER_IN)
-        self.assertEqual(d['default_tool_diameter_text'], '4mm')
+        self.assertAlmostEqual(d['default_tool_diameter'], 0.25)
+        self.assertEqual(d['default_tool_diameter_text'], '1/4"')
+        self.assertEqual(d['default_material'], 'aluminum')
+
+    def _machine_cfg(self, machining):
+        return {'version': 2, 'default_machine': 'm1', 'machines': {'m1': {
+            'name': 'M1', 'machining': machining,
+            'materials': {'polycarbonate': {'name': 'Polycarb'},
+                          'aluminum': {'name': '6061'}},
+        }}}
+
+    def test_default_material_is_honoured_when_available(self):
+        cfg = self._machine_cfg({'default_material': 'polycarbonate'})
+        self.assertEqual(TeamConfig(cfg).default_material_for('m1'), 'polycarbonate')
+        self.assertEqual(TeamConfig(cfg).to_dict('m1')['default_material'], 'polycarbonate')
+
+    def test_default_material_falls_back_when_the_machine_lacks_it(self):
+        """A default naming a material this machine has no feeds for is worse than
+        useless, so it is only honoured when the machine actually offers it."""
+        cfg = self._machine_cfg({'default_material': 'unobtainium'})
+        self.assertEqual(TeamConfig(cfg).default_material_for('m1'), 'aluminum')
 
 
 class TestLowLevelUtilities(unittest.TestCase):

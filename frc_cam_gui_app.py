@@ -67,11 +67,11 @@ except ImportError:
 # Import postprocessor directly (for API calls instead of subprocess)
 from frc_cam_postprocessor import (
     FRCPostProcessor, PostProcessorResult, assemble_job_gcode, validate_job_layout,
-    parse_chamfer_spec,
+    parse_chamfer_spec, normalize_z_datum,
 )
 
 # Import team config management
-from team_config import TeamConfig, DEFAULT_TOOL_DIAMETER_IN
+from team_config import TeamConfig, DEFAULT_TOOL_DIAMETER_IN, parse_length, slugify_tool_id
 
 # Multi-tool operations (several tools per part, with manual tool changes)
 import drill_sizes
@@ -439,6 +439,14 @@ def _maybe_refresh_team_config():
         session['team_config_fetched_at'] = time.time()
 
 
+def _session_default_material() -> str:
+    """The team's default material, for requests that name none. Reads the session's
+    config rather than a route-local TeamConfig, because both routes want it before they
+    have built one - and a hard-coded fallback here would silently disagree with the
+    selector the wizard rendered from the same setting."""
+    return TeamConfig(session.get('team_config_data', {})).default_material
+
+
 def _app_template_context():
     """Build the shared template context (machines, materials, tool, bed size) used by
     both the legacy single-part page and the multi-part wizard."""
@@ -509,7 +517,17 @@ def _app_template_context():
         'incomplete_materials': incomplete_materials,
         'detected_thickness': None,
         'local_mode': LOCAL_MODE,
-        'tool_library': tooling.TOOL_LIBRARY,
+        # The team's default Z datum, so the control opens on the surface this team
+        # actually zeroes on. Without it a team that set stock_top in their config saw
+        # "Sacrifice board" selected, and the wizard then SENT board - the UI quietly
+        # overriding the config it was supposed to be showing.
+        'z_datum': team_config.z_datum,
+        'default_material': team_config.default_material,
+        # The shop's saved bits first, then the built-ins (tooling.merge_tool_library).
+        'tool_library': tooling.merge_tool_library(team_config.saved_tools),
+        # Saving edits the team config file, which only exists to be written in local
+        # mode; elsewhere the UI offers YAML to paste instead of a save button.
+        'tools_writable': local_mode.config_is_writable() if LOCAL_MODE else False,
         # The custom tube designer's menus and its snap grid, rendered from the server so
         # the browser holds no copy of a size or a constant that could go stale.
         'tube_designer_cfg': {
@@ -657,6 +675,116 @@ def _serve_wizard_upload():
 def index():
     """Render the main app: the multi-part wizard, full-screen, in DXF-upload mode."""
     return _serve_wizard_upload()
+
+
+def _saved_tools_response(message=None, saved_id=None, status=200):
+    """The one shape every saved-bit route answers with: the whole library, so the UI
+    never has to merge or re-order anything itself."""
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    payload = {
+        'success': status == 200,
+        'library': tooling.merge_tool_library(team_config.saved_tools),
+        'writable': local_mode.config_is_writable() if LOCAL_MODE else False,
+    }
+    if message:
+        payload['message' if status == 200 else 'error'] = message
+    if saved_id:
+        payload['saved_id'] = saved_id
+    return jsonify(payload), status
+
+
+def _tool_from_request(data):
+    """Validate one saved bit off the wire. Returns (tool_dict, error_message)."""
+    if not isinstance(data, dict):
+        return None, 'Expected a bit to save.'
+    name = str(data.get('name') or '').strip()
+    if not name:
+        return None, 'Give the bit a name you will recognise on the shelf.'
+    if len(name) > 60:
+        return None, 'That name is too long for a tool list; keep it under 60 characters.'
+    raw_diameter = data.get('diameter_text') or data.get('diameter')
+    diameter = parse_length(raw_diameter)
+    if not diameter or diameter <= 0:
+        return None, f'{raw_diameter!r} is not a diameter. Try 1/4", 0.25 or 6mm.'
+    if diameter > 2.0:
+        return None, 'A bit over 2 inches across is almost certainly a typo.'
+    tool_type = str(data.get('type') or 'endmill').strip().lower()
+    if tool_type not in ('endmill', 'vbit', 'drill'):
+        return None, f'Unknown tool type {tool_type!r}: expected endmill, vbit or drill.'
+    try:
+        flutes = int(data.get('flutes') or 1)
+    except (TypeError, ValueError):
+        return None, 'Flutes must be a whole number.'
+    if not 1 <= flutes <= 12:
+        return None, 'Flutes must be between 1 and 12.'
+    tool = {'name': name,
+            'diameter_text': raw_diameter if isinstance(raw_diameter, str) else f'{diameter:g}"',
+            'diameter': diameter, 'flutes': flutes, 'type': tool_type}
+    if tool_type == 'vbit':
+        try:
+            angle = float(data.get('included_angle') or 90)
+        except (TypeError, ValueError):
+            return None, 'The V angle must be a number of degrees.'
+        if not 10 <= angle <= 170:
+            return None, 'A V-bit angle outside 10-170 degrees is not a V-bit.'
+        tool['included_angle'] = angle
+    return tool, None
+
+
+@app.route('/tools/save', methods=['POST'])
+@limiter.limit("30 per minute")
+def save_tool():
+    """Add or update one saved bit in the team config file.
+
+    Identity is the name (slugified), so saving "1/4 in 2-flute endmill" twice corrects
+    the first entry instead of leaving two rows a shelf apart in the list."""
+    if not LOCAL_MODE or not local_mode.config_is_writable():
+        return _saved_tools_response(
+            'This copy of PenguinCAM cannot write the team config, so the bit was not '
+            'saved. Copy the YAML into your config file to share it with the team.',
+            status=409)
+    tool, error = _tool_from_request((request.get_json(silent=True) or {}).get('tool'))
+    if error:
+        return _saved_tools_response(error, status=400)
+
+    _ensure_local_team_config()
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    tools = [dict(t) for t in team_config.saved_tools]
+    tool_id = slugify_tool_id(tool['name'])
+    tools = [t for t in tools if t['id'] != tool_id]
+    tools.append(dict(tool, id=tool_id))
+
+    ok, detail = local_mode.save_tools_to_config(tools)
+    if not ok:
+        return _saved_tools_response(detail, status=500)
+    _ensure_local_team_config(force=True)     # re-read what we just wrote
+    return _saved_tools_response(f'Saved "{tool["name"]}" to the team config.', tool_id)
+
+
+@app.route('/tools/delete', methods=['POST'])
+@limiter.limit("30 per minute")
+def delete_tool():
+    """Remove one saved bit. Built-in bits are not the team's to delete."""
+    if not LOCAL_MODE or not local_mode.config_is_writable():
+        return _saved_tools_response('This copy of PenguinCAM cannot write the team config.',
+                                     status=409)
+    tool_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
+    if not tool_id:
+        return _saved_tools_response('Which bit?', status=400)
+
+    _ensure_local_team_config()
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    tools = [dict(t) for t in team_config.saved_tools]
+    remaining = [t for t in tools if t['id'] != tool_id]
+    if len(remaining) == len(tools):
+        return _saved_tools_response('That bit is not in the team config - built-in bits '
+                                     'cannot be removed.', status=404)
+
+    ok, detail = local_mode.save_tools_to_config(remaining)
+    if not ok:
+        return _saved_tools_response(detail, status=500)
+    _ensure_local_team_config(force=True)
+    return _saved_tools_response('Removed the bit from the team config.')
 
 
 @app.route('/config/refresh')
@@ -810,7 +938,7 @@ def process_file():
                 return jsonify({'error': 'File must be a DXF file'}), 400
         
         # Get parameters
-        material = request.form.get('material', 'plywood')
+        material = request.form.get('material') or _session_default_material()
         is_aluminum_tube = (material.lower() == 'aluminum_tube')
         machine_id = request.form.get('machine_id', None)  # Optional machine selection
         material = normalize_material(material)  # aluminum_tube->aluminum, polycarb->polycarbonate
@@ -973,6 +1101,16 @@ def process_file():
         log(f"🔍 DEBUG: Session has {len(config_data)} top-level keys in team_config_data")
         team_config = TeamConfig.from_dict(config_data)
         log(f"📋 Using team config: {team_config}")
+
+        # Which surface the operator will zero Z on. Rejected here rather than deeper in,
+        # because a datum the generator does not recognise must never fall back to a
+        # guess: the fallback would put Z zero a material thickness from where the
+        # operator set it.
+        try:
+            z_datum = normalize_z_datum(request.form.get('z_datum'),
+                                        default=team_config.z_datum)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
         log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
 
         # Call post-processor API based on mode
@@ -1093,7 +1231,8 @@ def process_file():
                     material_thickness=thickness,
                     tool_diameter=tool_diameter,
                     units='inch',
-                    config=team_config
+                    config=team_config,
+                    z_datum=z_datum
                 )
 
                 # Apply material preset (for specific machine if selected), then scale
@@ -1290,7 +1429,8 @@ def process_job():
             return jsonify({'error': 'Job has no parts'}), 400
 
         # Shared job parameters (one tool/material per job in v1).
-        material = normalize_material(job.get('material', 'plywood'))  # aluminum_tube->aluminum, polycarb->polycarbonate
+        # aluminum_tube->aluminum, polycarb->polycarbonate
+        material = normalize_material(job.get('material') or _session_default_material())
         tool_diameter = float(job.get('tool_diameter', DEFAULT_TOOL_DIAMETER_IN))
         thickness = float(job.get('thickness', 0.25))
         tab_spacing = float(job.get('tab_spacing', 6.0))
@@ -1344,6 +1484,13 @@ def process_job():
         machine_x = team_config.machine_x_max
         machine_y = team_config.machine_y_max
 
+        # Which surface the operator will zero Z on. Refused rather than defaulted if it
+        # is not one of the two: a guess here puts every cut a stock thickness out.
+        try:
+            z_datum = normalize_z_datum(job.get('z_datum'), default=team_config.z_datum)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
         log(f"[JOB] {len(parts_spec)} parts, tool {tool_diameter}, material {material}, thickness {thickness}")
 
         # Pass 1: build + place each part; collect footprints for layout validation.
@@ -1363,7 +1510,7 @@ def process_job():
             mirror = bool(part.get('mirror'))
 
             pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool_diameter,
-                                  units='inch', config=team_config)
+                                  units='inch', config=team_config, z_datum=z_datum)
             pp.apply_material_preset(material, machine_id)
             pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
             if max_pass_depth is not None:

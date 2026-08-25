@@ -9,7 +9,7 @@ is missing or incomplete.
 import copy
 import re
 import yaml
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
 # =============================================================================
@@ -31,7 +31,17 @@ _FRACTION_RE = re.compile(r'^([+-]?\d+)\s*/\s*(\d+)\s*(.*)$')
 _DECIMAL_RE = re.compile(r'^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*)$')
 
 # Default tool when a config doesn't specify one: 4mm end mill (in inches).
-DEFAULT_TOOL_DIAMETER_IN = 4.0 / 25.4
+DEFAULT_TOOL_DIAMETER_IN = 0.25   # 1/4" endmill: the cutter most jobs are run with
+
+
+def slugify_tool_id(name: str) -> str:
+    """A stable, URL-safe id for a saved bit, derived from its name.
+
+    The name is what the operator recognises ("the 1/4 two-flute"), so it is also the
+    identity: saving a bit whose name matches an existing one updates that one rather
+    than leaving two rows a shelf apart in the list."""
+    slug = re.sub(r'[^a-z0-9]+', '_', str(name).strip().lower()).strip('_')
+    return slug or 'bit'
 
 # Leaf keys whose values are lengths and may therefore be given as unit strings. Only
 # these are converted during config normalization, so material names, work offsets, feed
@@ -151,8 +161,11 @@ TEAM_6238_DEFAULTS = {
             'contour_threshold': 510
         },
         'default_tool': {
-            'diameter': '4mm'  # default when unspecified; parsed to inches for machining
-        }
+            'diameter': '1/4"'  # default when unspecified; parsed to inches for machining
+        },
+        # Which material the wizard opens on. A team that mostly cuts one thing should
+        # not have to change the selector every session.
+        'default_material': 'aluminum'
     },
     'tube_facing': {
         'depth_margin': 0.005,
@@ -521,6 +534,25 @@ class TeamConfig:
         return self._get('machining', 'z_reference', 'clearance_height')
 
     @property
+    def z_datum(self) -> str:
+        """Which surface the operator zeros Z on by default: 'board' (the sacrifice
+        board - what every PenguinCAM program has used, and what the setup docs assume)
+        or 'stock_top'. From machining.z_reference.datum; a job can still override it.
+
+        An unrecognised value falls back to the board datum with a warning rather than
+        refusing to start: a typo in one team's config should not take the app down, and
+        the board datum is the behaviour every other part of the setup already assumes."""
+        raw = self._get('machining', 'z_reference', 'datum', default=None)
+        if raw is None:
+            return 'board'
+        try:
+            from frc_cam_postprocessor import normalize_z_datum
+            return normalize_z_datum(raw)
+        except (ImportError, ValueError) as e:
+            print(f"⚠️  machining.z_reference.datum: {e}. Using the sacrifice board.")
+            return 'board'
+
+    @property
     def tab_width(self) -> float:
         """Default tab width (inches)"""
         return self._get('machining', 'tabs', 'width')
@@ -581,6 +613,122 @@ class TeamConfig:
         (e.g. "4mm") or a number; falls back to 4mm if missing or unparseable."""
         parsed = parse_length(self._raw_default_tool_diameter())
         return parsed if parsed and parsed > 0 else DEFAULT_TOOL_DIAMETER_IN
+
+    # ========================================================================
+    # Saved bits (the shop's cutters)
+    # ========================================================================
+
+    #: Bits live at the ROOT of the config, beside `team:` and `machines:`, because a
+    #: cutter belongs to the shop rather than to one machine - and because a top-level
+    #: block is the one thing the app can rewrite without touching a line of the
+    #: hand-written config around it (see local_mode.save_tools_to_config).
+    SAVED_TOOLS_KEY = 'tools'
+
+    @property
+    def saved_tools(self) -> List[Dict[str, Any]]:
+        """The team's saved bits, validated and in file order.
+
+        A malformed entry is dropped with a warning rather than raising: the tool list is
+        a convenience, and one bad line typed into the YAML should not stop the app from
+        starting or hide the other nine cutters.
+        """
+        raw = self._data.get(self.SAVED_TOOLS_KEY)
+        if raw is None:
+            raw = self._get('machining', 'tool_library', default=None)   # per-machine, opt-in
+        if not isinstance(raw, list):
+            if raw is not None:
+                print(f"⚠️  config `{self.SAVED_TOOLS_KEY}` should be a list of bits; ignoring it")
+            return []
+        tools, seen = [], set()
+        for index, entry in enumerate(raw, start=1):
+            tool = self._normalize_saved_tool(entry, index)
+            if tool is None:
+                continue
+            if tool['id'] in seen:
+                print(f"⚠️  saved bit {index} duplicates \"{tool['name']}\"; keeping the first")
+                continue
+            seen.add(tool['id'])
+            tools.append(tool)
+        return tools
+
+    @staticmethod
+    def _normalize_saved_tool(entry, index):
+        """One saved bit -> the shape the wizard and the job spec both speak, or None."""
+        if not isinstance(entry, dict):
+            print(f"⚠️  saved bit {index} is not a mapping; ignoring it")
+            return None
+        name = str(entry.get('name') or '').strip()
+        raw_diameter = entry.get('diameter')
+        diameter = parse_length(raw_diameter)
+        if not name:
+            print(f"⚠️  saved bit {index} has no name; ignoring it")
+            return None
+        if not diameter or diameter <= 0:
+            print(f"⚠️  saved bit \"{name}\" has no usable diameter ({raw_diameter!r}); ignoring it")
+            return None
+        tool_type = str(entry.get('type') or 'endmill').strip().lower()
+        if tool_type not in ('endmill', 'vbit', 'drill'):
+            print(f"⚠️  saved bit \"{name}\" has unknown type {tool_type!r}; treating it as an endmill")
+            tool_type = 'endmill'
+        try:
+            flutes = int(entry.get('flutes') or 1)
+        except (TypeError, ValueError):
+            flutes = 1
+        tool = {
+            'id': slugify_tool_id(name),
+            'name': name,
+            'diameter': diameter,
+            # The text as written, so "6mm" shows as 6mm rather than 0.2362".
+            'diameter_text': raw_diameter if isinstance(raw_diameter, str) else f'{diameter:g}"',
+            'flutes': max(1, flutes),
+            'type': tool_type,
+            'source': 'team',
+        }
+        angle = entry.get('included_angle')
+        if tool_type == 'vbit':
+            try:
+                tool['included_angle'] = float(angle) if angle is not None else 90.0
+            except (TypeError, ValueError):
+                print(f"⚠️  saved bit \"{name}\" has an unreadable V angle; using 90 deg")
+                tool['included_angle'] = 90.0
+        elif angle is not None:
+            try:
+                tool['included_angle'] = float(angle)
+            except (TypeError, ValueError):
+                pass
+        return tool
+
+    def default_material_for(self, machine_id: Optional[str] = None) -> str:
+        """Material id the UI opens on for this machine (machining.default_material).
+
+        Read from the machine's own config first, the way default_tool is: _get does not
+        descend into a per-machine block for this key, so a machine that names its own
+        default would otherwise be ignored. Falls back to the 6238 default, and then to
+        any material the machine actually has - a default naming a material with no
+        feeds on this machine is worse than no default at all."""
+        machine_config = self.get_machine_config(machine_id)
+        chosen = None
+        for path in (('machining', 'default_material'), ('default_material',)):
+            value = machine_config
+            for key in path:
+                value = value.get(key) if isinstance(value, dict) else None
+                if value is None:
+                    break
+            if value is not None:
+                chosen = value
+                break
+        available = self.get_available_materials(machine_id)
+        if chosen and chosen in available:
+            return chosen
+        for fallback in (TEAM_6238_DEFAULTS['machining']['default_material'], 'aluminum'):
+            if fallback in available:
+                return fallback
+        return next(iter(available), 'aluminum')
+
+    @property
+    def default_material(self) -> str:
+        """Material id the UI opens on, for the default machine."""
+        return self.default_material_for()
 
     @property
     def default_tool_diameter_text(self) -> str:
@@ -781,6 +929,7 @@ class TeamConfig:
             'google_drive_folder_id': get_machine_setting('integrations', 'google_drive', 'folder_id'),
             'default_tool_diameter': tool_in if (tool_in and tool_in > 0) else DEFAULT_TOOL_DIAMETER_IN,
             'default_tool_diameter_text': raw_tool if isinstance(raw_tool, str) else f'{raw_tool}"',
+            'default_material': self.default_material_for(machine_id),
         }
 
     @classmethod
@@ -886,6 +1035,10 @@ machining:
   z_reference:
     sacrifice_board_depth: 0.008    # How far to cut into sacrifice board (inches)
     clearance_height: 0.5           # Clearance above material for rapid moves (inches)
+    # OPTIONAL: which surface the operator zeros Z on, and so what every Z in the
+    # program is measured from. "sacrifice_board" (the default) or "stock_top".
+    # The wizard can override it per job; tube jobs always use their jig zero.
+    # datum: sacrifice_board
     # OPTIONAL: "clear everything" height above Z=0 (sacrifice board), in work
     # coordinates (G54). Used only for the moves that cross the machine bed: the
     # rapid to the first cut, the end retract, multi-part rapids, and the tube-flip

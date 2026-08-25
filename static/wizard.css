@@ -1,51 +1,129 @@
+/* PenguinCAM - wizard UI.
+   =========================================================================
+   Visual language: "machinist steel". Cast-iron greys, one safety-amber
+   accent, and instrument-style readouts for anything the operator has to
+   read as a number. Rules of the house:
+     - amber means "act on this or you are here": primary action, current
+       step, current selection. Nothing decorative is amber.
+     - every dimension, count and time is set in the mono face with tabular
+       figures, so digits line up between rows the way they do on a DRO.
+     - labels are the drawing's title block: small, uppercase, tracked out.
+   The layout canvas reads --ink/--muted/--accent/--ok/--danger straight out
+   of these variables (wizard.js cssVar), so renaming or dropping one of
+   those five repaints the canvas as well.
+   ========================================================================= */
+
+/* ---- Tokens ------------------------------------------------------------ */
 :root {
-  --bg: #0f1419;
-  --panel: #1a212b;
-  --panel-2: #232c38;
-  --ink: #e6edf3;
-  --muted: #9aa7b4;
-  --accent: #2f81f7;
-  --accent-ink: #fff;
-  --danger: #f85149;
-  --ok: #3fb950;
-  --line: #30363d;
-  --canvas-bg: #11161d;      /* 2D layout / 3D viewer background */
-  --canvas-grid: #30363d;
-  --hover: #2c3644;          /* pill / row hover fill */
-  --warn: #d29922;           /* "using defaults" and other soft warnings */
-  --scrim: rgba(15, 20, 25, 0.96);   /* full-screen overlay behind a modal card */
+  color-scheme: dark;
+
+  --bg: #131417;            /* cast iron */
+  --panel: #1B1D21;         /* machined face */
+  --panel-2: #232529;       /* inset well: inputs, sub-panels */
+  --hover: #2B2E33;
+  --well: #16181B;          /* deepest inset - readouts, canvases */
+  --line: #313439;          /* scribed line */
+  --line-2: #41454B;
+  --line-3: #565C64;
+
+  --ink: #E9E7E2;           /* bone white */
+  --ink-2: #C2C1BC;
+  --muted: #8D8E8A;
+
+  --accent: #F5A524;        /* safety amber */
+  --accent-hi: #FFB53D;
+  --accent-text: #F5A524;   /* amber as TEXT (readable on --bg/--panel) */
+  --accent-dim: rgba(245, 165, 36, 0.45);
+  --accent-wash: rgba(245, 165, 36, 0.12);
+  --on-accent: #17181B;     /* text on an amber fill */
+
+  --danger: #E4564A;        /* e-stop red */
+  --ok: #4CAF6D;            /* cycle complete */
+  --ok-dim: rgba(76, 175, 109, 0.5);
+  --warn: #C9884A;          /* rust: soft warnings, kept clear of the amber */
+
+  --canvas-bg: #0F1013;     /* 2D layout / 3D viewer background */
+  --canvas-grid: #2A2D33;
+  --scrim: rgba(11, 12, 14, 0.94);
+  --sheen: rgba(255, 255, 255, 0.035);   /* top highlight on a panel edge */
+  --shadow: rgba(0, 0, 0, 0.45);
+
+  --r-sm: 3px;
+  --r: 5px;
+  --r-lg: 7px;
+
+  --font-ui: 'Barlow', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Barlow Semi Condensed', 'Barlow', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
 }
 
-/* Light theme — tied to Onshape's theme (?theme=light|dark) or standalone default. */
+/* Light theme - tied to Onshape's theme (?theme=light|dark) or standalone.
+   Shop paper rather than pure white, so the amber still has somewhere to sit. */
 :root[data-theme="light"] {
-  --bg: #f6f8fa;
-  --panel: #ffffff;
-  --panel-2: #eef1f4;
-  --ink: #1f2328;
-  --muted: #5a6570;
-  --accent: #2f81f7;
-  --accent-ink: #ffffff;
-  --danger: #d1242f;
-  --ok: #1a7f37;
-  --line: #d0d7de;
-  --canvas-bg: #f2f4f7;
-  --canvas-grid: #c7cfd8;
-  --hover: #dde3ea;
-  --warn: #8a6100;
-  --scrim: rgba(246, 248, 250, 0.94);
   color-scheme: light;
+
+  --bg: #F1F0EC;
+  --panel: #FFFFFF;
+  --panel-2: #EBEAE5;
+  --hover: #E2E0DA;
+  --well: #F1F0EB;
+  --line: #D9D7D0;
+  --line-2: #C3C1B9;
+  --line-3: #A4A29A;
+
+  --ink: #1A1B1E;
+  --ink-2: #3B3D41;
+  --muted: #63645F;
+
+  --accent: #D18A00;
+  --accent-hi: #B87400;
+  --accent-text: #97620A;
+  --accent-dim: rgba(209, 138, 0, 0.5);
+  --accent-wash: rgba(209, 138, 0, 0.12);
+  --on-accent: #1A1B1E;
+
+  --danger: #C1352A;
+  --ok: #2E7D4F;
+  --ok-dim: rgba(46, 125, 79, 0.5);
+  --warn: #96581F;
+
+  --canvas-bg: #F5F4F1;
+  --canvas-grid: #CFCDC6;
+  --scrim: rgba(241, 240, 236, 0.95);
+  --sheen: transparent;
+  --shadow: rgba(0, 0, 0, 0.18);
 }
 
+/* ---- Base -------------------------------------------------------------- */
 * { box-sizing: border-box; }
+
+/* The UA's [hidden] rule loses to any author `display`, and this sheet gives
+   nearly everything one - which is how a `.field` that JS had hidden (the max
+   pass depth field in tubing mode) stayed on screen. One rule, stated once,
+   instead of a "restore hidden" patch under every component. */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
   height: 100%;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font: 400 13.5px/1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
 }
 
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; }
+
+::selection { background: var(--accent-wash); }
+
+/* One focus ring for the whole app. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--r-sm);
+}
+
+/* ---- Shell ------------------------------------------------------------- */
 #wizard {
   display: flex;
   flex-direction: column;
@@ -54,354 +132,660 @@ html, body {
 }
 
 #wiz-header {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 7px 12px;
   background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 var(--sheen);
 }
-.brand { font-weight: 700; letter-spacing: 0.3px; }
 
-#stepbar {
-  display: flex;
-  gap: 6px;
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  flex-wrap: wrap;
-}
-#stepbar li {
-  font-size: 12px;
-  color: var(--muted);
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.12s, color 0.12s;
-}
-/* Numbers come from data-num, assigned by JS to the visible steps (the step list is
-   mode-dependent — tubing mode has no Layout step). They reflect position in the
-   sequence, not done/active state, so they never renumber as you advance. */
-#stepbar li::before { content: attr(data-num) ". "; opacity: 0.65; }
-#stepbar li[hidden] { display: none; }
-#stepbar li:hover { background: var(--hover); color: var(--ink); }
-/* One focus ring for the whole app: the UA default is a thin dark outline that
-   all but vanishes on the dark panels. */
-#stepbar li:focus-visible,
-.btn:focus-visible,
-#dropzone:focus-visible,
-.do-menu-item:focus-visible,
-input:focus-visible,
-select:focus-visible,
-button:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-#stepbar li.done { color: var(--ok); }
-#stepbar li.done::after { content: " \2713"; }  /* completed check, kept separate from the number */
-#stepbar li.active { color: var(--accent-ink); background: var(--accent); }
-#stepbar li.active:hover { background: var(--accent); color: var(--accent-ink); }
-
-#wiz-body { flex: 1; overflow-y: auto; padding: 14px; }
-
-#wiz-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 14px;
-}
-#wiz-summary .chip {
-  font-size: 12px;
-  color: var(--muted);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  padding: 3px 9px;
-  border-radius: 999px;
+.brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* A datum target: the mark a drawing puts where measurement starts. Two
+   quadrants in amber, the ring and crosshair in ink. */
+.brand-mark { width: 22px; height: 22px; flex: 0 0 auto; overflow: visible; }
+.brand-mark .bm-fill { fill: var(--accent); }
+.brand-mark .bm-ring { fill: none; stroke: var(--ink-2); stroke-width: 1.25; }
+.brand-name {
+  font: 700 17px/1 var(--font-display);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink);
   white-space: nowrap;
 }
+.brand-name b { font-weight: 700; color: var(--accent-text); }
 
-.step h2 { margin: 0 0 12px; font-size: 18px; }
+/* Which team config resolved, so it can be confirmed at a glance (it decides
+   every feed, speed and machine limit downstream). */
+.config-info { margin-left: auto; min-width: 0; }
+.config-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font: 500 11px/1.2 var(--font-ui);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.config-status::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: 0 0 auto;
+}
+.config-status a { color: var(--ink-2); text-decoration: none; }
+.config-status a:hover { color: var(--accent-text); text-decoration: underline; }
+.config-status-default { color: var(--warn); }
+.config-status-default::before { background: var(--warn); }
+/* Deliberately understated: a reload affordance for the rare config change,
+   not a call to action. Nearly invisible until hovered. */
+.config-status a.config-refresh {
+  color: var(--muted);
+  opacity: 0.4;
+  font-size: 13px;
+  line-height: 1;
+  text-decoration: none;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.config-status a.config-refresh:hover { opacity: 1; color: var(--accent-text); text-decoration: none; }
 
-/* ---- Full-page grid mode (upload only): all four steps at once, 2x2 ----
-   Setup upper-left, Parts lower-left, Layout upper-right, Preview lower-right.
-   The current step is highlighted; transitions still fire per-step side effects
-   (JS gotoStep), so a quadrant stays incomplete until you navigate to it. The
-   narrow Onshape panel never gets the .grid class, so it keeps the single-step
-   wizard. The running decisions summary is redundant here (all steps visible). */
+#wiz-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+
+/* Running summary of the decisions made so far. Redundant in full-page grid
+   mode (every panel is on screen), so it only shows in the narrow flow. */
+#wiz-summary { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+#wiz-summary .chip {
+  font: 500 11px/1.3 var(--font-mono);
+  color: var(--ink-2);
+  background: var(--well);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Panels ------------------------------------------------------------ */
+.step { min-width: 0; }
+/* The Setup + Parts wrapper. Inert by default so the panels place themselves. */
+.rail { display: contents; }
+
+/* The step number is the DOM position of the panels actually in the flow:
+   a hidden step generates no box, so it does not increment the counter and
+   the numbering closes up on its own (no Tools panel -> Layout is 3). */
+#wiz-body { counter-reset: stepno; }
+.step { counter-increment: stepno; }
+
+.panel-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  padding: 9px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.panel-head::before {
+  content: counter(stepno);
+  flex: 0 0 auto;
+  min-width: 19px;
+  padding: 3px 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  font: 600 10px/1 var(--font-mono);
+  text-align: center;
+  color: var(--muted);
+}
+.panel-head h2 {
+  margin: 0;
+  font: 600 13px/1.2 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.panel-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+
+.step.current > .panel-head::before {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- Full-page grid mode (upload only) ---------------------------------
+   Every step on screen at once. The left rail carries the two form panels
+   and the wide right column carries the two drawings, because a nesting
+   canvas and a toolpath are the only things here that get better with more
+   pixels. The current step is highlighted; JS still fires the per-step side
+   effects on transition, so a panel stays incomplete until you go to it. */
 #wizard.grid #wiz-summary { display: none; }
 #wizard.grid #wiz-body {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-  gap: 12px;
-  overflow: hidden;          /* each quadrant scrolls itself */
+  grid-template-columns: minmax(310px, 23%) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;          /* each panel scrolls itself */
   min-height: 0;
 }
 #wizard.grid .step {
-  margin: 0;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  overflow: auto;            /* quadrant content scrolls within its cell */
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-  padding: 12px 14px;
+  overflow: auto;            /* panel content scrolls within its cell */
+  padding: 0 13px 13px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  /* A quadrant is a fixed-height box and on most platforms its scrollbar is an
-     overlay that only appears once you are already scrolling - so a panel with
-     more below the fold looked simply finished. Tubing mode is the bad case:
-     five extra fields, and only the first two fit. These are the classic
-     scroll shadows: the `local` layers scroll away with the content, the
-     `scroll` layers stay pinned, so a soft edge shows exactly while there is
-     more in that direction and vanishes at the ends. */
+  border-radius: var(--r-lg);
+  box-shadow: inset 0 1px 0 var(--sheen);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+  /* A panel is a fixed-height box and on most platforms its scrollbar is an
+     overlay that only appears once you are already scrolling - so a panel
+     with more below the fold looked simply finished. The `local` layer
+     scrolls away with the content and the `scroll` layer stays pinned, so a
+     soft edge shows exactly while there is more below and vanishes at the
+     end. */
   background:
-    linear-gradient(var(--panel) 30%, transparent) top    / 100% 20px local no-repeat,
-    linear-gradient(transparent, var(--panel) 70%) bottom / 100% 20px local no-repeat,
-    radial-gradient(farthest-side at 50% 0,
-                    rgba(0, 0, 0, 0.4), transparent) top    / 100% 8px scroll no-repeat,
-    radial-gradient(farthest-side at 50% 100%,
-                    rgba(0, 0, 0, 0.4), transparent) bottom / 100% 8px scroll no-repeat,
+    linear-gradient(transparent, var(--panel) 70%) bottom / 100% 18px local no-repeat,
+    radial-gradient(farthest-side at 50% 100%, var(--shadow), transparent) bottom / 100% 7px scroll no-repeat,
     var(--panel);
 }
 #wizard.grid .step[data-step="setup"]   { grid-column: 1; grid-row: 1; }
 #wizard.grid .step[data-step="parts"]   { grid-column: 1; grid-row: 2; }
 #wizard.grid .step[data-step="layout"]  { grid-column: 2; grid-row: 1; }
 #wizard.grid .step[data-step="preview"] { grid-column: 2; grid-row: 2; }
+/* An indicator lamp across the top edge, not a ring around the whole box:
+   the panels sit shoulder to shoulder and a ring on one made its neighbours
+   look switched off. */
 #wizard.grid .step.current {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+  border-color: var(--line-2);
+  box-shadow: inset 0 2px 0 var(--accent), inset 0 3px 6px -3px var(--accent-wash);
+}
+#wizard.grid .panel-head { padding-top: 10px; }
+#wizard:not(.grid) .panel-head::before { display: none; }
+
+@media (min-width: 1250px) {
+  #wizard.grid:not(.has-tools) #wiz-body {
+    grid-template-columns: minmax(300px, 21%) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  #wizard.grid:not(.has-tools) .step[data-step="layout"]  { grid-column: 2; grid-row: 1; }
+  #wizard.grid:not(.has-tools) .step[data-step="preview"] { grid-column: 3; grid-row: 1; }
 }
 
-/* ---- Fitting the two big canvases into their quadrant ----------------------
-   A quadrant is a fixed-height cell. Both canvases were sized for width alone
-   (the layout canvas is a 600x400 backing store stretched by `width: 100%`, the
-   3D viewer a flat 320px), so on every real screen size the bottom of the stock
-   and the whole playback strip - scrubber, speed, Reset view, Toolpath - sat
-   below the fold. Lay the two panels out as columns and let the canvas take what
-   is left over rather than pushing the controls out of the box. */
-#wizard.grid .step[data-step="layout"],
-#wizard.grid .step[data-step="preview"] { display: flex; flex-direction: column; }
+/* One scroll for the whole rail, on any layout wide enough to give it a column of
+   its own. Setup and Parts then each take the height they need - Setup grows with
+   the mode (tubing adds five fields, the deburr pass another four) and Parts grows
+   with the part list, and neither can clip the other.
 
-#wizard.grid #layout-canvas {
-  flex: 0 1 auto;
-  align-self: center;
-  /* Both dimensions auto so the max-* clamps scale it instead of squashing it:
-     drag hit-testing maps x and y by separate scale factors, so a distorted
-     canvas would still be clickable but would draw the stock out of proportion. */
-  width: auto;
-  height: auto;
-  max-width: 100%;
-  max-height: 100%;
-  aspect-ratio: 3 / 2;   /* = the 600x400 backing store */
-  min-height: 140px;     /* smaller than this is not a layout tool; scroll instead */
+   Placement and the flex treatment have to live in the SAME query: with the rail
+   switched to flex at one width and placed at another, the 1201-1249px band gave it
+   no grid area at all and squeezed both panels into a single row's height. Both
+   layouts turn it on at 1250px; below that the wrapper is display:contents and the
+   panels place themselves. */
+@media (min-width: 1250px) {
+  #wizard.grid:not(.has-tools) .rail { grid-column: 1; grid-row: 1; }
+  #wizard.grid.has-tools .rail     { grid-column: 1; grid-row: 1 / span 2; }
+
+  #wizard.grid .rail {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
+    /* The scroll moved from the panels to the rail, so the "there is more below"
+       edge has to move with it - see the same pair of layers on .step. */
+    background:
+      linear-gradient(transparent, var(--bg) 70%) bottom / 100% 16px local no-repeat,
+      radial-gradient(farthest-side at 50% 100%, var(--shadow), transparent)
+        bottom / 100% 7px scroll no-repeat;
+  }
+  /* Inside the rail a panel is sized by its content, so it needs neither a scroll
+     of its own nor the shadow that hints at one. */
+  #wizard.grid .rail > .step {
+    flex: 0 0 auto;
+    overflow: visible;
+    background: var(--panel);
+  }
+  #wizard.grid .rail .panel-head { position: static; }
 }
 
-#wizard.grid #preview-result {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
+/* Full-page grid with the extra step: three columns, the operations editor
+   given a tall middle one because a plan is the longest thing on screen. */
+#wizard.grid.has-tools #wiz-body {
+  grid-template-columns: minmax(280px, 18%) minmax(360px, 33%) minmax(0, 1fr);
 }
-/* `display: flex` above overrides the HTML `hidden` attribute; restore it. */
-#wizard.grid #preview-result[hidden] { display: none; }
-#wizard.grid #viewer-container { flex: 1 1 auto; height: auto; min-height: 140px; }
-/* Narrow full-page widths: fall back to a single column, all steps still shown. */
-/* Narrow full-page widths: one column, all steps still shown, body scrolls.
-   The rows have to be max-content, NOT minmax(220px, auto): #wiz-body has a
-   definite height (flex child of the 100vh column), so an auto/max-content
-   MAXIMUM only grows a track when there is spare height to hand out. Stacked
-   four deep there never is, and every panel froze at its 220px minimum with
-   its content clipped - Setup lost Material and Thickness entirely. */
+#wizard.grid.has-tools .step[data-step="setup"]   { grid-column: 1; grid-row: 1; }
+#wizard.grid.has-tools .step[data-step="parts"]   { grid-column: 1; grid-row: 2; }
+#wizard.grid.has-tools .step[data-step="tools"]   { grid-column: 2; grid-row: 1 / span 2; }
+#wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 3; grid-row: 1; }
+#wizard.grid.has-tools .step[data-step="preview"] { grid-column: 3; grid-row: 2; }
+
+@media (max-width: 1200px) {
+  /* Five panels never fit a viewport this size (the operations list alone is
+     600px tall), so size every row to its content and scroll the body once
+     rather than clipping all five panels independently. */
+  #wizard.grid.has-tools #wiz-body {
+    grid-template-columns: minmax(280px, 1fr) minmax(0, 1.4fr);
+    grid-template-rows: max-content max-content max-content;
+    align-content: start;
+    overflow-y: auto;
+  }
+  #wizard.grid.has-tools .step[data-step="tools"]   { grid-column: 1 / span 2; grid-row: 3; }
+  #wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 2; grid-row: 1; }
+  #wizard.grid.has-tools .step[data-step="preview"] { grid-column: 2; grid-row: 2; }
+  #wizard.grid.has-tools .step { max-height: 78vh; }
+}
 @media (max-width: 900px) {
-  #wizard.grid #wiz-body {
+  /* One column, all steps still shown, the body scrolls once. The rows have
+     to be max-content: #wiz-body has a definite height, so an auto MAXIMUM
+     only grows a track when there is spare height to hand out, and stacked
+     four deep there never is - every panel froze at its minimum with its
+     content clipped. Both selectors are restated because the .has-tools rule
+     above carries one more class and would otherwise still win. */
+  #wizard.grid #wiz-body,
+  #wizard.grid.has-tools #wiz-body {
     grid-template-columns: 1fr;
     grid-template-rows: none;
     grid-auto-rows: max-content;
     align-content: start;
     overflow-y: auto;
   }
-  #wizard.grid .step[data-step] { grid-column: 1; grid-row: auto; }
+  #wizard.grid .step[data-step],
+  #wizard.grid.has-tools .step[data-step] { grid-column: 1; grid-row: auto; max-height: none; }
 }
 
-.field { display: block; margin: 0 0 14px; }
-.field > span, .field > legend { display: block; color: var(--muted); margin-bottom: 4px; font-size: 12px; }
-.field.inline { display: flex; align-items: center; gap: 8px; }
-.field.inline > span { margin: 0; }
+/* ---- Fields ------------------------------------------------------------ */
+.field { display: block; margin: 0 0 12px; min-width: 0; }
+.field > span, .field > legend {
+  display: block;
+  margin: 0 0 5px;
+  font: 600 11px/1.3 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
 
-input[type="number"], input[type="text"], select {
+/* Two fields to a row wherever the panel is wide enough for it; one when it
+   is not (the Onshape panel is 320px). */
+.fieldgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 2px 12px;
+  margin-bottom: 2px;
+}
+.fieldgrid > .field { margin-bottom: 12px; }
+
+input[type="number"], input[type="text"] {
   width: 100%;
-  padding: 8px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 7px 9px;
+  background: var(--well);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
   color: var(--ink);
-  font: inherit;
+  font: 500 13px/1.25 var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
-input.invalid { border-color: var(--danger); }
+select {
+  width: 100%;
+  padding: 7px 26px 7px 9px;
+  background: var(--well);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  color: var(--ink);
+  font: 500 13px/1.25 var(--font-ui);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238D8E8A' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 10px 6px;
+}
+:root[data-theme="light"] select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236C6D68' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+input[type="number"]:hover, input[type="text"]:hover, select:hover { border-color: var(--line-3); }
+input::placeholder { color: var(--muted); opacity: 0.65; }
+input.invalid, input.invalid:hover { border-color: var(--danger); background: rgba(228, 86, 74, 0.07); }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+fieldset.field { border: 1px solid var(--line); border-radius: var(--r); padding: 9px 11px; }
+
+/* Checkbox rows read as switches on a panel: the whole row is the target. */
+.field.inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.field.inline:hover { border-color: var(--line-3); background: var(--hover); }
+.field.inline > span {
+  margin: 0;
+  font: 500 12.5px/1.35 var(--font-ui);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-2);
+}
+.field.inline input[type="checkbox"] { width: 15px; height: 15px; margin: 1px 0 0; flex: 0 0 auto; }
 .field.inline input[type="number"], .field.inline input[type="text"] { width: 90px; }
 
-fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
-.radio { display: block; color: var(--ink); margin: 4px 0; font-size: 13px; }
-
-.hint { color: var(--muted); font-size: 12px; }
-
-.btn {
-  appearance: none;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-  color: var(--ink);
-  padding: 8px 14px;
-  border-radius: 6px;
-  font: inherit;
+.radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 5px 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
   cursor: pointer;
 }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.btn.small { padding: 4px 8px; font-size: 12px; }
+.radio input { flex: 0 0 auto; margin: 0; }
 
+/* Mode picker: three tiles rather than three lines of prose. The radio is a
+   transparent overlay so the focus ring lands on the tile without needing
+   :has() to carry it. */
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg-item {
+  position: relative;
+  flex: 1 1 96px;
+  max-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.seg-item:hover { border-color: var(--line-3); background: var(--hover); }
+.seg-item input {
+  position: absolute;
+  inset: -1px;
+  margin: 0;
+  appearance: none;
+  background: none;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.seg-item input:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 0; border-radius: var(--r); }
+.seg-t {
+  font: 600 12.5px/1.15 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-2);
+}
+.seg-d { font-size: 11px; line-height: 1.25; color: var(--muted); }
+/* Two choices whose names say it all - the sentence below the control carries the
+   explanation, so the tiles do not repeat it. */
+.seg-item.compact { padding: 8px 9px; }
+.seg-item input:checked ~ .seg-t { color: var(--accent-text); }
+.seg-item:has(input:checked) { border-color: var(--accent-dim); background: var(--accent-wash); }
+.seg-item:has(input:checked) .seg-d { color: var(--ink-2); }
+
+/* A nested block of settings that belongs to the control above it. */
+.subpanel {
+  margin: 0 0 12px;
+  padding: 10px 11px 2px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-3);
+  border-radius: 0 var(--r) var(--r) 0;
+  background: var(--panel-2);
+}
+
+.hint { margin: -4px 0 12px; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.hint:last-child { margin-bottom: 0; }
+.errors {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.errors:empty { display: none; }
+
+/* ---- Buttons ----------------------------------------------------------- */
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--panel-2);
+  color: var(--ink);
+  font: 600 12px/1.1 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn:hover:not(:disabled) { background: var(--hover); border-color: var(--line-3); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.btn.primary:hover:not(:disabled) { background: var(--accent-hi); border-color: var(--accent-hi); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 5px 9px; font-size: 11px; letter-spacing: 0.05em; }
+.btn.icon { min-width: 27px; padding: 5px 0; font-family: var(--font-mono); font-size: 13px; }
+
+/* ---- Readouts ---------------------------------------------------------- */
+/* The instrument face: a black well, a tracked-out label, a mono value. Used
+   for anything the operator reads as a measurement rather than as prose. */
+.dro-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  margin-bottom: 9px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.dro {
+  flex: 1 1 auto;
+  min-width: 88px;
+  padding: 5px 10px 6px;
+  background: var(--well);
+}
+.dro-k {
+  display: block;
+  margin-bottom: 2px;
+  font: 600 10px/1 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--muted);
+}
+.dro-v {
+  display: block;
+  font: 500 12.5px/1.2 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Parts ------------------------------------------------------------- */
 #dropzone {
-  border: 2px dashed var(--line);
-  border-radius: 8px;
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 96px;
+  padding: 14px;
+  border: 1.5px dashed var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--panel-2);
   text-align: center;
   color: var(--muted);
   cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
 }
-#dropzone.drag { border-color: var(--accent); color: var(--ink); }
+#dropzone p {
+  margin: 0;
+  font: 600 12.5px/1.2 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+}
+.dz-sub { font-size: 11.5px; color: var(--muted); }
+#dropzone:hover { border-color: var(--accent-dim); background: var(--hover); }
+#dropzone:hover p { color: var(--ink); }
+#dropzone.drag { border-color: var(--accent); background: var(--accent-wash); color: var(--ink); }
+#dropzone.drag p { color: var(--accent-text); }
+/* Once there are parts the dropzone is a control, not an invitation. */
+.step[data-step="parts"]:has(#parts-list .part-item) #dropzone {
+  flex-direction: row;
+  gap: 7px;
+  min-height: 0;
+  padding: 9px 12px;
+}
+.step[data-step="parts"]:has(#parts-list .part-item) .dz-sub { display: none; }
 
 .select-status {
   padding: 12px;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-lg);
   text-align: center;
-  color: var(--ink);
-  background: var(--panel);
-  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--panel-2);
+  font-size: 12.5px;
 }
 
-#parts-list { list-style: none; margin: 14px 0 0; padding: 0; }
+#parts-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 7px; }
 .part-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px;
+  padding: 7px 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  margin-bottom: 8px;
-  background: var(--panel);
+  border-radius: var(--r);
+  background: var(--panel-2);
 }
-.part-item svg { background: var(--bg); border-radius: 4px; flex: 0 0 auto; }
-.part-item .meta { flex: 1; min-width: 0; }
-.part-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.part-item .dims { color: var(--muted); font-size: 12px; }
-.part-item .remove { color: var(--danger); background: none; border: none; cursor: pointer; font-size: 18px; }
-.part-item .duplicate { color: var(--muted); background: none; border: none; cursor: pointer; font-size: 15px; }
-.part-item .duplicate:hover { color: var(--accent); }
-
-#layout-info {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 12px;
-  color: var(--muted);
-  padding: 8px 10px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  margin-bottom: 8px;
-}
-#layout-info strong { color: var(--ink); }
-#layout-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-#layout-toolbar .spacer { flex: 1; }
-#layout-canvas, #preview-canvas {
-  width: 100%;
-  height: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  touch-action: none;
-}
-
-.errors { color: var(--danger); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
-
-#wiz-nav {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-#wiz-nav > .btn { flex: 1; }
-
-/* Final-action split button (Preview step). */
-.split-btn { position: relative; display: flex; flex: 1; }
-/* `display: flex` above overrides the HTML `hidden` attribute; restore it so the
-   button only shows on the Preview step. */
-#final-action[hidden] { display: none; }
-.split-btn #btn-do { flex: 1; }
-.split-btn.has-caret #btn-do { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.split-caret {
+.part-item svg {
   flex: 0 0 auto;
-  padding: 8px 16px;
-  font-size: 16px;
-  line-height: 1;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-left: 1px solid rgba(0, 0, 0, 0.25);
-}
-.do-menu {
-  position: absolute;
-  bottom: 100%;
-  right: 0;
-  margin: 0 0 4px;
-  padding: 4px;
-  list-style: none;
-  min-width: 200px;
-  background: var(--panel);
+  background: var(--well);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
-  z-index: 200;
+  border-radius: var(--r-sm);
 }
-.do-menu li { list-style: none; }
-/* The row is a real button so the menu is not mouse-only; the click still
-   bubbles to the <li data-action> the wizard delegates from. */
-.do-menu-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  appearance: none;
-  background: none;
-  border: 0;
-  padding: 8px 10px;
-  border-radius: 4px;
-  font: inherit;
+.part-item .meta { flex: 1; min-width: 0; }
+.part-item .name {
+  font-weight: 600;
   font-size: 13px;
-  color: var(--ink);
-  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.do-menu-item:hover { background: var(--panel-2); }
+.part-item .dims {
+  font: 500 11.5px/1.3 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.part-item .remove, .part-item .duplicate {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.part-item .remove { font-size: 18px; }
+.part-item .duplicate:hover { color: var(--accent-text); border-color: var(--line-2); background: var(--panel); }
+.part-item .remove:hover { color: var(--danger); border-color: var(--line-2); background: var(--panel); }
 
-#preview-stats { margin: 10px 0; color: var(--muted); font-size: 13px; }
+/* ---- Layout panel ------------------------------------------------------ */
+#layout-toolbar { display: flex; align-items: center; gap: 6px; }
+.canvas-wrap {
+  position: relative;
+  min-height: 240px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--canvas-bg);
+  overflow: hidden;
+}
+#layout-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+#wizard.grid .canvas-wrap { flex: 1 1 auto; min-height: 150px; }
+#layout-hint { margin: 8px 0 0; }
 
-.config-info { margin-top: 6px; }
-.config-status { margin: 0; font-size: 12px; color: var(--muted); }
-.config-status a { color: var(--accent); text-decoration: none; }
-.config-status a:hover { text-decoration: underline; }
-.config-status-default { color: var(--warn); }
-/* Deliberately understated: a reload affordance for the rare config change, not a
-   call-to-action. Nearly invisible until hovered. */
-.config-status a.config-refresh { color: var(--muted); opacity: 0.35; margin-left: 5px; font-size: 0.9em; text-decoration: none; transition: opacity 0.15s ease; }
-.config-status a.config-refresh:hover { opacity: 0.85; text-decoration: none; }
+/* ---- Preview panel ----------------------------------------------------- */
+#gen-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font: 500 11.5px/1 var(--font-ui);
+  color: var(--muted);
+}
+#gen-status:empty { display: none; }
+#gen-status::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+#preview-stats {
+  margin: 0 0 9px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--well);
+  font: 500 12.5px/1.35 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+#preview-stats:empty { display: none; }
 
 #viewer-container {
   position: relative;
   width: 100%;
-  height: 320px;
+  height: 300px;
   background: var(--canvas-bg);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--r);
   overflow: hidden;
 }
 #gcode-canvas { display: block; width: 100%; height: 100%; }
@@ -411,21 +795,208 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 16px;
+  text-align: center;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
   pointer-events: none;
 }
+#wizard.grid #preview-result { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+#wizard.grid #viewer-container { flex: 1 1 auto; height: auto; min-height: 140px; }
 
-.scrubber-container { margin-top: 10px; }
-.scrubber-header { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; gap: 8px; }
-.scrubber-op { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
-#toolpath-scrubber { width: 100%; }
+/* Shown until there is a program to look at; the generated result replaces
+   it (general sibling, so no :has() needed for the common case). */
+.panel-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 120px;
+  padding: 20px;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-lg);
+  background: var(--well);
+}
+.panel-empty strong {
+  font: 600 12px/1.2 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+.panel-empty span { font-size: 12px; max-width: 34ch; }
+#preview-result:not([hidden]) ~ .panel-empty { display: none; }
+.step[data-step="preview"]:has(#gen-status:not(:empty)) .panel-empty { display: none; }
 
-.playback-controls { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.playback-controls .speed { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-.playback-controls .speed select { width: auto; padding: 4px 6px; }
-.btn.small.playing { background: var(--ok); border-color: var(--ok); color: #08130b; }
+.scrubber-container { margin-top: 9px; }
+.scrubber-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+  font: 500 11px/1.2 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.scrubber-op { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; color: var(--ink-2); }
 
+#toolpath-scrubber {
+  width: 100%;
+  appearance: none;
+  height: 18px;
+  background: none;
+  cursor: pointer;
+}
+#toolpath-scrubber::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+}
+#toolpath-scrubber::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 16px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--accent);
+}
+#toolpath-scrubber::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line-2); }
+#toolpath-scrubber::-moz-range-thumb { width: 12px; height: 16px; border: 0; border-radius: 2px; background: var(--accent); }
+
+.playback-controls { display: flex; align-items: center; gap: 7px; margin-top: 8px; flex-wrap: wrap; }
+.playback-controls .speed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 10px/1 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.playback-controls .speed select { width: auto; padding: 4px 22px 4px 7px; font-size: 12px; }
+.btn.small.playing { background: var(--ok); border-color: var(--ok); color: var(--on-accent); }
+
+/* ---- Footer nav -------------------------------------------------------- */
+#wiz-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.nav-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+#btn-next { min-width: 132px; }
+
+#stepbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+}
+#stepbar li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px 4px 5px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: 600 11px/1 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+#stepbar li::before {
+  content: attr(data-num);
+  min-width: 18px;
+  padding: 3px 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  font: 600 10px/1 var(--font-mono);
+  text-align: center;
+  color: var(--muted);
+}
+#stepbar li:hover { color: var(--ink); background: var(--hover); }
+#stepbar li.done { color: var(--ink-2); }
+#stepbar li.done::before { content: "\2713"; color: var(--ok); border-color: var(--ok-dim); }
+#stepbar li.active {
+  color: var(--accent-text);
+  background: var(--accent-wash);
+  border-color: var(--accent-dim);
+}
+#stepbar li.active::before { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+
+/* Final action (Preview step): main action plus a caret to switch between
+   Download and Send to Google Drive (caret only when Drive is configured). */
+.split-btn { position: relative; display: flex; }
+.split-btn #btn-do { min-width: 156px; }
+.split-btn.has-caret #btn-do { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-caret {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.3);
+}
+.do-menu {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin: 0 0 5px;
+  padding: 4px;
+  list-style: none;
+  min-width: 210px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  box-shadow: 0 8px 22px var(--shadow);
+  z-index: 200;
+}
+.do-menu li { list-style: none; }
+/* A real button, so the menu is not mouse-only; the click still bubbles to
+   the <li data-action> the wizard delegates from. */
+.do-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  font: 500 12.5px/1.2 var(--font-ui);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.do-menu-item:hover { background: var(--hover); }
+
+/* Narrow (the Onshape panel, phones): one step at a time, so the nav has to
+   stack instead of squeezing four pills against two buttons. */
+@media (max-width: 620px) {
+  #wiz-nav { gap: 8px; }
+  #stepbar { flex: 1 1 100%; }
+  .nav-actions { flex: 1 1 100%; margin-left: 0; }
+  .nav-actions #btn-next, .nav-actions .split-btn { flex: 1; }
+  .split-btn #btn-do { flex: 1; min-width: 0; }
+  .brand-name { font-size: 15px; }
+}
+
+/* ---- Overlays ---------------------------------------------------------- */
 #connect-overlay {
   position: fixed;
   inset: 0;
@@ -436,19 +1007,22 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   z-index: 5000;
   padding: 20px;
 }
-/* The `display: flex` above overrides the HTML `hidden` attribute, so restore
-   hidden behavior explicitly (higher specificity than the id rule). */
-#connect-overlay[hidden] { display: none; }
 .connect-card {
-  max-width: 320px;
+  max-width: 340px;
   text-align: center;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 24px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  padding: 26px;
+  box-shadow: 0 18px 44px var(--shadow);
 }
-.connect-card h2 { margin: 0 0 10px; }
-.connect-card p { color: var(--muted); }
+.connect-card h2 {
+  margin: 0 0 10px;
+  font-size: 17px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.connect-card p { color: var(--muted); font-size: 13px; }
 .connect-card .btn { margin-top: 8px; }
 
 #debug-overlay {
@@ -460,51 +1034,89 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   overflow: auto;
   background: var(--panel);
   color: var(--ink);
-  border: 1px solid var(--accent);
-  border-radius: 6px;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--r);
   padding: 6px 8px;
-  font-size: 11px;
+  font: 500 11px/1.4 var(--font-mono);
   z-index: 9999;
 }
 #debug-overlay pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
 
-/* ---- Tools & Operations step (multi-tool jobs) -----------------------------
-   The tool table and the per-part operation lists. Rows are dense on purpose:
-   a plan is easiest to check when the whole thing fits on one screen, which in
-   full-page grid mode means one column of a five-quadrant layout. */
-.mt-heading { margin: 16px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
-.mt-heading:first-of-type { margin-top: 8px; }
+/* ---- Tools & Operations (multi-tool jobs) ------------------------------
+   The tool table and the per-part operation lists. Rows are dense on
+   purpose: a plan is easiest to check when the whole thing fits on one
+   screen, which in full-page grid mode means one column of five. */
+.mt-heading {
+  margin: 14px 0 6px;
+  font: 600 11px/1.2 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+}
+.mt-heading:first-of-type { margin-top: 2px; }
 
 #mt-tools { width: 100%; border-collapse: collapse; font-size: 12px; }
 #mt-tools th {
   text-align: left;
-  color: var(--muted);
-  font-weight: 500;
-  padding: 0 6px 4px 0;
+  padding: 0 6px 5px 0;
   border-bottom: 1px solid var(--line);
+  font: 600 9.5px/1.2 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
 }
 #mt-tools td { padding: 3px 6px 3px 0; vertical-align: middle; }
-#mt-tools input, #mt-tools select { width: 100%; }
-#mt-tools .mt-slot { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#mt-tools input, #mt-tools select { width: 100%; padding: 5px 7px; font-size: 12px; }
+#mt-tools select { padding-right: 22px; background-position: right 6px center; }
+#mt-tools .mt-slot {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .mt-narrow { width: 74px !important; }
 .mt-dim { color: var(--muted); font-size: 12px; }
 
 .mt-add { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
 .mt-add select { flex: 1; min-width: 0; }
 
+/* Save-to-library star: a shelf marker, not a call to action - amber only once the
+   bit is actually written down in the team config. */
+.mt-row-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.mt-save-bit {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 3px;
+  transition: color 0.12s;
+}
+.mt-save-bit:hover:not(:disabled) { color: var(--accent-text); }
+.mt-save-bit.saved { color: var(--accent-text); }
+.mt-save-bit:disabled { opacity: 0.35; cursor: not-allowed; }
+
 .mt-remove {
   background: none;
   border: none;
-  color: var(--danger);
+  color: var(--muted);
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
   padding: 0 4px;
 }
+.mt-remove:hover { color: var(--danger); }
 
-.mt-part { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
-.mt-part-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 6px; }
-.mt-part-actions { display: flex; gap: 6px; margin-top: 6px; }
+.mt-part {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 9px 10px;
+  margin-bottom: 9px;
+  background: var(--panel-2);
+}
+.mt-part-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin-bottom: 6px; font-weight: 600; }
+.mt-part-actions { display: flex; gap: 6px; margin-top: 7px; }
 
 .mt-ops { list-style: none; margin: 0; padding: 0; }
 .mt-op {
@@ -512,73 +1124,25 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
-  padding: 5px 0;
+  padding: 6px 0;
   border-top: 1px solid var(--line);
 }
 .mt-op:first-child { border-top: none; }
-.mt-op > select { flex: 0 1 auto; min-width: 0; }
+.mt-op > select { flex: 0 1 auto; min-width: 0; padding: 5px 22px 5px 7px; font-size: 12px; background-position: right 6px center; }
 .mt-step {
   color: var(--muted);
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   min-width: 16px;
   text-align: right;
 }
 .mt-scope { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex: 1 1 180px; }
-.mt-check { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); }
+.mt-check { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); cursor: pointer; }
 .mt-check input { margin: 0; }
-.mt-move { display: flex; gap: 2px; margin-left: auto; }
+.mt-move { display: flex; gap: 3px; margin-left: auto; }
 
-.sr-only {
-  position: absolute;
-  width: 1px; height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-}
-
-/* Full-page grid mode with the extra step: three columns, with Tools & Ops given
-   the tall middle one because an operation list is the longest thing on screen. */
-#wizard.grid.has-tools #wiz-body { grid-template-columns: 1fr 1.3fr 1fr; }
-#wizard.grid.has-tools .step[data-step="setup"]   { grid-column: 1; grid-row: 1; }
-#wizard.grid.has-tools .step[data-step="parts"]   { grid-column: 1; grid-row: 2; }
-#wizard.grid.has-tools .step[data-step="tools"]   { grid-column: 2; grid-row: 1 / span 2; }
-#wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 3; grid-row: 1; }
-#wizard.grid.has-tools .step[data-step="preview"] { grid-column: 3; grid-row: 2; }
-@media (max-width: 1200px) {
-  #wizard.grid.has-tools #wiz-body {
-    grid-template-columns: 1fr 1fr;
-    /* Not `1fr 1fr minmax(220px, auto)`: the container height is definite, so the
-       two 1fr rows only got what the 220px operations row left over - about 78px
-       each at 1280x800, i.e. a heading and a sliver. Five panels never fit a
-       viewport this size anyway (the operations list alone is 600px), so size
-       every row to its content and scroll the body once, rather than clipping
-       all five panels independently. */
-    grid-template-rows: max-content max-content max-content;
-    align-content: start;
-    overflow-y: auto;              /* the third row can exceed the viewport */
-  }
-  #wizard.grid.has-tools .step[data-step="tools"] { grid-column: 1 / span 2; grid-row: 3; }
-  #wizard.grid.has-tools .step[data-step="layout"]  { grid-column: 2; grid-row: 1; }
-  #wizard.grid.has-tools .step[data-step="preview"] { grid-column: 2; grid-row: 2; }
-}
-@media (max-width: 900px) {
-  /* #wiz-body has to be restated here, not left to the plain `.grid` single-column rule
-     below 900px: that rule is `#wizard.grid #wiz-body` (2 ids + 1 class) and loses to the
-     two-column `#wizard.grid.has-tools #wiz-body` (2 ids + 2 classes) from the 1200px
-     block above, which still matches. The result was all five panels stacked in the left
-     half with the right half of the viewport permanently blank. */
-  #wizard.grid.has-tools #wiz-body {
-    grid-template-columns: 1fr;
-    grid-template-rows: none;
-    grid-auto-rows: max-content;
-    align-content: start;
-    overflow-y: auto;
-  }
-  #wizard.grid.has-tools .step[data-step] { grid-column: 1; grid-row: auto; }
-}
-
-/* What a part needs, and the button that supplies it. Sits ABOVE the operation list:
-   you cannot plan a part with tools you have not chosen yet. */
+/* What a part needs, and the button that supplies it. Sits ABOVE the
+   operation list: you cannot plan a part with tools you have not chosen. */
 .mt-drills {
   display: flex;
   flex-wrap: wrap;
@@ -587,14 +1151,14 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   margin: 6px 0;
   padding: 6px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel-2);
-  font-size: 12px;
+  border-radius: var(--r);
+  background: var(--well);
+  font-size: 11.5px;
 }
 .mt-drills .btn { margin-left: auto; }
 .mt-have { color: var(--ok); }
 .mt-have::before { content: "\2713\00a0"; }
-.mt-need { color: var(--accent); }
+.mt-need { color: var(--accent-text); }
 .mt-need::before { content: "+ "; }
 .mt-warn { color: var(--danger); }
 
@@ -603,25 +1167,25 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  font-size: 12px;
+  gap: 5px;
+  font-size: 11.5px;
   color: var(--muted);
-  padding: 6px 8px;
-  margin-bottom: 8px;
+  padding: 7px 9px;
+  margin-bottom: 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
+  border-radius: var(--r);
+  background: var(--well);
 }
 .mt-runorder .mt-chip {
-  color: var(--accent-ink);
+  color: var(--on-accent);
   background: var(--accent);
   border-radius: 999px;
-  padding: 1px 7px;
-  font-size: 11px;
+  padding: 1px 8px;
+  font: 600 10.5px/1.5 var(--font-mono);
 }
-.mt-runorder .mt-step-name { color: var(--ink); }
+.mt-runorder .mt-step-name { color: var(--ink-2); }
 .mt-runorder .mt-arrow { opacity: 0.5; }
-.mt-runorder .mt-changes { margin-left: auto; white-space: nowrap; }
+.mt-runorder .mt-changes { margin-left: auto; white-space: nowrap; font-family: var(--font-mono); }
 
 /* What an operation will cut, shown on its own row. */
 .mt-effect {
@@ -631,49 +1195,82 @@ fieldset.field { border: 1px solid var(--line); border-radius: 6px; padding: 8px
   padding-left: 22px;
 }
 
-/* ---------------------------------------------------------------------------
-   Custom tube designer (static/tube_designer.js)
-   Lives in the Parts quadrant, which is otherwise idle for a generated tube
+/* ---- Custom tube designer (static/tube_designer.js) --------------------
+   Lives in the Parts panel, which is otherwise idle for a generated tube
    pattern. Dense like the operations editor, for the same reason: the whole
    design should be checkable without scrolling. */
-.td-palette { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
-.td-palette .field { flex: 1 1 140px; min-width: 0; margin: 0; }
+.td-palette { display: flex; flex-wrap: wrap; gap: 9px; align-items: flex-end; }
+.td-palette .field { flex: 1 1 132px; min-width: 0; margin: 0; }
 
-#td-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
+#td-list { list-style: none; margin: 9px 0 0; padding: 0; font-size: 12px; }
 .td-item {
   display: flex;
   gap: 6px;
   align-items: center;
-  padding: 4px 6px;
-  border-top: 1px solid var(--line);
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-top-color: var(--line);
   cursor: pointer;
 }
-.td-item:first-child { border-top: none; }
-.td-item-label { flex: 1 1 auto; min-width: 0; }
-.td-item.selected { background: var(--panel); outline: 1px solid var(--accent); border-radius: 5px; }
-/* Refused by the SERVER, not by anything in the browser - the message sits in
-   #td-errors and the feature is drawn dashed on the canvas. */
+.td-item:first-child { border-top-color: transparent; }
+.td-item:hover { background: var(--panel-2); }
+.td-item-label { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.td-num { color: var(--muted); font-family: var(--font-mono); }
+.td-item.selected {
+  background: var(--accent-wash);
+  border-color: var(--accent-dim);
+  border-radius: var(--r);
+}
+/* Refused by the SERVER, not by anything in the browser - the message sits
+   in #td-errors and the feature is drawn dashed on the canvas. */
 .td-item.bad .td-item-label { color: var(--danger); }
 .td-empty { color: var(--muted); padding: 6px 0; }
 .td-remove {
   background: none;
   border: none;
-  color: var(--danger);
+  color: var(--muted);
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
   padding: 0 4px;
 }
+.td-remove:hover { color: var(--danger); }
 
 .td-props {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 10px;
-  margin-top: 8px;
-  padding: 8px;
+  gap: 7px 10px;
+  margin-top: 9px;
+  padding: 9px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
+  border-radius: var(--r);
+  background: var(--panel-2);
 }
-.td-prop { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--muted); }
-.td-prop input, .td-prop select { width: 92px; font-size: 12px; }
+.td-prop {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font: 600 9.5px/1 var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+}
+.td-prop input, .td-prop select { width: 96px; font-size: 12px; padding: 5px 7px; }
+.td-prop select { padding-right: 22px; background-position: right 6px center; }
+
+/* ---- Utilities --------------------------------------------------------- */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

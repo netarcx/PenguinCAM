@@ -78,14 +78,27 @@ Done! 🎉
 
 ### Z Zeroing
 
-⚠️ **CRITICAL: Z=0 is at the SACRIFICE BOARD (bottom), NOT the material top!**
+⚠️ **CRITICAL: by default Z=0 is at the SACRIFICE BOARD (bottom), NOT the material
+top. Read the program header before you touch off** - it names the surface that job was
+generated for:
 
-**Setup:**
+```gcode
+(Z-AXIS REFERENCE:)
+(  Z=0 is at SACRIFICE BOARD surface)      <- or TOP OF STOCK
+```
+
+**Setup (default, sacrifice board):**
 1. Jog end mill to location outside the raw material
 2. Use touch plate to set Z on the top of the sacrifice board
 3. Verify Z shows as zero in Mach 4.  This should not need to be changed, but nonetheless should be verified before cutting parts.
 
-**Why sacrifice board?**
+**Setup (jobs generated with `Zero Z on: Stock top`):**
+1. Jog the end mill over the material
+2. Touch off on the **top face of the stock** and set Z=0 there
+3. Every cutting move in that program is negative; the deepest is the thickness plus
+   the overcut
+
+**Why sacrifice board (the default)?**
 - ✅ Guaranteed cut-through (0.02" overcut built in)
 - ✅ Same Z zero point for all jobs
 - ✅ No math when material thickness changes

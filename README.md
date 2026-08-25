@@ -150,8 +150,11 @@ Tick **Use several tools** on the Setup step to plan an operation list per part 
 the small holes with a small cutter, clear pockets and profile with a big one, break the
 edges with a V-bit. The program stops and tells you what to swap at each change.
 
-**At every tool change: swap the tool, re-zero Z to the sacrifice board, and leave X and Y
-alone.** See [Multi-Tool Operations](docs/MULTI_TOOL_GUIDE.md).
+**At every tool change: swap the tool, re-zero Z to the job's zero surface, and leave X
+and Y alone.** That is the sacrifice board unless the job was generated with *Zero Z on:
+Stock top* - each pause names the surface, as does the program header. See
+[Multi-Tool Operations](docs/MULTI_TOOL_GUIDE.md) and
+[the Z coordinate system](docs/Z_COORDINATE_SYSTEM.md).
 
 ### Running on the CNC
 
