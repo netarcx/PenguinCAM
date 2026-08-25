@@ -173,6 +173,127 @@ class SavedToolsWriteTest(unittest.TestCase):
         self.assertIn('No local team config', message)
 
 
+class SavedToolsPreserveTest(unittest.TestCase):
+    """What a save must NOT destroy.
+
+    The round-trip guard compares parsed keys, so it cannot see any of these: comments,
+    entries the app's own reader throws away, or fields it does not understand. Every
+    one of them was silently deleted by a save that had nothing to do with it, and every
+    one returned HTTP 200 "Saved".
+    """
+
+    ORIGINAL = '\n'.join([
+        'version: 2',
+        'default_machine: m1',
+        'machines:',
+        '  m1:',
+        '    name: "M1"',
+        '',
+        '# ==================================================================',
+        "# The team's own documentation, written ABOVE the block",
+        '# ==================================================================',
+        local_mode.TOOLS_BLOCK_SENTINEL,
+        'tools:',
+        '  - name: "The expensive 8mm carbide"',
+        '    diamter: "8mm"',
+        '  - name: "Shop 6mm"',
+        '    diameter: "6mm"',
+        '    flutes: 2',
+        '    type: endmill',
+        '    vendor: "Harvey 993293"',
+        '    notes: "chipped corner - regrind"',
+        '',
+        '# ------------------------------------------------------------------',
+        '# Notes the team wrote BELOW the block (notebook p.42)',
+        'integrations:',
+        '  google_drive:',
+        '    enabled: false',
+        ''])
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='bitskeep_')
+        self.path = os.path.join(self.dir, 'PenguinCAM-config.yaml')
+        io.open(self.path, 'w', encoding='utf-8').write(self.ORIGINAL)
+        self._env = os.environ.get(local_mode.CONFIG_ENV_VAR)
+        os.environ[local_mode.CONFIG_ENV_VAR] = self.path
+
+    def tearDown(self):
+        if self._env is None:
+            os.environ.pop(local_mode.CONFIG_ENV_VAR, None)
+        else:
+            os.environ[local_mode.CONFIG_ENV_VAR] = self._env
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _save_an_unrelated_bit(self):
+        tools = local_mode.read_raw_tools()
+        tools.append({'name': 'Brand new', 'diameter': '1/8 in', 'flutes': 1,
+                      'type': 'endmill'})
+        ok, detail = local_mode.save_tools_to_config(tools)
+        self.assertTrue(ok, msg=detail)
+        return io.open(self.path, encoding='utf-8').read()
+
+    def test_an_entry_the_reader_cannot_parse_is_kept(self):
+        """A typo'd key costs that bit its place in the UI - not its place in the file."""
+        text = self._save_an_unrelated_bit()
+        self.assertIn('The expensive 8mm carbide', text)
+        self.assertIn('diamter', text, 'the typo itself must survive for someone to fix')
+
+    def test_fields_the_app_does_not_understand_are_kept(self):
+        text = self._save_an_unrelated_bit()
+        for field in ('vendor', 'Harvey 993293', 'notes', 'chipped corner'):
+            self.assertIn(field, text)
+
+    def test_comments_above_and_below_the_block_are_kept(self):
+        text = self._save_an_unrelated_bit()
+        self.assertIn("own documentation, written ABOVE", text)
+        self.assertIn('Notes the team wrote BELOW the block', text)
+
+    def test_the_block_stays_where_the_team_put_it(self):
+        """Appending at the end instead of replacing in place is how the notes below it
+        came to be deleted, and it makes a needlessly large diff."""
+        text = self._save_an_unrelated_bit()
+        self.assertLess(text.index('\ntools:'), text.index('\nintegrations:'))
+
+    def test_everything_else_in_the_config_is_untouched(self):
+        text = self._save_an_unrelated_bit()
+        before = {k: v for k, v in yaml.safe_load(self.ORIGINAL).items() if k != 'tools'}
+        after = {k: v for k, v in yaml.safe_load(text).items() if k != 'tools'}
+        self.assertEqual(before, after)
+
+    def test_a_sequence_at_column_zero_is_handled(self):
+        """`tools:` followed by dashes in column 0 is ordinary YAML. Removing only the
+        `tools:` line orphaned the sequence, and every save failed from then on."""
+        io.open(self.path, 'w', encoding='utf-8').write('\n'.join([
+            'version: 2', 'default_machine: m1', 'machines:', '  m1:', '    name: "M1"',
+            'tools:', '- name: "Old"', '  diameter: "6mm"', '  flutes: 1',
+            '  type: endmill', '']))
+        ok, detail = local_mode.save_tools_to_config(
+            [{'name': 'New', 'diameter': '1/8 in', 'flutes': 2, 'type': 'endmill'}])
+        self.assertTrue(ok, msg=detail)
+        tools = yaml.safe_load(io.open(self.path, encoding='utf-8').read())['tools']
+        self.assertEqual([t['name'] for t in tools], ['New'])
+
+    def test_line_endings_and_permissions_survive(self):
+        """A config edited on Windows has CRLF; one chmod'd 600 is 600 on purpose."""
+        io.open(self.path, 'w', encoding='utf-8', newline='').write(
+            'version: 2\r\ndefault_machine: m1\r\nmachines:\r\n  m1:\r\n    name: "M1"\r\n')
+        os.chmod(self.path, 0o600)
+        ok, detail = local_mode.save_tools_to_config(
+            [{'name': 'A', 'diameter': '6mm', 'flutes': 1, 'type': 'endmill'}])
+        self.assertTrue(ok, msg=detail)
+        raw = io.open(self.path, 'rb').read()
+        self.assertEqual(raw.count(b'\n'), raw.count(b'\r\n'), 'mixed line endings')
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_a_symlinked_config_is_followed_not_replaced(self):
+        real = os.path.join(self.dir, 'real.yaml')
+        os.rename(self.path, real)
+        os.symlink(real, self.path)
+        self._save_an_unrelated_bit()
+        self.assertTrue(os.path.islink(self.path), 'the symlink was replaced by a file')
+        self.assertIn('Brand new', io.open(real, encoding='utf-8').read())
+
+
 class SavedToolsRouteTest(unittest.TestCase):
     """The save/delete endpoints the star button calls."""
 

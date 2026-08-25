@@ -148,14 +148,21 @@ class ZDatumProgramTest(unittest.TestCase):
         return _build_program(self.dxf, self.THICK, datum, chamfer)
 
     def assertSameMotion(self, board_gcode, top_gcode, thickness):
-        """Every Z word shifted by exactly `thickness`; everything else identical."""
+        """Every Z word shifted by exactly `thickness`; everything else identical.
+
+        Note what is NOT skipped: a line that is byte-identical in both programs. That
+        used to short-circuit the comparison, which quietly excused the one failure this
+        whole file exists to catch - a path computing Z from absolute zero emits the SAME
+        Z on both datums, so identical lines are exactly where that bug hides. Only
+        comments are skipped, because they carry the datum's own words by design.
+        """
         board_lines = board_gcode.splitlines()
         top_lines = top_gcode.splitlines()
         self.assertEqual(len(board_lines), len(top_lines),
                          'the two datums produced different numbers of lines')
         compared = 0
         for n, (b, t) in enumerate(zip(board_lines, top_lines), start=1):
-            if b == t or b.lstrip().startswith('('):
+            if b.lstrip().startswith('('):
                 continue    # comments carry the datum's own words; checked separately
             self.assertEqual(Z_WORD.sub('Z*', b), Z_WORD.sub('Z*', t),
                              f'line {n} differs in something other than Z')
@@ -164,6 +171,10 @@ class ZDatumProgramTest(unittest.TestCase):
                 self.assertAlmostEqual(
                     float(zb) - float(zt), thickness, delta=1.01e-4,
                     msg=f'line {n}: Z{zb} vs Z{zt} is not a {thickness:.4f}" shift')
+        # `compared > 20` is load-bearing: with the identical-line skip gone, a pair of
+        # programs that never shifted at all would reach this with compared == 0 rather
+        # than passing silently. How deep is deep enough is asserted separately, against
+        # the header's own ZMIN, by test_zmin_matches_the_deepest_move.
         self.assertGreater(compared, 20, 'suspiciously few Z moves compared')
 
     def test_same_motion_renumbered(self):

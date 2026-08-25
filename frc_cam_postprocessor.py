@@ -275,6 +275,13 @@ class FRCPostProcessor:
         self.sacrifice_board_depth = config.sacrifice_board_depth  # How far to cut into sacrifice board (inches)
         self.clearance_height = config.clearance_height  # Clearance above material top for rapid moves (inches)
         self.z_datum = normalize_z_datum(z_datum if z_datum is not None else config.z_datum)
+        # True only when the loaded cutter actually has a CONE at its tip - i.e. a twist
+        # drill. It decides whether a through hole gets the point-length allowance that
+        # lets the full diameter emerge. The single-tool flow knows nothing about tool
+        # types (it is given a diameter and nothing else), so this is set by the paths
+        # that do know: the drilled tube pattern below, and tooling.py's drill path,
+        # which calls _generate_drill_gcode directly.
+        self.tool_has_drill_point = False
         self._apply_z_frame()   # sets material_top, retract_height, cut_depth
 
         # True when the tool is parked at safe height (above the clearance plane) and the
@@ -1111,6 +1118,14 @@ class FRCPostProcessor:
             offsetX, offsetY = -minX, -maxY
         elif origin_corner == 'top-right':
             offsetX, offsetY = -maxX, -maxY
+        else:
+            # No else meant offsetX was simply never assigned, and the next line raised
+            # UnboundLocalError - a 500 reading "cannot access local variable 'offsetX'"
+            # for what is really "I don't know that corner". Every other corner-shaped
+            # input in this program is whitelisted; this one wasn't.
+            raise ValueError(
+                f"Unknown origin corner {origin_corner!r}: expected 'bottom-left', "
+                f"'bottom-right', 'top-left' or 'top-right'")
 
         # Apply caller-supplied placement offset (multi-part job layout). After the
         # selected corner is normalized to (0,0), shift the whole part to its sheet
@@ -1389,6 +1404,9 @@ class FRCPostProcessor:
         # Remembered so the program header can say "drill" rather than "end mill", and so
         # the preview can draw the right thing.
         self.tube_pattern_mode = mode
+        # A drilled pattern is cut with a twist drill (the generator refuses to combine
+        # it with any milling operation), so its through holes need the point allowance.
+        self.tool_has_drill_point = (mode == 'holes')
 
         print(f"\nLoaded tube pattern ({mode}): {len(self.holes)} holes, "
               f"{len(self.pockets)} lightening pockets")
@@ -1747,7 +1765,9 @@ class FRCPostProcessor:
                 for i, hole, needs_peck in cleared_holes:
                     center = hole['center']
                     diameter = hole['diameter']
-                    gcode.extend(self._generate_hole_gcode(center[0], center[1], diameter, needs_peck_drill=needs_peck))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda c=center, d=diameter, pk=needs_peck:
+                        self._generate_hole_gcode(c[0], c[1], d, needs_peck_drill=pk)))
                     gcode.append("")
 
             # Process contoured holes (with optional pause for fixturing)
@@ -1809,7 +1829,8 @@ class FRCPostProcessor:
                 gcode.append("(--- Fully cleared pockets ---)")
                 for i, pocket, area in cleared_pockets:
                     gcode.append(f"(Pocket {i} - {area:.3f} sq in)")
-                    gcode.extend(self._generate_pocket_gcode(pocket))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda pocket=pocket: self._generate_pocket_gcode(pocket)))
                     gcode.append("")
 
             # Process contoured pockets (with optional pause for fixturing)
@@ -2305,13 +2326,20 @@ class FRCPostProcessor:
                 gcode.append(note)
             gcode.append("")
 
-            gcode.append("(Z-AXIS REFERENCE:)")
-            gcode.append("(  Z=0 is at " + ("TOP OF STOCK" if self.z_datum == Z_DATUM_STOCK_TOP
-                                            else "SACRIFICE BOARD surface") + ")")
-            gcode.append(f"(  Material top: Z={self.material_top:.4f}\")")
-            gcode.append(f"(  Cuts {self.sacrifice_board_depth:.4f}\" into sacrifice board)")
-            gcode.append(f"(  ** ZERO Z TO {self.z_zero_surface().upper()}, VERIFY BEFORE RUNNING **)")
+        # The Z reference goes in EVERY program, layered or not: it is the one thing the
+        # operator has to match on the machine, and getting it wrong puts every cut a
+        # material thickness out.
+        if is_multilayer:
+            gcode.append(f"(ZMIN: {self.cut_depth:.4f}\")")
+            gcode.append(f"(Retract Z: {self.retract_height:.4f}\")")
             gcode.append("")
+        gcode.append("(Z-AXIS REFERENCE:)")
+        gcode.append("(  Z=0 is at " + ("TOP OF STOCK" if self.z_datum == Z_DATUM_STOCK_TOP
+                                        else "SACRIFICE BOARD surface") + ")")
+        gcode.append(f"(  Material top: Z={self.material_top:.4f}\")")
+        gcode.append(f"(  Cuts {self.sacrifice_board_depth:.4f}\" into sacrifice board)")
+        gcode.append(f"(  ** ZERO Z TO {self.z_zero_surface().upper()}, VERIFY BEFORE RUNNING **)")
+        gcode.append("")
 
         # Modal G-code setup
         gcode.append("G90 G94 G91.1 G40 G49 G17")
@@ -2929,7 +2957,9 @@ class FRCPostProcessor:
                     center = hole['center']
                     diameter = hole['diameter']
                     needs_peck = hole.get('needs_peck_drill', False)
-                    gcode.extend(self._generate_hole_gcode(center[0], center[1], diameter, needs_peck_drill=needs_peck))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda c=center, d=diameter, pk=needs_peck:
+                        self._generate_hole_gcode(c[0], c[1], d, needs_peck_drill=pk)))
 
                 # Process contoured holes
                 for hole in contoured_holes:
@@ -2957,7 +2987,8 @@ class FRCPostProcessor:
 
                 # Process cleared pockets
                 for pocket in cleared_pockets:
-                    gcode.extend(self._generate_pocket_gcode(pocket))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda pocket=pocket: self._generate_pocket_gcode(pocket)))
 
                 # Process contoured pockets
                 for pocket in contoured_pockets:
@@ -2974,7 +3005,8 @@ class FRCPostProcessor:
                     # For now, these are always cleared (no contouring for rings/grooves)
                     # In the future, could add size threshold check here too
                     gcode.append(f"(Ring/groove pocket with {len(pocket_poly.interiors)} islands)")
-                    gcode.extend(self._generate_pocket_gcode_from_polygon(pocket_poly))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda pocket_poly=pocket_poly: self._generate_pocket_gcode_from_polygon(pocket_poly)))
 
             # Restore original cut depth
             self.cut_depth = saved_cut_depth
@@ -3033,7 +3065,9 @@ class FRCPostProcessor:
                     diameter = hole['diameter']
                     needs_peck = hole.get('needs_peck_drill', False)
                     gcode.append(f"(Hole {i} - {diameter:.3f}\" diameter)")
-                    gcode.extend(self._generate_hole_gcode(center[0], center[1], diameter, needs_peck_drill=needs_peck))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda c=center, d=diameter, pk=needs_peck:
+                        self._generate_hole_gcode(c[0], c[1], d, needs_peck_drill=pk)))
                     gcode.append("")
 
                 # Process contoured holes
@@ -3064,7 +3098,8 @@ class FRCPostProcessor:
                 # Process cleared pockets
                 for i, pocket in enumerate(cleared_pockets, 1):
                     gcode.append(f"(Pocket {i})")
-                    gcode.extend(self._generate_pocket_gcode(pocket))
+                    gcode.extend(self._clear_in_depth_levels(
+                        lambda pocket=pocket: self._generate_pocket_gcode(pocket)))
                     gcode.append("")
 
                 # Process contoured pockets
@@ -3176,6 +3211,59 @@ class FRCPostProcessor:
     #: Included point angle of a standard twist drill, degrees. 118 is the general-purpose
     #: HSS grind; 135 is the split-point/harder-material grind.
     DEFAULT_DRILL_POINT_ANGLE = 118.0
+
+    def _clear_in_depth_levels(self, emit):
+        """Run a clearing toolpath once per depth level, never biting deeper than the
+        depth-per-pass limit.
+
+        Contour and tab-removal passes step down; pocket and bore CLEARING did not. The
+        helix descended to full depth and the sweep then crossed the whole floor in
+        virgin stock, so a 0.5" pocket took a 0.5" axial bite however small the operator
+        set "max depth per pass" - the same full-thickness bite in a sibling function
+        that snapped a 1/8" cutter in the tabs on 2026-08-24, and the exact thing
+        docs/quick-reference-card.md promises this setting prevents for "profiles AND
+        pockets".
+
+        Rather than teach four different clearing strategies to step down, this hands
+        each of them a THIN SLAB: material_top and cut_depth are narrowed to one level,
+        so every generator's own arithmetic - helix start, ramp angle, clearing Z,
+        re-entry - lands on that slab with no change inside it. `emit` is called once
+        per level and must return a list of G-code lines.
+        """
+        total_depth = self.material_top - self.cut_depth
+        levels = self.passes_for_depth(total_depth, self.max_slotting_depth)
+        if levels <= 1:
+            return emit()
+
+        saved_top, saved_bottom = self.material_top, self.cut_depth
+        step = total_depth / levels
+        gcode = [f"(Depth levels: {levels} at {step:.4f}\" each, "
+                 f"max {self.max_slotting_depth:.4f}\" per pass)"]
+        try:
+            for level in range(1, levels + 1):
+                # Each level is its own slab: the previous floor is this pass's "top", so
+                # the entry ramp descends one step through air it has already cut.
+                self.material_top = saved_top - (level - 1) * step
+                self.cut_depth = saved_top - level * step
+                gcode.append(f"(Depth level {level}/{levels} - cutting to "
+                             f"Z{self.cut_depth:.4f})")
+                gcode.extend(emit())
+        finally:
+            self.material_top, self.cut_depth = saved_top, saved_bottom
+        return gcode
+
+    @staticmethod
+    def passes_for_depth(total: float, limit: float) -> int:
+        """How many passes of at most `limit` cover `total`, tolerant of float dust.
+
+        Plain ceil() on a value built from the Z frame flips between the two Z datums:
+        `material_top - cut_depth` is exact arithmetic on one and a rounded subtraction
+        on the other, so a depth sitting exactly on a multiple of the limit can come out
+        one ULP over and buy a whole extra pass. The tolerance is far below the four
+        decimals G-code carries, so a genuine overshoot still rounds up."""
+        if total <= 0 or limit <= 0:
+            return 1
+        return max(1, int(math.ceil(total / limit - 1e-9)))
 
     @staticmethod
     def drill_point_length(diameter: float, point_angle: float = DEFAULT_DRILL_POINT_ANGLE) -> float:
@@ -3352,18 +3440,25 @@ class FRCPostProcessor:
         # entirely (a zero-radius arc I0 J0 is degenerate and errors on many controllers).
         pure_drill = final_toolpath_radius <= self.hole_size_tolerance
 
-        if pure_drill and final_depth <= 0:
+        if pure_drill and self.is_through_cut(final_depth):
             # A twist drill cuts a CONE, not a flat bottom. Stopping the tip at cut_depth
             # leaves the hole full diameter only where the point has fully emerged, so a
             # 0.201 in hole through a 1/16 in wall exited as a 0.027 in pinhole - nothing
             # a #10 screw could pass, which is the whole purpose of the pattern.
             # _generate_drill_gcode has always done this; this path had not, and this path
             # is the one the tube patterns use.
-            point = self.drill_point_length(diameter)
+            # ...but only for a tool that HAS a point. An end mill cuts flat, so the
+            # allowance would be 0.075 in of gratuitous depth into the spoilboard - and
+            # tooling.py's ZMIN only accounts for it on a drill, so the header would
+            # under-report the program's own deepest move.
+            point = self.drill_point_length(diameter) if self.tool_has_drill_point else 0.0
             final_depth = final_depth - point
             gcode.append(f"(Peck drill straight down - hole is tool-sized, no lateral clearing)")
-            gcode.append(f"(Through hole: plus {point:.4f} in so the point clears "
-                         f"and the exit is full diameter)")
+            if point:
+                gcode.append(f"(Through hole: plus {point:.4f} in so the point clears "
+                             f"and the exit is full diameter)")
+            else:
+                gcode.append("(Through hole: flat-bottomed cutter, no point allowance)")
         elif pure_drill:
             gcode.append(f"(Peck drill straight down - hole is tool-sized, no lateral clearing)")
             gcode.append(f"(Blind hole: depth measured to the drill tip)")
@@ -4460,7 +4555,7 @@ class FRCPostProcessor:
         # Calculate number of passes needed based on material thickness and max slotting depth
         # Total depth = from material top to cut depth (which is below Z=0)
         total_cut_depth = self.material_top - self.cut_depth  # e.g., 0.25 - (-0.02) = 0.27"
-        num_passes = max(1, int(math.ceil(total_cut_depth / self.max_slotting_depth)))
+        num_passes = self.passes_for_depth(total_cut_depth, self.max_slotting_depth)
 
         if num_passes > 1:
             actual_depth_per_pass = total_cut_depth / num_passes
@@ -4824,8 +4919,7 @@ class FRCPostProcessor:
             tab_top = min(self.material_top, self.cut_depth + self.tab_height)
         total_tab_depth = max(0.0, tab_top - self.cut_depth)
         depth_limit = getattr(self, 'max_slotting_depth', None) or total_tab_depth
-        tab_passes = max(1, int(math.ceil(total_tab_depth / depth_limit))) \
-            if total_tab_depth > 0 and depth_limit > 0 else 1
+        tab_passes = self.passes_for_depth(total_tab_depth, depth_limit)
         tab_step = total_tab_depth / tab_passes
 
         gcode.append("")
@@ -5767,6 +5861,14 @@ class FRCPostProcessor:
             PostProcessorResult with gcode string and stats
         """
         self._force_board_datum_for_tube()
+        # The second face is machined from a processor of its own, built by the caller -
+        # so forcing the datum on `self` alone left face 2 on whatever the team config
+        # said. Its toolpath is lifted into place by (tube_height - wall thickness),
+        # arithmetic that only holds from the board datum, so a stock-top setting put
+        # every face-2 feature a full wall thickness below the wall: pockets cut in the
+        # tube cavity, holes opened in air.
+        if second_face_pp is not None:
+            second_face_pp._force_board_datum_for_tube()
 
         # Squaring the end and cutting to length are MILLING operations: they feed the
         # tool sideways, full width, a quarter inch deep. A drilled hole pattern has a

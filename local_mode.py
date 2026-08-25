@@ -166,11 +166,40 @@ def config_is_writable() -> bool:
 
 
 def _yaml_quoted(value) -> str:
-    """A double-quoted YAML scalar. Diameters are the reason this exists: 1/4" ends in
-    the quote character, and pasting it raw produced `diameter: "1/4""`, which is not
-    YAML at all."""
-    text = str(value).replace('\\', '\\\\').replace('"', '\\"')
+    """A double-quoted YAML scalar.
+
+    Diameters are why it exists: 1/4" ends in the quote character, and pasting it raw
+    produced `diameter: "1/4""`, which is not YAML at all. Control characters matter for
+    the same reason and are worse: a newline inside a saved bit's name put a line at
+    column 0 in the middle of the block, which then stopped _strip_tools_block early, so
+    every later save AND delete failed - a tools panel bricked until someone edited the
+    YAML by hand."""
+    text = (str(value).replace('\\', '\\\\').replace('"', '\\"')
+            .replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t'))
+    # Any other control character would also end the scalar (or make an unreadable
+    # file); YAML's \xNN escape keeps them inside the quotes where they belong.
+    text = ''.join(ch if ch >= ' ' and ch != '\x7f' else '\\x%02x' % ord(ch)
+                   for ch in text)
     return f'"{text}"'
+
+
+def _yaml_scalar(value) -> str:
+    """A YAML scalar for a value of unknown type. Numbers and booleans stay bare;
+    anything else is quoted, and anything structured is dumped in flow style so a
+    hand-written mapping or list on a bit survives a rewrite."""
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f'{value:g}' if value == value and value not in (float('inf'), float('-inf')) \
+               else _yaml_quoted(value)
+    if value is None:
+        return 'null'
+    if isinstance(value, (dict, list, tuple)):
+        import yaml as _yaml
+        return _yaml.safe_dump(value, default_flow_style=True).strip().rstrip('...').strip()
+    return _yaml_quoted(value)
 
 
 def _render_tools_block(tools) -> str:
@@ -183,56 +212,107 @@ def _render_tools_block(tools) -> str:
     if not tools:
         lines.append('  []')
         return '\n'.join(lines) + '\n'
+    known = ('name', 'diameter', 'flutes', 'type', 'included_angle')
     for tool in tools:
         diameter = tool.get('diameter_text') or tool.get('diameter')
         lines.append(f'  - name: {_yaml_quoted(tool.get("name", ""))}')
         lines.append(f'    diameter: {_yaml_quoted(diameter)}')
-        lines.append(f'    flutes: {int(tool.get("flutes", 1))}')
-        lines.append(f'    type: {tool.get("type", "endmill")}')
-        if tool.get('type') == 'vbit' or tool.get('included_angle') is not None:
-            angle = tool.get('included_angle')
-            if angle is not None:
-                lines.append(f'    included_angle: {float(angle):g}')
+        lines.append(f'    flutes: {_yaml_scalar(tool.get("flutes", 1))}')
+        lines.append(f'    type: {_yaml_quoted(tool.get("type", "endmill"))}')
+        angle = tool.get('included_angle')
+        if angle is not None:
+            lines.append(f'    included_angle: {_yaml_scalar(angle)}')
+        # Anything else the team wrote on this bit by hand - a vendor part number, a
+        # stickout someone measured, a note that it is chipped. The app does not use
+        # these, which is exactly why it must not eat them: rewriting the block from
+        # the fields we happen to understand silently deleted them.
+        for key in sorted(k for k in tool if k not in known and k not in
+                          ('id', 'source', 'diameter_text')):
+            lines.append(f'    {key}: {_yaml_scalar(tool[key])}')
     return '\n'.join(lines) + '\n'
 
 
-def _strip_tools_block(text: str) -> str:
-    """Remove an existing top-level `tools:` block from the config text, leaving
-    everything else byte-for-byte.
+def _tools_block_span(text: str):
+    """Where an existing top-level `tools:` block starts and ends, or None.
 
-    Only ONE comment line is ever taken with it: the sentinel this module writes. The
-    first version of this swallowed every comment line above `tools:`, which on a config
-    whose saved-bits section is preceded by a page of hand-written documentation meant
-    the second save deleted the documentation. A managed block gets to own exactly the
-    line it wrote."""
+    The block is its `tools:` line, the sentinel comment directly above it if this
+    module wrote one, and every indented or `- ` line that follows. It stops at the
+    first line in column 0 that is not part of the sequence - INCLUDING a comment,
+    because a comment there is the team's, not ours. Two versions of this got that
+    wrong in opposite directions: the first swallowed the documentation above the
+    block, the second swallowed the notes below it.
+    """
     lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if re.match(r'^tools\s*:', line):
+        if re.match(r'^(\ufeff)?["\']?tools["\']?\s*:', line):
             start = i
             break
     if start is None:
-        return text
+        return None
+
     head = start
     if head > 0 and lines[head - 1].rstrip('\n') == TOOLS_BLOCK_SENTINEL:
         head -= 1
-        # Blank lines between the previous content and our own block are ours too, so
-        # repeated saves do not push the file down one line at a time.
-        while head > 0 and not lines[head - 1].strip():
-            head -= 1
+
+    def belongs(line):
+        # An indented line, or a sequence entry written at column 0 (`- name: ...`),
+        # which is ordinary YAML style and used to orphan the sequence when only the
+        # `tools:` line was removed.
+        return bool(line) and (line[0].isspace() or line.lstrip().startswith('- '))
+
     end = start + 1
     while end < len(lines):
-        line = lines[end]
-        # The block ends at the next line that starts in column 0 and is not a comment,
-        # a blank, or part of the sequence.
-        if line.strip() and not line[0].isspace() and not line.lstrip().startswith('#'):
+        if not lines[end].strip():
+            look = end
+            while look < len(lines) and not lines[look].strip():
+                look += 1
+            if look < len(lines) and belongs(lines[look]):
+                end = look
+                continue
             break
-        end += 1
-    # Trailing blank lines after the block belong to it too, so repeated saves do not
-    # accumulate empty lines.
-    while end < len(lines) and not lines[end].strip():
-        end += 1
-    return ''.join(lines[:head] + lines[end:])
+        if belongs(lines[end]):
+            end += 1
+            continue
+        break
+    return head, end, lines
+
+
+def _replace_tools_block(text: str, block: str) -> str:
+    """Put `block` where the existing `tools:` block is, or append it if there is none.
+
+    Replacing in place rather than stripping and appending keeps the block where the
+    team put it - moving it to the end of the file is both a surprising diff and how
+    the notes underneath it came to be deleted.
+    """
+    span = _tools_block_span(text)
+    if span is None:
+        body = text.rstrip('\n') + '\n' if text.strip() else ''
+        return body + '\n' + block
+    head, end, lines = span
+    return ''.join(lines[:head]) + block + ''.join(lines[end:])
+
+
+def read_raw_tools():
+    """The `tools:` list exactly as the config file has it, entries and all.
+
+    Callers edit THIS and hand it back, so an entry the app cannot parse - a typo'd
+    key, an unknown tool type, a bit someone is still filling in - survives a save that
+    had nothing to do with it. Rebuilding the block from the app's own validated view
+    quietly deleted every one of those, and it was the next unrelated save that did it.
+    Returns [] when there is no readable list.
+    """
+    path = find_local_config_path()
+    if not path:
+        return []
+    import yaml
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = yaml.safe_load(fh.read())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    raw = (data or {}).get('tools') if isinstance(data, dict) else None
+    return [dict(e) for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
 
 
 def save_tools_to_config(tools):
@@ -257,8 +337,11 @@ def save_tools_to_config(tools):
     import yaml
 
     try:
-        with open(path, 'r', encoding='utf-8') as fh:
-            original = fh.read()
+        # newline='' keeps the file's own line endings visible instead of translating
+        # them to \n, so the rewrite can put back what was there.
+        with open(path, 'r', encoding='utf-8', newline='') as fh:
+            original_bytes_newline = fh.read()
+        original = original_bytes_newline.replace('\r\n', '\n')
     except (OSError, UnicodeDecodeError) as exc:
         return False, f'Could not read {os.path.basename(path)}: {exc}'
 
@@ -267,10 +350,7 @@ def save_tools_to_config(tools):
     except yaml.YAMLError as exc:
         return False, f'{os.path.basename(path)} is not valid YAML, so it was left alone: {exc}'
 
-    body = _strip_tools_block(original)
-    if body and not body.endswith('\n'):
-        body += '\n'
-    updated = body.rstrip('\n') + '\n\n' + _render_tools_block(tools)
+    updated = _replace_tools_block(original, _render_tools_block(tools))
 
     try:
         after = yaml.safe_load(updated) or {}
@@ -283,11 +363,27 @@ def save_tools_to_config(tools):
         return False, ('Refused to save: rewriting the bit list would have changed the '
                        'rest of the config. Add the bits by hand instead.')
 
-    tmp = path + '.tmp'
+    # Write the file the way we found it. A config edited on Windows has CRLF line
+    # endings and a config someone chmod'd 600 is 600 on purpose; rewriting either is a
+    # change the team did not ask for and did not see. And follow a symlink rather than
+    # replacing it - os.replace on the link would leave the real file frozen with the
+    # old contents while the app cheerfully reported success.
+    target = os.path.realpath(path)
+    newline = '\r\n' if '\r\n' in original_bytes_newline else '\n'
     try:
-        with open(tmp, 'w', encoding='utf-8', newline='\n') as fh:
+        mode = os.stat(target).st_mode & 0o777
+    except OSError:
+        mode = None
+
+    tmp = target + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8', newline=newline) as fh:
             fh.write(updated)
-        os.replace(tmp, path)     # atomic: a crash mid-write cannot truncate the config
+            fh.flush()
+            os.fsync(fh.fileno())   # the rename is atomic; the CONTENT reaching disk is not
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, target)   # atomic: a crash mid-write cannot truncate the config
     except OSError as exc:
         try:
             os.remove(tmp)

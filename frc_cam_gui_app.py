@@ -299,6 +299,9 @@ else:
     TEMP_DIR = tempfile.mkdtemp()
     log(f"✅ Created temp directory: {TEMP_DIR}")
 
+#: Ceiling on parts in one 2D job. Mirrors tooling.MAX_PARTS for multi-tool jobs.
+MAX_PARTS_PER_JOB = 60
+
 UPLOAD_FOLDER = os.path.join(TEMP_DIR, 'uploads')
 OUTPUT_FOLDER = os.path.join(TEMP_DIR, 'outputs')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -439,11 +442,26 @@ def _maybe_refresh_team_config():
         session['team_config_fetched_at'] = time.time()
 
 
+def _finite_placement(value, what: str) -> float:
+    """A placement coordinate that is a real number. Rejects NaN/Infinity, which JSON
+    permits and every downstream comparison silently passes."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{what} must be a number, got {value!r}')
+    if not math.isfinite(number):
+        raise ValueError(f'{what} must be a finite number, got {value!r}')
+    if abs(number) > 10000:
+        raise ValueError(f'{what} of {number:g} is not on any machine')
+    return number
+
+
 def _session_default_material() -> str:
     """The team's default material, for requests that name none. Reads the session's
     config rather than a route-local TeamConfig, because both routes want it before they
     have built one - and a hard-coded fallback here would silently disagree with the
     selector the wizard rendered from the same setting."""
+    _ensure_local_team_config()
     return TeamConfig(session.get('team_config_data', {})).default_material
 
 
@@ -702,6 +720,10 @@ def _tool_from_request(data):
         return None, 'Give the bit a name you will recognise on the shelf.'
     if len(name) > 60:
         return None, 'That name is too long for a tool list; keep it under 60 characters.'
+    # Belt and braces with _yaml_quoted's escaping: a name is a label on a shelf, and a
+    # control character in one has no meaning to a person and several to a YAML parser.
+    if any(ch < ' ' or ch == '\x7f' for ch in name):
+        return None, 'A bit name cannot contain line breaks or control characters.'
     raw_diameter = data.get('diameter_text') or data.get('diameter')
     diameter = parse_length(raw_diameter)
     if not diameter or diameter <= 0:
@@ -747,18 +769,32 @@ def save_tool():
     if error:
         return _saved_tools_response(error, status=400)
 
-    _ensure_local_team_config()
-    team_config = TeamConfig(session.get('team_config_data', {}))
-    tools = [dict(t) for t in team_config.saved_tools]
-    tool_id = slugify_tool_id(tool['name'])
-    tools = [t for t in tools if t['id'] != tool_id]
-    tools.append(dict(tool, id=tool_id))
+    tools = local_mode.read_raw_tools()
+    replaced = False
+    for index, existing in enumerate(tools):
+        if str(existing.get('name', '')).strip() == tool['name']:
+            # Keep whatever else the team wrote on this bit; update what we were given.
+            merged = dict(existing)
+            merged.update({'name': tool['name'], 'diameter': tool['diameter_text'],
+                           'flutes': tool['flutes'], 'type': tool['type']})
+            if tool['type'] == 'vbit':
+                merged['included_angle'] = tool['included_angle']
+            tools[index] = merged
+            replaced = True
+            break
+    if not replaced:
+        entry = {'name': tool['name'], 'diameter': tool['diameter_text'],
+                 'flutes': tool['flutes'], 'type': tool['type']}
+        if tool['type'] == 'vbit':
+            entry['included_angle'] = tool['included_angle']
+        tools.append(entry)
 
     ok, detail = local_mode.save_tools_to_config(tools)
     if not ok:
         return _saved_tools_response(detail, status=500)
     _ensure_local_team_config(force=True)     # re-read what we just wrote
-    return _saved_tools_response(f'Saved "{tool["name"]}" to the team config.', tool_id)
+    return _saved_tools_response(f'Saved "{tool["name"]}" to the team config.',
+                                 slugify_tool_id(tool['name']))
 
 
 @app.route('/tools/delete', methods=['POST'])
@@ -774,8 +810,13 @@ def delete_tool():
 
     _ensure_local_team_config()
     team_config = TeamConfig(session.get('team_config_data', {}))
-    tools = [dict(t) for t in team_config.saved_tools]
-    remaining = [t for t in tools if t['id'] != tool_id]
+    # The id is the app's handle on a bit; the file knows it by name. Map one to the
+    # other through the validated view so a delete removes the entry the user clicked.
+    names = {t['id']: t['name'] for t in team_config.saved_tools}
+    target = names.get(tool_id)
+    tools = local_mode.read_raw_tools()
+    remaining = [t for t in tools
+                 if target is None or str(t.get('name', '')).strip() != target]
     if len(remaining) == len(tools):
         return _saved_tools_response('That bit is not in the team config - built-in bits '
                                      'cannot be removed.', status=404)
@@ -1424,9 +1465,23 @@ def process_job():
         except (ValueError, TypeError):
             return jsonify({'error': 'Invalid job JSON'}), 400
 
+        if not isinstance(job, dict):
+            return jsonify({'error': f'The job specification must be an object, got '
+                                     f'{type(job).__name__}.'}), 400
+
         parts_spec = job.get('parts', [])
         if not parts_spec:
             return jsonify({'error': 'Job has no parts'}), 400
+
+        raw_parts = job.get('parts', [])
+        if not isinstance(raw_parts, list) or not all(isinstance(p, dict) for p in raw_parts):
+            return jsonify({'error': 'The job\'s "parts" must be a list of parts.'}), 400
+        # A sheet with more parts than this is not a nest, and validate_job_layout
+        # reports one error per overlapping PAIR - 600 parts produced a 19 MB response
+        # from a 47 KB request. tooling.py caps multi-tool jobs the same way.
+        if len(raw_parts) > MAX_PARTS_PER_JOB:
+            return jsonify({'error': f'A job can hold at most {MAX_PARTS_PER_JOB} parts; '
+                                     f'this one has {len(raw_parts)}.'}), 400
 
         # Shared job parameters (one tool/material per job in v1).
         # aluminum_tube->aluminum, polycarb->polycarbonate
@@ -1479,6 +1534,13 @@ def process_job():
             f.save(p)
             saved_paths[idx] = p
 
+        # Local mode keeps the team config in a file, and the session is seeded from it
+        # when a page renders. A request that arrives without that having happened -
+        # a fresh session, an expired cookie, a script posting directly - fell back to
+        # the built-in Team 6238 defaults: another team's feeds, another machine's
+        # envelope, and the wrong Z datum, with nothing on screen to say so. One stat()
+        # per request is a cheap price for the program describing this machine.
+        _ensure_local_team_config()
         team_config = TeamConfig.from_dict(session.get('team_config_data', {}))
         user_name = session.get('user_name')
         machine_x = team_config.machine_x_max
@@ -1504,9 +1566,17 @@ def process_job():
                                    'error': f"Missing DXF upload for part {i + 1}"})
                 continue
             name = part.get('name') or Path(saved_paths[fidx]).stem
-            place_x = float(part.get('place_x', 0.0))
-            place_y = float(part.get('place_y', 0.0))
-            rotation = float(part.get('rotation', 0))
+            # json.loads accepts bare NaN and Infinity, and every `x > limit` guard
+            # downstream is False against them - so a non-finite placement sailed past
+            # the layout check and came out as `G1 X2.1021 Yinf` in the program. The
+            # request only failed later, by accident, inside a regex.
+            try:
+                place_x = _finite_placement(part.get('place_x', 0.0), 'place_x')
+                place_y = _finite_placement(part.get('place_y', 0.0), 'place_y')
+                rotation = _finite_placement(part.get('rotation', 0), 'rotation')
+            except ValueError as exc:
+                gen_errors.append({'part_index': i, 'name': name, 'error': str(exc)})
+                continue
             mirror = bool(part.get('mirror'))
 
             pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool_diameter,
@@ -1798,7 +1868,8 @@ def _multitool_job_from_request(spec, saved_paths):
         raise ToolingError(f"The job specification must be an object, got "
                            f"{type(spec).__name__}")
     spec = dict(spec)
-    spec['material'] = normalize_material(spec.get('material', 'plywood'))
+    spec['material'] = normalize_material(spec.get('material') or _session_default_material())
+    _ensure_local_team_config()   # a direct POST may never have rendered a page
     return tooling.job_from_dict(
         spec, saved_paths,
         config=TeamConfig.from_dict(session.get('team_config_data', {})),
@@ -1841,6 +1912,7 @@ def part_features():
     """
     job_dir = None
     try:
+        _ensure_local_team_config()   # a direct POST may never have rendered a page
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
         upload = request.files['file']

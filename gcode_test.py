@@ -261,7 +261,7 @@ def generate_gcode_from_dxf(dxf_path, material_thickness=0.25, tool_diameter=0.1
         pp.sacrifice_board_depth = sacrifice_depth
 
         # Recalculate Z positions with user-specified sacrifice depth
-        pp.cut_depth = -pp.sacrifice_board_depth
+        pp._apply_z_frame()   # sacrifice depth moves the bottom of every through-cut
 
         # Process DXF file
         pp.load_dxf(dxf_path)

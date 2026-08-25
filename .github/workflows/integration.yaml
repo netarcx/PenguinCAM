@@ -1,28 +1,52 @@
 name: CAM Integration Tests
 
+# Every branch, not just main/develop: the point of CI is to catch a break before it
+# reaches main, and a check that never runs on the branch you are working on cannot.
 on:
   push:
-    branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
 
 jobs:
   test-cam:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install pygcode termcolor
           pip install -r requirements.txt
-      
-      - name: Run CAM integration tests
-        run: python gcode_test.py
+
+      # The same four checks `make test` runs locally, which is what CLAUDE.md tells
+      # every contributor to run before calling a change done. CI used to run only the
+      # Fusion comparison, so a broken unit test, a physically impossible toolpath or a
+      # JavaScript syntax error could all land on main green.
+      - name: Unit tests
+        run: python -m unittest discover -s tests --buffer
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: G-code comparison against Fusion output
+        run: python gcode_test.py --quiet
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Independent G-code audit
+        run: python gcode_audit.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Browser JavaScript integrity
+        run: |
+          python check_js.py static/wizard.js static/multitool.js \
+                             static/tube_designer.js static/gcode_viewer.js \
+                             static/source_onshape.js
+        env:
+          PYTHONIOENCODING: utf-8

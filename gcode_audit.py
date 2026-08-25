@@ -426,11 +426,13 @@ def main():
             dxf = plate(HOLES + BORE, POCKET)
             audit(f'mill/{material}/{thickness}', MultiToolJob(
                 material=material, thickness=thickness, tools=mill, machine_id='omio_x8',
+                max_pass_depth=1 / 32,
                 parts=[PartOps(dxf_path=dxf, name='p', operations=[
                     Operation('holes', 1, scope={'max_diameter': 0.4}),
                     Operation('holes', 2, scope={'min_diameter': 0.4}),
                     Operation('pockets', 2), Operation('perimeter', 2),
-                    Operation('chamfer', 3, scope={'targets': ['perimeter'], 'width': 0.02})])]))
+                    Operation('chamfer', 3, scope={'targets': ['perimeter'], 'width': 0.02})])]),
+                  max_engagement=1 / 32)
 
             audit(f'drill/{material}/{thickness}', MultiToolJob(
                 material=material, thickness=thickness, tools=drill_set, machine_id='omio_x8',
@@ -504,6 +506,38 @@ def main():
         parts=[PartOps(dxf_path=plate(HOLES), name='p', operations=[
             Operation('holes', 1), Operation('perimeter', 1)])]),
           max_engagement=1 / 32)
+
+    # The same job WITH a cleared pocket. Until the pocket clearing learned to step
+    # down, this bit 0.133" per pass against a 0.031" ceiling - four times over, on the
+    # exact job shape whose profile the ceiling was added to protect.
+    audit('thin-al/ceiling+pocket', MultiToolJob(
+        material='aluminum', thickness=0.125, machine_id='omio_x8',
+        max_pass_depth=1 / 32,
+        tools=[Tool(1, '1/8 4F', 0.125, 4)],
+        parts=[PartOps(dxf_path=plate(HOLES, POCKET), name='p', operations=[
+            Operation('holes', 1), Operation('pockets', 1), Operation('perimeter', 1)])]),
+          max_engagement=1 / 32)
+
+    # A big bore in thick stock: the circular-spiral clearing strategy, which is a
+    # different generator again from the contour-parallel one above.
+    audit('thick-al/bore', MultiToolJob(
+        material='aluminum', thickness=0.5, machine_id='omio_x8', max_pass_depth=1 / 32,
+        tools=[Tool(1, '1/4 2F', 0.25, 2)],
+        parts=[PartOps(dxf_path=plate([(3, 2, 1.5)], POCKET), name='p', operations=[
+            Operation('holes', 1), Operation('pockets', 1), Operation('perimeter', 1)])]),
+          max_engagement=1 / 32)
+
+    # Partial-depth work on the BOARD datum (the stock-top case is audited above), where
+    # a pocket that stops short must still be cleared rather than contoured.
+    audit('mill/partial-depth', MultiToolJob(
+        material='aluminum', thickness=0.25, machine_id='omio_x8', max_pass_depth=1 / 32,
+        tools=drill_set,
+        parts=[PartOps(dxf_path=plate(HOLES + BORE, POCKET), name='p', operations=[
+            Operation('holes', 1, 'Drill', scope={'max_diameter': 0.4}),
+            Operation('holes', 2, 'Bore', scope={'min_diameter': 0.4}),
+            Operation('pockets', 2, 'Relief', depth=0.1),
+            Operation('perimeter', 2)])]),
+          expect_drill=True, max_engagement=1 / 32)
 
     # Standard-mode (single-tool) programs with the deburr / chamfer pass appended:
     # the same physical checks, on the non-multitool path that generates them. Two

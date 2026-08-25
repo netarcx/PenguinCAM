@@ -632,9 +632,10 @@ class TeamConfig:
         a convenience, and one bad line typed into the YAML should not stop the app from
         starting or hide the other nine cutters.
         """
+        # Root level only. A per-machine fallback was speculative and actively harmful:
+        # the writer emits a single global `tools:`, so one save hoisted the default
+        # machine's library into a block that then shadowed every other machine's.
         raw = self._data.get(self.SAVED_TOOLS_KEY)
-        if raw is None:
-            raw = self._get('machining', 'tool_library', default=None)   # per-machine, opt-in
         if not isinstance(raw, list):
             if raw is not None:
                 print(f"⚠️  config `{self.SAVED_TOOLS_KEY}` should be a list of bits; ignoring it")

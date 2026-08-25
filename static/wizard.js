@@ -486,6 +486,7 @@
       li.classList.toggle('done', order.indexOf(s) >= 0 && order.indexOf(s) < order.indexOf(name));
     });
     var idx = order.indexOf(name);
+    scrollStepIntoView(name);
     $('#btn-back').disabled = idx === 0;
     var nextBtn = $('#btn-next');
     var isPreview = name === 'preview';
@@ -584,12 +585,33 @@
     return true;
   }
 
+  /* Bring the step you just moved to into view. Only matters where #wiz-body scrolls
+     (the stacked layouts); in the side-by-side grid every panel is already on screen, so
+     this is a no-op there. Without it, pressing Next below 900px changed the pills and
+     the footer button and left you looking at the panel you started on. */
+  function scrollStepIntoView(name) {
+    var panel = $('.step[data-step="' + name + '"]');
+    if (!panel || panel.hidden) return;
+    var body = $('#wiz-body');
+    if (!body || body.scrollHeight <= body.clientHeight + 2) return;
+    try {
+      panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    } catch (e) {
+      panel.scrollIntoView();   // older engines take no options object
+    }
+  }
+
   // Jump to a step via the stepbar. Backward is always allowed; forward must clear the
   // same gates as pressing Next through each intervening step.
   function navigateTo(name) {
     var order = steps();
     var target = order.indexOf(name), cur = order.indexOf(state.step);
-    if (target < 0 || target === cur) return;
+    if (target < 0) return;
+    // Re-clicking the step you are on is normally a no-op - except Preview, where
+    // re-entering IS the regenerate action. Changing any setting while standing there
+    // retires the program and told you to "press Next", a button that is hidden on
+    // that very step; the only way back was Back and then forward again.
+    if (target === cur && name !== 'preview') return;
     if (target > cur) {
       for (var i = cur; i < target; i++) { if (!canLeave(order[i])) return; }
     }
@@ -636,6 +658,7 @@
       function () { return state.tool_diameter_text; },
       function (inches, text) {
         state.tool_diameter = inches; state.tool_diameter_text = text;
+        refreshLayoutFromTool();   // the kerf readout and the spacing check both move
         invalidatePreview();
       });
     bindLengthField($('#f-thickness'),
@@ -720,27 +743,40 @@
         }
         invalidatePreview(); updateSummary();
       });
+      // Every deburr setting has to reach the operations editor, not just the
+      // checkbox that turns it on. Without this the plan kept whatever the V-bit and
+      // width were when the box was first ticked, so Setup could read 1/4" 60 deg while
+      // the program was cut with 1/2" 90 deg.
+      function syncDeburrToPlan() {
+        if (state.chamfer.on && multiToolOn() && window.PCMultiTool) {
+          window.PCMultiTool.applyDeburr(state.chamfer);
+        }
+      }
       bindLengthField($('#f-chamfer-bit'),
         function () { return state.chamfer.bit_text; },
         function (inches, text) {
           state.chamfer.bit = inches; state.chamfer.bit_text = text;
+          syncDeburrToPlan();
           invalidatePreview();
         });
       bindLengthField($('#f-chamfer-width'),
         function () { return state.chamfer.width_text; },
         function (inches, text) {
           state.chamfer.width = inches; state.chamfer.width_text = text;
+          syncDeburrToPlan();
           invalidatePreview(); updateSummary();
         });
       $('#f-chamfer-angle').addEventListener('change', function () {
         var v = parseFloat(this.value);
         if (isFinite(v) && v > 0 && v < 180) state.chamfer.angle = v;
         else this.value = state.chamfer.angle;   // reject rather than send a bad angle
+        syncDeburrToPlan();
         invalidatePreview();
       });
       ['perimeter', 'holes', 'pockets'].forEach(function (t) {
         $('#f-chamfer-' + t).addEventListener('change', function () {
           state.chamfer[t] = this.checked;
+          syncDeburrToPlan();
           invalidatePreview();
         });
       });
@@ -849,7 +885,7 @@
     $('#btn-do').disabled = true;
     $('#gen-status').textContent = '';
     $('#preview-errors').textContent =
-      'Settings changed - press Next, or return to Preview, to regenerate.';
+      'Settings changed. Click the Preview step above to generate the program again.';
   }
 
   /* The pattern the server would generate, fetched so Layout can draw the tube before
@@ -1055,6 +1091,14 @@
     // In full-page grid mode every step is on screen at once, so the toggle can also be
     // switched off while standing ON the step it removes; land somewhere real then.
     gotoStep(steps().indexOf(state.step) < 0 ? 'parts' : state.step);
+    // gotoStep only renders the operations editor when you NAVIGATE to it, and in grid
+    // mode the panel is on screen the moment the box is ticked. Without this it sat
+    // there reading "Add a part on the Parts step first" beside a Parts panel listing
+    // the part, with nothing to say it was simply out of date.
+    if (on && window.PCMultiTool) {
+      window.PCMultiTool.render();
+      window.PCMultiTool.refreshFeatures();
+    }
   }
 
   function updatePartsModeNote() {
@@ -1131,6 +1175,14 @@
   /* Says what the operator will have to do at the machine, in the order they do it.
      Tubing has a jig zero of its own, so the choice does not apply there and the panel
      says so rather than showing a control that would be ignored. */
+  /* Anything that changes the kerf has to reach the Layout panel, which in grid mode
+     is on screen the whole time. It used to keep showing the old tool until you left
+     the step and came back - the validation was right, the readout was not. */
+  function refreshLayoutFromTool() {
+    updateLayoutInfo();
+    drawLayout();
+  }
+
   function updateZDatumUI() {
     var field = $('#zzero-field'), hint = $('#zzero-hint');
     if (!field || !hint) return;
@@ -1545,11 +1597,11 @@
 
     // Theme-aware colors (read the CSS variables so the canvas matches light/dark).
     var col = {
-      ink: cssVar('--ink') || '#e6edf3',
-      muted: cssVar('--muted') || '#9aa7b4',
-      danger: cssVar('--danger') || '#f85149',
-      accent: cssVar('--accent') || '#2f81f7',
-      ok: cssVar('--ok') || '#3fb950',
+      ink: cssVar('--ink') || '#e9e7e2',
+      muted: cssVar('--muted') || '#8d8e8a',
+      danger: cssVar('--danger') || '#e4564a',
+      accent: cssVar('--accent') || '#f5a524',
+      ok: cssVar('--ok') || '#4caf6d',
     };
 
     // A generated tube pattern has no parts to nest, so this canvas had nothing to draw
@@ -1613,7 +1665,7 @@
     if (selBox) {
       var a2 = worldToCanvas(selBox.minX, selBox.minY), b2 = worldToCanvas(selBox.maxX, selBox.maxY);
       ctx.save();
-      ctx.strokeStyle = '#2f81f7'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = col.accent; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
       ctx.strokeRect(Math.min(a2[0], b2[0]), Math.min(a2[1], b2[1]), Math.abs(b2[0] - a2[0]), Math.abs(b2[1] - a2[1]));
       ctx.setLineDash([]);
       var hg = selectionHandle(selBox);
@@ -1806,7 +1858,10 @@
     window.addEventListener('keydown', function (e) {
       if (!tubeDesignOn() || !window.PCTubeDesigner) return;
       var t = e.target, tag = t && t.tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+          || tag === 'BUTTON' || tag === 'A'
+          || (e.target && e.target.getAttribute
+              && e.target.getAttribute('role') === 'button')) return;
       var TD = window.PCTubeDesigner, handled = false;
       if (e.key === 'Delete' || e.key === 'Backspace') handled = TD.removeSelected();
       else if (e.key === 'ArrowLeft') handled = TD.nudge(-1, 0);
@@ -1827,7 +1882,19 @@
     // Re-fit whenever the panel changes size - the window resizing, the Tools
     // column appearing, or the first layout pass after load, which is what
     // sizes the canvas in the first place (the observer fires on observe()).
-    function refit() { if (sizeLayoutCanvas()) { refitView(); drawLayout(); } }
+    // Deferred to the next frame: resizing the canvas inside the observer's own
+    // delivery cycle makes the browser report "ResizeObserver loop completed with
+    // undelivered notifications" to window.onerror. It settles either way, but an
+    // error handler should not have to know that.
+    var refitQueued = false;
+    function refit() {
+      if (refitQueued) return;
+      refitQueued = true;
+      window.requestAnimationFrame(function () {
+        refitQueued = false;
+        if (sizeLayoutCanvas()) { refitView(); drawLayout(); }
+      });
+    }
     if (window.ResizeObserver) new ResizeObserver(refit).observe(canvas);
     else window.addEventListener('resize', refit);
   }
@@ -1857,6 +1924,11 @@
         + 'click one to select it, drag to move, arrow keys nudge by '
         + ((CFG.tubeDesigner && CFG.tubeDesigner.grid) || 0.125) + '", Delete removes. '
         + 'The design is mirrored onto the opposite wall.';
+    } else if (state.mode === 'tubing' && tubePatternOn()) {
+      // A generated pattern has no parts, so there is no selection box and no rotation
+      // handle to drag - the hint used to promise one that is never drawn.
+      el.textContent = 'The pattern is generated from the tube length, so there is '
+        + 'nothing to place here - this is a preview of what will be cut.';
     } else if (state.mode === 'tubing') {
       el.textContent = 'Drag the round handle to rotate the tube in 90 deg steps. ' +
         'Orient each face so the tube runs vertically (the Y axis) — that is the axis of the ' +

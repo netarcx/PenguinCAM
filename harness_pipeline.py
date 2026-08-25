@@ -130,7 +130,7 @@ def _postprocess(pp_args, dxf_path, out_dir, base):
         pp.apply_material_preset(material)
         pp.tab_spacing = 6.0
         pp.sacrifice_board_depth = 0.02
-        pp.cut_depth = -pp.sacrifice_board_depth
+        pp._apply_z_frame()   # sacrifice depth moves the bottom of every through-cut
         pp.load_dxf(dxf_path)
         pp.transform_coordinates('bottom-left', 0, enforce_bounds=False)
         pp.identify_perimeter_and_pockets()   # web order: perimeter before holes

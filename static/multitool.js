@@ -224,6 +224,7 @@
     return el('button', {
       type: 'button',
       class: 'mt-save-bit' + (saved ? ' saved' : ''),
+      'aria-pressed': saved ? 'true' : 'false',
       text: saved ? '\u2605' : '\u2606',
       disabled: !writable || !String(tool.name || '').trim(),
       title: !writable
@@ -890,6 +891,21 @@
                       ['holes', 'interior'], holeInScope, msgs);
         checkCoverage(part, 'pocket', part.features.pockets || [],
                       ['pockets', 'interior'], pocketInScope, msgs);
+        // ...and the outline. Coverage checked holes and pockets only, so a plan whose
+        // ONLY operation was a chamfer passed every gate - a program that breaks an
+        // edge and never cuts the part free, with Download enabled. A chamfer runs
+        // along an edge that some other operation has to make first.
+        var cuts = ops.filter(function (o) { return o.op_type !== 'chamfer'; });
+        if (part.features.has_perimeter && !cuts.some(function (o) {
+              return o.op_type === 'perimeter';
+            })) {
+          msgs.push(part.name + ': nothing cuts the outline - the part would stay '
+                    + 'attached to the sheet. Add a Perimeter operation.');
+        }
+        if (!cuts.length) {
+          msgs.push(part.name + ': a chamfer is the only operation - there would be '
+                    + 'nothing for it to break the edge of.');
+        }
       }
     });
     return { msgs: msgs, notes: notes };
@@ -964,17 +980,34 @@
    *  matching V-bit is in the tool table and every part's plan ends with a chamfer op.
    *  Idempotent - parts that already have a chamfer op (auto or hand-made) are left
    *  alone, so re-running after adding a part only fills the gap. */
+  /* Mirror the Setup panel's deburr settings into the operation plan.
+   *
+   * Re-entrant on purpose: this runs again every time one of those settings changes, so
+   * it UPDATES what it added last time rather than bailing out because a chamfer op
+   * already exists. Bailing meant the V-bit and width in the plan were whatever the box
+   * was first ticked with - Setup could read 1/4" 60 deg 0.05" while the program was cut
+   * with 1/2" 90 deg 0.02", and generating pushed a third, unreferenced V-bit into the
+   * tool table because the diameter no longer matched.
+   *
+   * Anything the user authored by hand (no _deburr flag) is left alone. */
   api.applyDeburr = function (chamfer) {
     if (!api.enabled()) return;
-    var vbit = tools().filter(function (t) {
-      return t.type === 'vbit' && Math.abs((t.diameter || 0) - chamfer.bit) < 5e-4
-             && Math.abs((t.included_angle || 90) - chamfer.angle) < 0.5;
-    })[0];
+    var vbit = tools().filter(function (t) { return t._deburr; })[0]
+      || tools().filter(function (t) {
+           return t.type === 'vbit' && Math.abs((t.diameter || 0) - chamfer.bit) < 5e-4
+                  && Math.abs((t.included_angle || 90) - chamfer.angle) < 0.5;
+         })[0];
     if (!vbit) {
-      vbit = { slot: nextSlot(), name: chamfer.angle + ' deg V-bit',
-               diameter: chamfer.bit, diameter_text: String(chamfer.bit),
-               flutes: 2, type: 'vbit', included_angle: chamfer.angle, _deburr: true };
+      vbit = { slot: nextSlot(), _deburr: true };
       tools().push(vbit);
+    }
+    if (vbit._deburr) {   // ours to keep in step; a hand-added V-bit is not
+      vbit.name = chamfer.angle + ' deg V-bit';
+      vbit.diameter = chamfer.bit;
+      vbit.diameter_text = chamfer.bit_text || String(chamfer.bit);
+      vbit.flutes = vbit.flutes || 2;
+      vbit.type = 'vbit';
+      vbit.included_angle = chamfer.angle;
     }
     var targets = [];
     if (chamfer.perimeter) targets.push('perimeter');
@@ -982,7 +1015,13 @@
     if (chamfer.pockets) targets.push('pockets');
     ctx.state.parts.forEach(function (part) {
       var ops = opsFor(part);
-      if (ops.some(function (o) { return o.op_type === 'chamfer'; })) return;
+      var mine = ops.filter(function (o) { return o.op_type === 'chamfer' && o._deburr; })[0];
+      if (mine) {
+        mine.tool_slot = vbit.slot;
+        mine.scope = { targets: targets.slice(), width: chamfer.width };
+        return;
+      }
+      if (ops.some(function (o) { return o.op_type === 'chamfer'; })) return;  // hand-authored
       ops.push({ op_type: 'chamfer', tool_slot: vbit.slot, name: 'Edge break',
                  depth: null, scope: { targets: targets.slice(), width: chamfer.width },
                  _deburr: true });
