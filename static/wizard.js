@@ -1696,7 +1696,19 @@
   }
 
   function uploadDxf(file, onAdded) {
-    if (!file || !/\.dxf$/i.test(file.name)) { alert('Please choose a .dxf file.'); return; }
+    if (!file || !/\.(dxf|step|stp)$/i.test(file.name)) {
+      alert('Please choose a .dxf, .step, or .stp file.');
+      return;
+    }
+    var isStep = /\.(step|stp)$/i.test(file.name);
+    if (isStep && state.parts.length) {
+      alert('2.5D STEP mode allows one part. Remove the current part before importing this STEP file.');
+      return;
+    }
+    if (!isStep && state.mode === '2.5d') {
+      alert('2.5D upload needs a STEP file with depth information. Switch to 2D for a flat DXF.');
+      return;
+    }
     var fd = new FormData();
     fd.append('file', file);
     dbg('part-outline:req', file.name);
@@ -1705,12 +1717,27 @@
       .then(function (res) {
         if (!res.ok || !res.j.success) {
           dbg('part-outline:err', res.j.error);
-          alert('Could not read DXF: ' + (res.j.error || 'unknown error'));
+          alert('Could not read part: ' + (res.j.error || 'unknown error'));
           if (onAdded) onAdded(null);
           return;
         }
+        var machiningFile = file;
+        if (res.j.multilayer && res.j.dxf) {
+          // STEP is a transport format, while /process deliberately has one geometry
+          // contract: depth-layered DXF. Keep the converted bytes in the browser just
+          // like an Onshape import, so generation stays stateless/serverless-safe.
+          var bin = atob(res.j.dxf);
+          var arr = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          machiningFile = new File([arr], (res.j.name || 'part') + '.dxf',
+                                   { type: 'application/dxf' });
+          state.mode = '2.5d';
+          var mode25 = $('input[name="mode"][value="2.5d"]');
+          if (mode25) { mode25.disabled = false; mode25.checked = true; }
+          applyModeUI();
+        }
         dbg('part-outline:ok', { name: res.j.name, w: res.j.width, h: res.j.height });
-        var added = addPartFromOutline(res.j, file);
+        var added = addPartFromOutline(res.j, machiningFile);
         if (onAdded) onAdded(added);
       })
       .catch(function (e) { dbg('part-outline:fail', String(e)); alert('Upload failed: ' + e); });
@@ -3395,10 +3422,8 @@
     // Onshape panel iframe keeps the one-step-at-a-time wizard.
     if (state.source === 'upload') {
       $('#wizard').classList.add('grid');
-      // 2.5D derives thickness/layers from Onshape's geometry APIs (build_multilayer_dxf)
-      // and can't be produced from a plain DXF upload — offer only 2D and Tubing here.
-      var opt25 = $('#opt-mode-25d'); if (opt25) opt25.hidden = true;
-      var r25 = $('input[name="mode"][value="2.5d"]'); if (r25) r25.disabled = true;
+      // STEP import produces the same depth-layered DXF contract as Onshape, so 2.5D
+      // is available here too. A flat DXF is still refused while that mode is active.
     }
     // Draw the whole UI from state ONCE before the first paint. Everything below used
     // to run only as a side effect of a user event, so on first load the panels showed

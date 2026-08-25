@@ -183,8 +183,15 @@
         <h3>Adding parts by upload (standalone)</h3>
         <p>
             In the standalone app at <a href="https://penguincam.popcornpenguins.com/app">/app</a>, the Parts step
-            shows a drop zone instead. Drag a DXF file onto it, or click to browse. Export your DXF from CAD as a
-            top-down view looking straight down at the part.
+            shows a drop zone instead. For 2D, drag a DXF file onto it, or click to browse. Export your DXF from
+            CAD as a top-down view looking straight down at the part.
+        </p>
+        <p>
+            For 2.5D, drop a single-solid <code>.step</code> or <code>.stp</code> file. PenguinCAM reads the stock
+            thickness and flat depth levels directly and supports top-down through-holes, pockets, steps, and
+            counterbores. It automatically chooses the side the features open from. Assemblies, features opening
+            from both sides, side holes, undercuts, slopes, fillets, and free-form surfaces are refused because
+            they need more than one setup or true 3D toolpaths.
         </p>
 
         <h3>How many parts?</h3>

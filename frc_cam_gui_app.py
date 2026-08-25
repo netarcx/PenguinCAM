@@ -31,6 +31,7 @@ import logging
 import metrics
 import feeds_speeds
 from logging_config import log  # shared log() + base logging setup (was duplicated per module)
+from step_geometry import StepGeometryError, convert_step_to_multilayer_dxf
 
 # Quiet Werkzeug's request logging (clutters Vercel logs); the base logging config and log()
 # now come from logging_config (imported above).
@@ -2439,35 +2440,59 @@ def process_multitool():
 @app.route('/part-outline', methods=['POST'])
 @limiter.limit("30 per minute")
 def part_outline():
-    """Return the perimeter outline + dimensions of an uploaded DXF, for the layout
-    canvas and parts-list thumbnail. Stateless: the browser keeps the DXF bytes and
-    re-submits them at /process-job time (serverless-safe). Coordinates are normalized
-    so the part's bounding-box minimum sits at (0,0)."""
-    path = None
+    """Return layout geometry for an uploaded DXF or 2.5D STEP solid.
+
+    STEP is converted to the same depth-layered DXF contract used by Onshape. The
+    converted bytes go back to the browser so generation remains stateless.
+    """
+    paths_to_remove = []
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
         f = request.files['file']
-        if not f.filename.lower().endswith('.dxf'):
-            return jsonify({'error': 'File must be a DXF'}), 400
+        filename = f.filename or ''
+        suffix = Path(filename).suffix.lower()
+        if suffix not in ('.dxf', '.step', '.stp'):
+            return jsonify({'error': 'File must be a DXF or STEP file'}), 400
 
-        tmp = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False, dir=UPLOAD_FOLDER)
-        path = tmp.name
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir=UPLOAD_FOLDER)
+        uploaded_path = tmp.name
         tmp.close()
-        f.save(path)
+        paths_to_remove.append(uploaded_path)
+        f.save(uploaded_path)
 
-        geo = _compute_dxf_outline(path)
+        conversion = None
+        dxf_path = uploaded_path
+        if suffix in ('.step', '.stp'):
+            conversion = convert_step_to_multilayer_dxf(uploaded_path)
+            tmp_dxf = tempfile.NamedTemporaryFile(suffix='.dxf', delete=False,
+                                                   dir=UPLOAD_FOLDER)
+            dxf_path = tmp_dxf.name
+            tmp_dxf.write(conversion.dxf_bytes)
+            tmp_dxf.close()
+            paths_to_remove.append(dxf_path)
+
+        geo = _compute_dxf_outline(dxf_path)
         if not geo:
-            return jsonify({'error': 'No geometry found in DXF'}), 400
+            return jsonify({'error': 'No usable 2.5D geometry found in the file'}), 400
         geo['success'] = True
-        geo['name'] = Path(f.filename).stem
+        geo['name'] = Path(filename).stem
+        if conversion is not None:
+            geo['dxf'] = base64.b64encode(conversion.dxf_bytes).decode('ascii')
+            geo['multilayer'] = True
+            geo['source_format'] = 'step'
+            geo['thickness'] = conversion.thickness
+            geo['layer_depths'] = conversion.layer_depths
         return jsonify(geo)
+    except StepGeometryError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         log(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
-        if path and os.path.exists(path):
-            os.remove(path)
+        for path in paths_to_remove:
+            if os.path.exists(path):
+                os.remove(path)
 
 
 @app.route('/download/<token>')

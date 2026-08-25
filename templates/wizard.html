@@ -93,7 +93,7 @@
                         <label class="seg-item" id="opt-mode-25d">
                             <input type="radio" name="mode" value="2.5d" autocomplete="off">
                             <span class="seg-t">2.5D</span>
-                            <span class="seg-d">Thickness from CAD, one part</span>
+                            <span class="seg-d">Onshape face or STEP, one part</span>
                         </label>
                         <label class="seg-item">
                             <input type="radio" name="mode" value="tubing" autocomplete="off">
@@ -290,10 +290,10 @@
 
                 <div id="upload-source">
                     <div id="dropzone" role="button" tabindex="0" aria-controls="f-dxf"
-                         aria-label="Add a DXF file: drop one here, or activate to browse">
-                        <p>Drop a DXF here</p>
+                         aria-label="Add a DXF or STEP file: drop one here, or activate to browse">
+                        <p>Drop a DXF or STEP here</p>
                         <span class="dz-sub">or click to browse &mdash; one file per part</span>
-                        <input type="file" id="f-dxf" accept=".dxf" hidden>
+                        <input type="file" id="f-dxf" accept=".dxf,.step,.stp" hidden>
                     </div>
                 </div>
                 <div id="onshape-source" hidden>

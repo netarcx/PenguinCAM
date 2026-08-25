@@ -21,6 +21,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Open CASCADE's headless Python wheel still links against these small runtime
+# libraries even though PenguinCAM does not use its viewer.  Keep the package list
+# explicit and discard apt metadata so STEP support does not pull in a desktop stack.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libexpat1 libgl1 libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Requirements first so the dependency layer survives application edits.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

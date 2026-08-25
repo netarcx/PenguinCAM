@@ -9,10 +9,10 @@ A web-based tool for FRC robotics teams to automatically generate CNC G-code fro
 A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout → Preview) that runs both standalone (`/app`, DXF upload) and **embedded in the Onshape right-side panel** (`/onshape/element-panel`, live face-selection), sharing one codebase. Highlights:
 
 - **Multi-part job layout:** arrange several parts on one sheet → one G-code program. The parts' combined bounding box *is* the stock (machine size is a constraint; G54 origin = bbox lower-left). Drag to move, drag-handle rotate (45° snap), multi-select group move/rotate, flip (mirror), zoom.
-- **2.5D fixes:** correct handling of islands / enclosed features (N-boundary polygon nesting) and stock thickness derived from the CAD layers.
+- **2.5D STEP import:** local uploads of one solid preserve flat depth levels for pockets, through-holes, steps, and counterbores; stock thickness comes from CAD and unsafe non-2.5D geometry is refused.
 - **Onshape embedding:** popup OAuth with `SameSite=None; Secure` cookies, continuous face-selection, light/dark theme tied to Onshape's `?theme=`.
 - **Multi-tool operations:** an ordered operation list per part, each operation with its own tool and its own scope (small holes on the 1/8", pockets and profile on the 1/4", edge break on a V-bit). The job groups the work by tool and pauses for a manual tool change at each switch. See [docs/MULTI_TOOL_GUIDE.md](docs/MULTI_TOOL_GUIDE.md).
-- **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
+- **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF/STEP files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
 - **Save:** split "Download Program / Send to Google Drive" button (Drive gated by config, remembers last choice).
 - The wizard is the whole app: `/` (and `/app`) serve it full-screen in DXF-upload mode; the Onshape panel serves the same wizard with face-selection as the source.
 

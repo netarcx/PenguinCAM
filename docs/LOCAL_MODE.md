@@ -7,7 +7,7 @@ The hosted app gates everything behind Onshape OAuth. That gate does three jobs 
 it identifies the user, it's where the team's `PenguinCAM-config.yaml` comes from, and —
 deliberately — it keeps anonymous internet traffic off the public site.
 
-None of that applies on a laptop next to the router. The DXF is already on disk, the
+None of that applies on a laptop next to the router. The DXF or STEP file is already on disk, the
 operator is standing at the keyboard, and the shop wifi may not reach the internet at all.
 
 **Local mode is that second deployment.** Same app, same routes, same post-processor, with
@@ -33,7 +33,13 @@ It picks a free port starting at 6238, binds to `127.0.0.1`, and opens a browser
 | `--no-browser` | Don't open a browser window |
 | `--debug` | Flask debug mode with the auto-reloader |
 
-Parts come from DXF files dropped on the page; G-code downloads straight back to disk.
+Flat 2D parts come from DXF files dropped on the page. A single-solid STEP file can be
+dropped in 2.5D mode for top-down features such as through-holes, pockets, steps, and
+counterbores; stock thickness and feature depths come from the solid. The importer chooses
+the machinable side from the feature directions and refuses assemblies, features from both
+sides, side holes, undercuts, sloped faces, fillets, and free-form surfaces rather than
+silently flattening them. G-code downloads straight back to disk.
+
 Onshape one-click import and Google Drive upload are simply not part of this deployment —
 everything else, including [multi-tool operations](MULTI_TOOL_GUIDE.md), works the same.
 
