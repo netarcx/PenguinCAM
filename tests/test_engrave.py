@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ezdxf
 
 import stroke_font
-from frc_cam_postprocessor import FRCPostProcessor
+from frc_cam_postprocessor import FRCPostProcessor, sanitize_comment
 from team_config import TeamConfig
 
 
@@ -44,11 +44,21 @@ def _build(dxf, tool=0.0625, text='GEARBOX-L', height=0.18, size=(4.0, 3.0)):
 
 
 class StrokeFontTest(unittest.TestCase):
-    def test_every_character_a_part_name_can_hold_is_drawable(self):
-        """sanitize_comment leaves letters, digits and a few marks; each needs a glyph,
-        or a label silently reads as a different part number."""
-        for char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.#/+ ':
-            self.assertIn(char, stroke_font.GLYPHS, f'no glyph for {char!r}')
+    def test_the_characters_a_part_name_can_hold_are_drawable(self):
+        """Derived from sanitize_comment, not hardcoded: a hardcoded list only ever
+        proves the glyphs someone remembered to write down exist."""
+        emitted = set()
+        for code in range(32, 127):
+            emitted.update(sanitize_comment(chr(code), fallback='').upper())
+        missing = sorted(emitted - set(stroke_font.GLYPHS))
+        # The stragglers are shell and markup punctuation, which no part name carries;
+        # _engrave_body turns each into a visible dash AND warns, so a label is never
+        # silently renamed. Anything else appearing here is a gap to fill.
+        self.assertEqual(missing, ['<', '>', '\\', '^', '`', '{', '|', '}', '~'])
+
+    def test_a_character_with_no_glyph_becomes_a_dash_and_says_so(self):
+        strokes, _ = stroke_font.text_strokes('~')
+        self.assertTrue(strokes, 'an unmappable character vanished silently')
 
     def test_an_unknown_character_still_marks_the_part(self):
         strokes, _ = stroke_font.text_strokes('§')
@@ -83,14 +93,14 @@ class EngraveToolpathTest(unittest.TestCase):
     def test_it_runs_before_the_profile(self):
         """After the profile the part hangs on tabs, and a light chattery label cut is
         exactly what breaks one."""
-        _, result = _build(self.dxf)
+        pp, result = _build(self.dxf)
         gcode = result.gcode
         self.assertLess(gcode.index('ENGRAVE PART NAME'), gcode.index('PERIMETER'),
                         'the name is engraved after the part is cut free')
 
     def test_every_engraved_move_lands_on_the_part(self):
         """A label that runs off the part is a gouge in whatever is beside it."""
-        _, result = _build(self.dxf)
+        pp, result = _build(self.dxf)
         inside = False
         moves = 0
         for line in result.gcode.splitlines():
@@ -104,15 +114,20 @@ class EngraveToolpathTest(unittest.TestCase):
                 y = re.search(r'Y(-?[\d.]+)', line)
                 if x and y:
                     moves += 1
-                    self.assertGreater(float(x.group(1)), 0.0)
-                    self.assertLess(float(x.group(1)), 4.0)
-                    self.assertGreater(float(y.group(1)), 0.0)
-                    self.assertLess(float(y.group(1)), 3.0)
+                    # A tool RADIUS inside the outline, not merely inside it: the
+                    # centreline is what the G-code says, and a cut whose centre is
+                    # on the edge takes half a kerf out of the profile.
+                    r = pp.tool_radius
+                    self.assertGreater(float(x.group(1)), r)
+                    self.assertLess(float(x.group(1)), 4.0 - r)
+                    self.assertGreater(float(y.group(1)), r)
+                    self.assertLess(float(y.group(1)), 3.0 - r)
         self.assertGreater(moves, 20, 'suspiciously few engraved moves')
 
     def test_it_cuts_shallow_and_never_through(self):
         pp, result = _build(self.dxf)
         inside = False
+        zmoves = 0
         for line in result.gcode.splitlines():
             if 'ENGRAVE PART NAME' in line:
                 inside = True
@@ -122,15 +137,32 @@ class EngraveToolpathTest(unittest.TestCase):
             if inside:
                 z = re.search(r'(?<![A-Za-z])Z(-?[\d.]+)', line)
                 if z:
+                    zmoves += 1
                     self.assertGreater(float(z.group(1)), pp.cut_depth,
                                        'an engraving move went to the through depth')
+        # Without this the test passes when there is no engraving at all, which is
+        # exactly the regression it exists to catch.
+        self.assertGreater(zmoves, 0, 'no engraved Z moves to check')
 
-    def test_a_tool_too_fat_to_write_is_refused_out_loud(self):
-        """Not silently: an operator who ticked the box is expecting a label."""
-        _, result = _build(self.dxf, tool=0.25)
+    def test_a_fat_tool_writes_bigger_rather_than_writing_a_blob(self):
+        """0.25" is the DEFAULT bit. Refusing it outright meant the feature never worked
+        out of the box, and the old 1.2x gate let it through to cut a solid smear. A
+        part with room gets taller letters instead."""
+        pp, result = _build(self.dxf, tool=0.25)
+        self.assertIn('ENGRAVE PART NAME', result.gcode)
+        cap = float(re.search(r'Cap height ([\d.]+) in', result.gcode).group(1))
+        self.assertGreaterEqual(
+            cap, 0.25 * pp.ENGRAVE_MIN_HEIGHT_PER_TOOL - 1e-9,
+            'the letters are too small for this cutter to keep their strokes apart')
+
+    def test_a_tool_too_fat_for_the_part_is_refused_out_loud(self):
+        """Not silently, and blaming the right thing: when the cutter is what will not
+        fit, saying "no clear space" sends someone hunting for room they already have."""
+        narrow = _plate(os.path.join(self.tmp, 'narrow.dxf'), width=1.2, height=0.5)
+        _, result = _build(narrow, tool=0.25)
         self.assertNotIn('ENGRAVE PART NAME', result.gcode)
-        self.assertTrue(any('legible' in w for w in result.warnings),
-                        f'no warning explaining the skip: {result.warnings}')
+        self.assertTrue(any('cutter cannot write' in w for w in result.warnings),
+                        f'no warning naming the tool: {result.warnings}')
 
     def test_a_part_too_small_is_refused_out_loud(self):
         tiny = _plate(os.path.join(self.tmp, 'tiny.dxf'), width=0.4, height=0.4)
@@ -141,14 +173,19 @@ class EngraveToolpathTest(unittest.TestCase):
     def test_the_name_shrinks_to_fit_rather_than_overflowing(self):
         small = _plate(os.path.join(self.tmp, 'small.dxf'), width=1.2, height=1.0)
         _, result = _build(small, tool=0.03125, text='A-VERY-LONG-PART-NAME')
-        if 'ENGRAVE PART NAME' in result.gcode:
-            cap = float(re.search(r'Cap height ([\d.]+) in', result.gcode).group(1))
-            self.assertLess(cap, 0.18, 'the name did not shrink to fit')
+        # Asserted, not guarded by `if`: an `if` here made the whole test vacuous the
+        # moment the engraving stopped being emitted.
+        self.assertIn('ENGRAVE PART NAME', result.gcode)
+        cap = float(re.search(r'Cap height ([\d.]+) in', result.gcode).group(1))
+        self.assertLess(cap, 0.18, 'the name did not shrink to fit')
 
     def test_the_program_still_obeys_the_g_code_rules(self):
         """Part names are user text going into a comment - the exact place this
         project's ASCII and nested-paren rules get broken."""
         _, result = _build(self.dxf, text='Bracket (left) [v2]')
+        # The whole program is clean when there is no engraving at all, so prove the
+        # user text actually reached a comment before checking the rules hold.
+        self.assertIn('(Text: ', result.gcode)
         self.assertTrue(all(ord(c) < 128 for c in result.gcode))
         self.assertIsNone(re.search(r'\([^)]*\(', result.gcode))
         self.assertIsNone(re.search(r'\([^)]*[\[\]]', result.gcode))

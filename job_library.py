@@ -16,6 +16,7 @@ grow a base64 blob in the middle of it.
 """
 import base64
 import datetime
+import math
 import json
 import os
 import re
@@ -30,11 +31,25 @@ MAX_DXF_BYTES = 4 * 1024 * 1024
 MAX_PARTS = 60
 
 #: Bumped when the on-disk shape changes in a way older readers cannot handle.
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 class JobLibraryError(ValueError):
     """A job that cannot be saved or loaded as asked."""
+
+
+def _finite(value, what):
+    """A coordinate that is not a real number. NaN and infinity survive `float()` and
+    `json.dump` writes them as bare `NaN`/`Infinity`, which `json.load` accepts and the
+    browser then places a part at - so a job saved with one is openable but unusable.
+    Refused at the point it enters the library instead."""
+    try:
+        number = float(value or 0.0)
+    except (TypeError, ValueError):
+        raise JobLibraryError(f'A part\'s {what} is not a number, so the job was not saved.')
+    if not math.isfinite(number):
+        raise JobLibraryError(f'A part\'s {what} is not a number, so the job was not saved.')
+    return number
 
 
 def _slug(name: str) -> str:
@@ -138,9 +153,17 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
             meta_parts.append({
                 'name': part.get('name') or f'part {index + 1}',
                 'dxf': dxf_name,
-                'place_x': float(part.get('place_x') or 0.0),
-                'place_y': float(part.get('place_y') or 0.0),
-                'rotation': float(part.get('rotation') or 0.0),
+                # Both anchors. `place_x/y` is the footprint's lower-left corner, which
+                # is what every other wire format in this app means by "place"; the
+                # centre is what the browser actually stores per part. Saving only the
+                # corner and reading it back as a centre moved every part by half its
+                # own footprint, compounding on each save/open - a different nest, with
+                # nothing on screen to say so.
+                'place_x': _finite(part.get('place_x'), 'placement'),
+                'place_y': _finite(part.get('place_y'), 'placement'),
+                'center_x': _finite(part.get('center_x'), 'placement'),
+                'center_y': _finite(part.get('center_y'), 'placement'),
+                'rotation': _finite(part.get('rotation'), 'rotation'),
                 'mirror': bool(part.get('mirror')),
                 'ops': part.get('ops') or None,
             })

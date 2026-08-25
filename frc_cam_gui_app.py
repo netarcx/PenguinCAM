@@ -880,7 +880,10 @@ def _stock_from_request(data):
     for field, label in (('width', 'Width'), ('height', 'Length')):
         raw = data.get(field + '_text') or data.get(field)
         value = parse_length(raw)
-        if not value or value <= 0:
+        # NaN fails `<= 0` AND `> 200`, so it slipped through both guards and was
+        # written to the config as `nan"`, where the reader then rejects it - leaving
+        # an entry that is invisible in the list and therefore undeletable.
+        if not value or not math.isfinite(value) or value <= 0:
             return None, f'{label} is not a size. Try 24, 24" or 600mm.'
         if value > 200:
             return None, f'{label} of {value:.1f} in is larger than any sheet this cuts.'
@@ -890,7 +893,7 @@ def _stock_from_request(data):
     raw_thickness = data.get('thickness_text') or data.get('thickness')
     if raw_thickness not in (None, ''):
         thickness = parse_length(raw_thickness)
-        if not thickness or thickness <= 0:
+        if not thickness or not math.isfinite(thickness) or thickness <= 0:
             return None, f'{raw_thickness!r} is not a thickness. Try 0.25 or 6mm.'
         entry['thickness'] = thickness
         entry['thickness_text'] = (raw_thickness if isinstance(raw_thickness, str)
@@ -1022,6 +1025,7 @@ def save_saved_job():
                                   status=400)
         parts.append({'name': part.get('name'), 'dxf_bytes': blob,
                       'place_x': part.get('place_x'), 'place_y': part.get('place_y'),
+                      'center_x': part.get('center_x'), 'center_y': part.get('center_y'),
                       'rotation': part.get('rotation'), 'mirror': part.get('mirror'),
                       'ops': part.get('ops')})
     try:
@@ -1409,6 +1413,8 @@ def process_file():
                         config=team_config
                     )
                     face_pp.tube_height = tube_height  # Store for Z-offset calculations
+                    if dry_run:
+                        face_pp.set_dry_run(DRY_RUN_LIFT_IN)
                     face_pp.apply_material_preset(material, machine_id)
                     face_pp.scale_feeds_to_tool()   # same 4mm-reference presets, same physics
                     if user_name:
@@ -1758,9 +1764,24 @@ def process_job():
                 return jsonify({'error': 'Max depth per pass must be a positive '
                                          'number of inches.'}), 400
 
-        # Stock size (and G54 origin) are derived server-side from the placed parts'
-        # combined bounding box; the client's stock field is advisory only. This avoids
-        # a client/server bbox mismatch flagging a part as "outside" its own stock.
+        # Where the G54 origin is. With no sheet the parts' combined bounding box IS the
+        # stock and the origin is its corner. With a sheet from the stock library the
+        # placements are absolute on that sheet, the origin is the SHEET's corner, and
+        # the sheet is what the preview, the summary and the setup sheet must all show -
+        # they used to be told the parts' bbox while the setup sheet said "zero on the
+        # sheet corner", which is the same nest cut inches from where it was drawn.
+        sheet = None
+        if isinstance(job.get('stock'), dict) and job['stock'].get('from_library'):
+            try:
+                sheet_w = float(job['stock'].get('width'))
+                sheet_h = float(job['stock'].get('height'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'The stock size must be a number.'}), 400
+            if not (math.isfinite(sheet_w) and math.isfinite(sheet_h)) or \
+                    sheet_w <= 0 or sheet_h <= 0:
+                return jsonify({'error': 'The stock size must be a positive number of '
+                                         'inches.'}), 400
+            sheet = (sheet_w, sheet_h)
 
         # Save each uploaded DXF to a distinct path so parts don't clobber each other.
         job_dir = tempfile.mkdtemp(prefix='job_', dir=UPLOAD_FOLDER)
@@ -1857,9 +1878,12 @@ def process_job():
         if gen_errors:
             return jsonify({'success': False, 'part_errors': gen_errors}), 400
 
-        # Stock = the parts' combined bounding box (server-authoritative).
+        # Stock = the chosen sheet, or the parts' combined bounding box when nesting
+        # straight onto whatever is on the table.
         boxes = [p['bbox'] for p in placed if p.get('bbox')]
-        if boxes:
+        if sheet:
+            stock_w, stock_h = sheet
+        elif boxes:
             stock_w = max(b[2] for b in boxes) - min(b[0] for b in boxes)
             stock_h = max(b[3] for b in boxes) - min(b[1] for b in boxes)
         else:
@@ -1867,7 +1891,8 @@ def process_job():
 
         # Validate before the expensive body generation: the combined bbox must fit the
         # machine, and parts must not overlap (kerf = tool diameter).
-        layout_errors = validate_job_layout(placed, machine_x, machine_y, min_gap=tool_diameter)
+        layout_errors = validate_job_layout(placed, machine_x, machine_y,
+                                            min_gap=tool_diameter, stock=sheet)
         if layout_errors:
             log(f"[JOB] layout invalid: {layout_errors}")
             return jsonify({'success': False, 'part_errors': layout_errors}), 400
@@ -2307,8 +2332,22 @@ def process_multitool():
             pp = tooling.build_part_postprocessor(job, part, kerf)
             placed.append({'name': part.name, 'bbox': pp.bounding_box(),
                            'polygon': pp.placed_polygon()})
+        # The sheet, when the nest was laid out on one from the stock library: the
+        # placements are then absolute on it and every part has to be ON it.
+        sheet = None
+        if isinstance(spec.get('stock'), dict) and spec['stock'].get('from_library'):
+            try:
+                sheet_w, sheet_h = float(spec['stock']['width']), float(spec['stock']['height'])
+            except (TypeError, ValueError, KeyError):
+                return jsonify({'error': 'The stock size must be a number.'}), 400
+            if not (math.isfinite(sheet_w) and math.isfinite(sheet_h)) or \
+                    sheet_w <= 0 or sheet_h <= 0:
+                return jsonify({'error': 'The stock size must be a positive number of '
+                                         'inches.'}), 400
+            sheet = (sheet_w, sheet_h)
         layout_errors = validate_job_layout(placed, job.config.machine_x_max,
-                                            job.config.machine_y_max, min_gap=kerf)
+                                            job.config.machine_y_max, min_gap=kerf,
+                                            stock=sheet)
         if layout_errors:
             log(f"[MULTITOOL] layout invalid: {layout_errors}")
             return jsonify({'success': False, 'part_errors': layout_errors}), 400
@@ -2328,8 +2367,11 @@ def process_multitool():
         output_token = file_token_manager.register_file(output_path, result.filename)
 
         boxes = [p['bbox'] for p in placed if p.get('bbox')]
-        stock_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) if boxes else 0.0
-        stock_h = (max(b[3] for b in boxes) - min(b[1] for b in boxes)) if boxes else 0.0
+        if sheet:
+            stock_w, stock_h = sheet
+        else:
+            stock_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) if boxes else 0.0
+            stock_h = (max(b[3] for b in boxes) - min(b[1] for b in boxes)) if boxes else 0.0
 
         log(f"[MULTITOOL] {result.stats['num_operations']} operations, "
             f"{result.stats['tool_changes']} tool changes, "

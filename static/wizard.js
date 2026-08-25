@@ -379,12 +379,16 @@
         msgs.push('"' + state.stock.name + '" (' + sheetW.toFixed(2) + '" x '
                   + sheetH.toFixed(2) + '") does not fit the machine.');
       }
+      // Half a kerf, because the profile pass rides OUTSIDE the outline: a part whose
+      // outline is flush with the sheet edge still cuts past it, into the spoilboard or
+      // straight through X0 into a soft limit.
+      var pad = gap / 2;
       items.forEach(function (item) {
         var b = item.box;
-        if (b.minX < -1e-6 || b.minY < -1e-6
-            || b.maxX > sheetW + 1e-6 || b.maxY > sheetH + 1e-6) {
+        if (b.minX - pad < -1e-6 || b.minY - pad < -1e-6
+            || b.maxX + pad > sheetW + 1e-6 || b.maxY + pad > sheetH + 1e-6) {
           bad[item.id] = true;
-          msgs.push(item.name + ' hangs off "' + state.stock.name + '".');
+          msgs.push(item.name + ' and its cut path hang off "' + state.stock.name + '".');
         }
       });
     }
@@ -1332,9 +1336,19 @@
     if (!state.stock) { alert('Pick the sheet you are cutting from first.'); return; }
     var used = combinedBBox();
     if (!used) { alert('Nothing has been cut from this sheet yet.'); return; }
+    if (validateLayout().msgs.length) {
+      alert('Fix the layout first - what is left of a sheet cannot be measured from a '
+            + 'nest that does not fit on it.');
+      return;
+    }
     var gap = jobKerf();
-    var right = { w: state.stock.width - used.maxX - gap, h: state.stock.height };
-    var above = { w: state.stock.width, h: state.stock.height - used.maxY - gap };
+    // Clamped to the sheet. A part dragged off the left edge sends maxX negative, and
+    // an unclamped subtraction then offered an offcut WIDER than the whole sheet - the
+    // exact fiction the offcut list exists to keep out of the rack.
+    var usedX = Math.min(Math.max(used.maxX, 0), state.stock.width);
+    var usedY = Math.min(Math.max(used.maxY, 0), state.stock.height);
+    var right = { w: state.stock.width - usedX - gap, h: state.stock.height };
+    var above = { w: state.stock.width, h: state.stock.height - usedY - gap };
     var pick = (right.w * right.h >= above.w * above.h) ? right : above;
     if (!(pick.w > 0.5 && pick.h > 0.5)) {
       alert('What is left of this sheet is too small to be worth racking.');
@@ -1385,9 +1399,10 @@
     drawLayout();
   }
 
-  /* How much of the sheet the parts occupy. Area, not bounding box: two parts nested
-     into each other's corners really do use less material, and that is the number a
-     shop cares about when deciding whether to open a new sheet. */
+  /* How much of the sheet the parts occupy, measured as the sum of their footprints -
+     the area each part denies to its neighbours, which is the number that decides
+     whether another one will fit. It is not the parts' true area: a part nested into
+     another's concave corner is counted twice over that overlap. */
   function updateUsage() {
     var el = $('#info-usage');
     if (!el || !state.stock) return;
@@ -1397,9 +1412,11 @@
       var s = placedShape(p);
       used += s.w * s.h;      // footprint: what the part denies to its neighbours
     });
-    var pct = sheetArea > 0 ? Math.min(999, (used / sheetArea) * 100) : 0;
-    el.textContent = pct.toFixed(0) + '% of ' + fmtSize(state.stock.width)
-                     + ' x ' + fmtSize(state.stock.height);
+    var pct = sheetArea > 0 ? (used / sheetArea) * 100 : 0;
+    // Over 100% is not a rounding artefact, it is parts that are not on the sheet, so
+    // it is reported rather than clamped to a meaningless ceiling.
+    el.textContent = (pct > 999 ? '>999' : pct.toFixed(0)) + '% of '
+                     + fmtSize(state.stock.width) + ' x ' + fmtSize(state.stock.height);
   }
 
   /* Shelf-pack the parts onto the sheet, tallest first.
@@ -1425,6 +1442,14 @@
 
     var x = margin, y = margin, rowHeight = 0, unplaced = 0;
     items.forEach(function (item) {
+      // Too wide for ANY shelf. Tested before the wrap, because wrapping first sent a
+      // part that can never fit to a fresh shelf and then placed it there regardless -
+      // hanging off the right edge and counted as placed, so "fill sheet" answered
+      // "how many fit?" with parts that do not.
+      if (item.w > sheetW - 2 * margin + 1e-6) {
+        unplaced++;
+        return;
+      }
       if (x + item.w > sheetW - margin + 1e-6) {   // next shelf
         x = margin;
         y += rowHeight + gap;
@@ -1980,8 +2005,13 @@
     // Origin marker + labeled axes, drawn last so they sit on top of the parts. The
     // origin (green dot) is the G54 lower-left; X (red) points +X to the right, Y (green)
     // points +Y up. Colors match the 3D preview so both views read the same.
-    if (bb) {
-      var o = worldToCanvas(bb.minX, bb.minY);
+    // On a sheet the G54 origin is the SHEET's corner, which is what the note above the
+    // canvas, the setup sheet and the generated program all say. Drawing it on the
+    // parts' bounding box put the marker in the middle of the sheet, contradicting both.
+    var originX = state.stock ? 0 : (bb && bb.minX);
+    var originY = state.stock ? 0 : (bb && bb.minY);
+    if (bb || state.stock) {
+      var o = worldToCanvas(originX, originY);
       ctx.save();
       ctx.fillStyle = col.ok;
       ctx.beginPath(); ctx.arc(o[0], o[1], 4, 0, 7); ctx.fill();
@@ -2008,7 +2038,16 @@
     if (bb) {
       ctx.textAlign = 'right'; ctx.font = '12px ' + CANVAS_MONO;
       ctx.fillStyle = v.tooBig ? col.danger : col.muted;
-      ctx.fillText(bb.w.toFixed(2) + '" x ' + bb.h.toFixed(2) + '"', canvas.width - 8, 18);
+      // The stock is what gets clamped to the table, so that is the size to show; the
+      // nest's own extent is the second line, for deciding whether another part fits.
+      ctx.fillText(state.stock
+        ? (fmtSize(state.stock.width) + ' x ' + fmtSize(state.stock.height) + ' sheet')
+        : (bb.w.toFixed(2) + '" x ' + bb.h.toFixed(2) + '"'), canvas.width - 8, 18);
+      if (state.stock) {
+        ctx.fillStyle = col.muted;
+        ctx.fillText('nest ' + bb.w.toFixed(2) + '" x ' + bb.h.toFixed(2) + '"',
+                     canvas.width - 8, 34);
+      }
     } else {
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.font = '13px ' + CANVAS_FONT;
@@ -2228,11 +2267,16 @@
         if (!state.parts.length) { alert('Add a part first.'); return; }
         var unplaced = autoArrange();
         resetHandleDir(); refitView(); drawLayout(); updateUsage(); invalidatePreview();
-        $('#layout-errors').textContent = unplaced
-          ? (unplaced + ' part' + (unplaced === 1 ? '' : 's') + ' would not fit'
-             + (state.stock ? ' on "' + state.stock.name + '"' : ' on the machine')
-             + ' and stayed where they were.')
-          : '';
+        // Prepended, never assigned: drawLayout has just written the real validation
+        // messages here, and overwriting them showed a clean layout that was not one
+        // until the operator tried to leave the step.
+        if (unplaced) {
+          var el = $('#layout-errors');
+          el.textContent = (unplaced + ' part' + (unplaced === 1 ? '' : 's')
+            + ' would not fit' + (state.stock ? ' on "' + state.stock.name + '"' : ' on the machine')
+            + ' and stayed where they were.')
+            + (el.textContent ? ' ' + el.textContent : '');
+        }
       });
     }
 
@@ -2243,11 +2287,14 @@
         if (res.reason) { alert(res.reason); return; }
         renderParts(); partListChanged();
         resetHandleDir(); refitView(); drawLayout(); updateUsage();
-        $('#layout-errors').textContent =
-          res.hitCap
-            ? ('Stopped at ' + state.parts.length + ' parts, the most one job can hold. '
-               + 'Cut this sheet, then fill another.')
-            : (res.added ? '' : 'No more copies fit on "' + state.stock.name + '".');
+        var note = res.hitCap
+          ? ('Stopped at ' + state.parts.length + ' parts, the most one job can hold. '
+             + 'Cut this sheet, then fill another.')
+          : (res.added ? '' : 'No more copies fit on "' + state.stock.name + '".');
+        if (note) {
+          var fe = $('#layout-errors');
+          fe.textContent = note + (fe.textContent ? ' ' + fe.textContent : '');
+        }
       });
     }
 
@@ -2361,7 +2408,11 @@
         var pl = placement(p);
         parts[i] = {
           name: p.name, dxf_base64: btoa(binary),
-          place_x: pl.x, place_y: pl.y, rotation: p.rotation, mirror: !!p.flipped,
+          // The corner for anything that reads a job file the way the wire format
+          // means "place", and the centre because that is what a part actually holds.
+          place_x: pl.x, place_y: pl.y,
+          center_x: p.cx, center_y: p.cy,
+          rotation: p.rotation, mirror: !!p.flipped,
           ops: p.ops || null,
         };
         if (--pending === 0) postJob(name, parts);
@@ -2470,7 +2521,15 @@
           part.name = saved.name || part.name;
           part.rotation = saved.rotation || 0;
           part.flipped = !!saved.mirror;
-          part.cx = saved.place_x; part.cy = saved.place_y;
+          // Rotation and mirror have to be set BEFORE the footprint is measured, or a
+          // job saved before format 2 comes back placed as though it were never turned.
+          if (typeof saved.center_x === 'number' && typeof saved.center_y === 'number') {
+            part.cx = saved.center_x; part.cy = saved.center_y;
+          } else {
+            var s0 = placedShape(part);          // format 1 stored only the corner
+            part.cx = (saved.place_x || 0) + s0.w / 2;
+            part.cy = (saved.place_y || 0) + s0.h / 2;
+          }
           if (saved.ops) part.ops = saved.ops;
         }
         if (++loaded === queue.length) {
@@ -2730,6 +2789,9 @@
     // The design itself. The server resolves the named sizes and validates every
     // feature again - this is a request, not an instruction.
     if (tubeDesignOn()) fd.append('tube_design', JSON.stringify(state.tubeDesign));
+    // A tube job can be proved in the air like any other; the checkbox said so long
+    // before this line existed.
+    if (state.dryRun) fd.append('dry_run', '1');
     fd.append('timestamp', timestamp());
     if (p) fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'tube');
@@ -2813,14 +2875,21 @@
   // part's operation list; the server orders the operations and inserts the tool changes.
   function generateMultiTool() {
     var bb = combinedBBox() || { minX: 0, minY: 0, w: 0, h: 0 };
+    var sheet = state.stock;
+    // Same rule as generateJob: on a sheet the placements are absolute and the origin
+    // is the sheet's corner. This path used to always subtract the bounding box, so a
+    // multi-tool nest was cut translated by however far the nest sat from the sheet's
+    // corner - while the setup sheet told the operator to zero on that corner.
     var placements = state.parts.map(function (p) {
       var pl = placement(p);
-      return { x: pl.x - bb.minX, y: pl.y - bb.minY };
+      return sheet ? { x: pl.x, y: pl.y } : { x: pl.x - bb.minX, y: pl.y - bb.minY };
     });
     // A part added after the deburr box was ticked has no chamfer op yet; the sync is
     // idempotent, so re-running it here catches up before the payload is built.
     if (state.chamfer.on) window.PCMultiTool.applyDeburr(state.chamfer);
-    var fd = window.PCMultiTool.buildFormData(placements, jobFilename(), timestamp());
+    var fd = window.PCMultiTool.buildFormData(placements, jobFilename(), timestamp(),
+      sheet ? { width: sheet.width, height: sheet.height, from_library: true,
+                name: sheet.name } : null);
     dbg('process-multitool:req', { parts: state.parts.length });
     return fetch('/process-multitool', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })

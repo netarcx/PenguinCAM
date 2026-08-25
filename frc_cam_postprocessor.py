@@ -24,6 +24,7 @@ import stroke_font
 import yaml
 from shapely import affinity
 from shapely.geometry import Point, Polygon, LinearRing, MultiPolygon, LineString
+from shapely.geometry import box as box_geom
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
@@ -290,7 +291,8 @@ class FRCPostProcessor:
         # proving a setup before committing to a cut. Zero means a real cutting program.
         # The lift is applied in _apply_z_frame, so it moves the three Z anchors and
         # every toolpath follows - the dry run is provably the same motion, raised.
-        self.dry_run_lift = 0.0
+        self.dry_run_lift = 0.0     # the lift ACTUALLY applied; see _apply_z_frame
+        self.dry_run_request = 0.0  # what the caller asked for
         self._apply_z_frame()   # sets material_top, retract_height, cut_depth
 
         # True when the tool is parked at safe height (above the clearance plane) and the
@@ -2097,6 +2099,14 @@ class FRCPostProcessor:
         """Place material_top / retract_height / cut_depth for the current datum and
         stock thickness. Called from __init__ and again whenever the thickness or the
         sacrifice depth changes (2.5D derives thickness from the CAD layers)."""
+        # A dry run has to clear the WORK, not a fixed number of inches. Two inches
+        # over a 2.5 in block still put the cutter half an inch into it - a
+        # non-rotating end mill fed through plywood at 50 ipm, under a banner
+        # promising the program does not cut anything. The requested lift is a
+        # minimum; the stock decides the rest.
+        self.dry_run_lift = (max(self.dry_run_request,
+                                 self.material_thickness + self.clearance_height + 0.25)
+                             if self.dry_run_request else 0.0)
         top = 0.0 if self.z_datum == Z_DATUM_STOCK_TOP else self.material_thickness
         top += self.dry_run_lift          # 0 for a real program
         self.material_top = top                                  # top face of the stock
@@ -2131,12 +2141,34 @@ class FRCPostProcessor:
         """
         if not math.isfinite(lift) or lift < 0:
             raise ValueError(f'Dry-run lift must be a positive number of inches, got {lift!r}')
-        self.dry_run_lift = float(lift)
+        self.dry_run_request = float(lift)
         self._apply_z_frame()
+        # Raising every retract by the lift can push the top of the program past the
+        # machine's Z travel, which is a soft-limit alarm mid-program rather than a
+        # crash - but the operator should hear it from us, not from the controller.
+        z_max = getattr(self.config, 'machine_z_max', None)
+        if z_max and self._safe_z() > z_max:
+            self.warnings.append(
+                f'Dry run retracts to Z{self._safe_z():.3f} in, above this machine\'s '
+                f'{z_max:.3f} in of Z travel. Lower the stock or the clearance height.')
 
     @property
     def is_dry_run(self) -> bool:
         return self.dry_run_lift > 0
+
+    def _dry_run_banner(self) -> List[str]:
+        """The block that tells an operator this program does not cut. Emitted by every
+        header - plate, job and tube - because a program that cuts air is dangerous
+        exactly when someone believes it is the real one."""
+        if not self.is_dry_run:
+            return []
+        return ['(*************************************************)',
+                '(* DRY RUN - THIS PROGRAM DOES NOT CUT ANYTHING   *)',
+                f'(* Every move is raised {self.dry_run_lift:.2f} in above the work *)',
+                '(* and the spindle is never started.              *)',
+                '(* Regenerate with dry run OFF to cut for real.   *)',
+                '(*************************************************)',
+                '']
 
     def _spindle_start_gcode(self, detail: str = '') -> List[str]:
         """Spindle-on lines, or the dry run's refusal to turn it."""
@@ -2212,52 +2244,159 @@ class FRCPostProcessor:
 
     # ---- engraving ------------------------------------------------------------
 
+    #: The font's tightest feature is the E/F/H crossbar spacing, 0.48 x cap height.
+    #: Separated strokes need that gap to exceed the cutter, so a legible letter needs
+    #: a cap height of at least this multiple of the tool diameter. Below it the swept
+    #: cuts merge and the label is a solid blob - which the old 1.2x gate allowed for
+    #: every common nesting cutter.
+    ENGRAVE_MIN_HEIGHT_PER_TOOL = 2.1
+
+    def _engrave_available_area(self):
+        """Where a label may go: inside the outline, clear of the edge, and clear of
+        every hole and pocket that will be machined out later.
+
+        Engraving runs BEFORE the interiors, so anything placed over a bore is cut away
+        with the slug and the part ships blank - which was the first version's behaviour
+        on any part with a central bearing bore.
+        """
+        poly = Polygon(self.perimeter)
+        margin = self.tool_radius + 0.05
+        area = poly.buffer(-margin)
+        if area.is_empty:
+            return area
+        for hole in (self.holes or []):
+            cx, cy = hole['center']
+            area = area.difference(Point(cx, cy).buffer(hole['diameter'] / 2.0 + margin))
+        for pocket in (self.pockets or []):
+            try:
+                area = area.difference(Polygon(pocket).buffer(margin))
+            except (ValueError, TypeError):
+                continue        # a pocket shapely cannot read is not a placement hazard
+        return area
+
+    def _engrave_placement(self, area, text, height):
+        """Find somewhere the whole label actually fits inside `area`.
+
+        Returns (origin_x, origin_y, height, strokes) or None. The old version took the
+        bounding-box centre of the available area, which for any L, U or C outline is
+        the notch - so a part's name was engraved into whatever was nested beside it.
+        Nothing is placed without proving the text's own box is contained.
+        """
+        if area.is_empty:
+            return None
+        minx, miny, maxx, maxy = area.bounds
+        floor = self.tool_diameter * self.ENGRAVE_MIN_HEIGHT_PER_TOOL
+        # Sized to the space rather than stepped down a fixed ladder: the text's width
+        # is linear in cap height, so the height that exactly spans the available width
+        # is arithmetic, and a coarse ladder just refuses names that would have fitted.
+        unit = stroke_font.text_width(text, 1.0)
+        span = maxx - minx
+        by_width = (span / unit) if unit > 0 else height
+        heights = []
+        for h in (height, by_width * 0.98, by_width * 0.85, by_width * 0.7, floor):
+            h = min(h, height)
+            if h >= floor - 1e-9 and not any(abs(h - k) < 1e-6 for k in heights):
+                heights.append(h)
+        heights.sort(reverse=True)
+        for h in heights:
+            strokes, _ = stroke_font.text_strokes(text, h)
+            pts = [p for stroke in strokes for p in stroke]
+            if not pts:
+                return None
+            # Measure the strokes themselves rather than assuming a 0..h em box: a
+            # comma hangs below the baseline and a dollar sign above the cap, and a
+            # label is only proved inside the part if what is measured is what is cut.
+            tx0, tx1 = min(p[0] for p in pts), max(p[0] for p in pts)
+            ty0, ty1 = min(p[1] for p in pts), max(p[1] for p in pts)
+            w, tall = tx1 - tx0, ty1 - ty0
+            if w > (maxx - minx) or tall > (maxy - miny):
+                continue
+            # Coarse search: the centre first (where a label belongs when it fits),
+            # then a grid. Bounded work - at most 4 heights x 26 positions.
+            span_x, span_y = (maxx - minx) - w, (maxy - miny) - tall
+            candidates = [(minx + span_x / 2.0, miny + span_y / 2.0)]
+            steps = 4
+            for i in range(steps + 1):
+                for j in range(steps + 1):
+                    candidates.append((minx + span_x * i / steps,
+                                       miny + span_y * j / steps))
+            for cx, cy in candidates:
+                if area.contains(box_geom(cx, cy, cx + w, cy + tall)):
+                    # Shift so the strokes' own extent starts at the proven corner.
+                    return cx - tx0, cy - ty0, h, strokes
+        return None
+
     def _engrave_body(self) -> List[str]:
         """Cut the part's name into its own face, shallow, with the loaded tool.
 
-        Placed inside the part's own outline and scaled to fit there, so the label
-        travels with the part rather than being cut into the offcut. Skipped - with a
-        warning, never silently - when the part is too small to carry a legible one: a
-        label smaller than the cutter is a smear, and a label that runs off the part is
-        a gouge in whatever is beside it.
+        Placed inside the part's own outline, clear of its holes and pockets, and only
+        where the whole label provably fits - so the label travels with the part rather
+        than into its neighbour or into a bore that gets machined away. Skipped with a
+        warning, never silently: an operator who ticked the box is expecting a label.
         """
         spec = self.engrave or {}
-        text = sanitize_comment(str(spec.get('text') or ''), fallback='')
+        raw_text = str(spec.get('text') or '')
+        text = sanitize_comment(raw_text, fallback='')
         if not text:
+            self.warnings.append(
+                f'{raw_text!r} has no characters that can be engraved; no name was cut.')
             return []
+        # Characters with no glyph become a visible dash rather than a mark that reads
+        # as some other character - a label that silently changes is worse than one
+        # that is visibly incomplete.
+        engraved, dropped = [], []
+        for ch in text.upper():
+            if ch in stroke_font.GLYPHS:
+                engraved.append(ch)
+            else:
+                engraved.append('-')
+                dropped.append(ch)
+        text = ''.join(engraved)
+        if dropped:
+            self.warnings.append(
+                f'{text}: {"".join(sorted(set(dropped)))} cannot be engraved and became '
+                f'dashes.')
         if self.perimeter is None:
             self.warnings.append('Nothing to engrave on: this part has no outline.')
             return []
 
-        height = float(spec.get('height') or 0.18)
-        depth = float(spec.get('depth') or 0.01)
-        poly = Polygon(self.perimeter)
-        # Keep the label off the edge by the tool radius plus a margin, so a wide
-        # cutter cannot walk over the profile it is labelling.
-        inner = poly.buffer(-(self.tool_radius + 0.05))
-        if inner.is_empty:
-            self.warnings.append(f'{text}: too small to engrave a name on; skipped.')
+        try:
+            height = float(spec.get('height') or 0.18)
+            depth = float(spec.get('depth') or 0.01)
+        except (TypeError, ValueError):
+            self.warnings.append('The engraving height and depth must be numbers; skipped.')
             return []
-        if hasattr(inner, 'geoms'):
-            inner = max(inner.geoms, key=lambda g: g.area)
-
-        minx, miny, maxx, maxy = inner.bounds
-        avail_w, avail_h = maxx - minx, maxy - miny
-        height = min(height, avail_h * 0.8)
-        width = stroke_font.text_width(text, height)
-        if width > avail_w:                     # shrink to fit, then give up
-            height *= avail_w / width
-            width = stroke_font.text_width(text, height)
-        if height < max(self.tool_diameter * 1.2, 0.08):
-            self.warnings.append(f'{text}: no room for a legible name on this part; skipped.')
+        if not (math.isfinite(height) and math.isfinite(depth)) or height <= 0 or depth <= 0:
+            self.warnings.append('The engraving height and depth must be positive; skipped.')
+            return []
+        if depth >= self.material_thickness:
+            self.warnings.append(
+                f'An engraving {depth:.3f} in deep would go through {self.material_thickness:.3f} in '
+                f'stock; skipped.')
             return []
 
-        strokes, width = stroke_font.text_strokes(text, height)
-        ox = minx + (avail_w - width) / 2.0
-        oy = miny + (avail_h - height) / 2.0
+        min_height = self.tool_diameter * self.ENGRAVE_MIN_HEIGHT_PER_TOOL
+        area = self._engrave_available_area()
+        placed = self._engrave_placement(area, text, max(height, min_height))
+        if placed is None:
+            # Name the real obstacle. Blaming the geometry when the cutter is the
+            # problem sends someone looking for space they already have.
+            if height < min_height:
+                self.warnings.append(
+                    f'{text}: a {self.tool_diameter:.4f} in cutter cannot write letters '
+                    f'{height:.3f} in tall - it needs at least '
+                    f'{min_height:.3f} in. Use a finer bit or a taller name; skipped.')
+            else:
+                self.warnings.append(
+                    f'{text}: no clear space on this part for a legible name; skipped.')
+            return []
+        ox, oy, height, strokes = placed
 
         cut_z = self.material_top - depth
-        clear_z = self.material_top + 0.1
+        # Lateral moves between letters go at the same height everything else in this
+        # program traverses at, not a hard-coded one - a team that raised the clearance
+        # for hold-down hardware gets that clearance here too.
+        clear_z = self.retract_height
         gcode = ['', '(===== ENGRAVE PART NAME =====)',
                  f'(Text: {text})',
                  f'(Cap height {height:.3f} in, {depth:.3f} in deep, '
@@ -2458,14 +2597,7 @@ class FRCPostProcessor:
             gcode.append(f"(ZMIN: {self.cut_depth:.4f}\")")
             gcode.append(f"(Retract Z: {self.retract_height:.4f}\")")
             gcode.append("")
-        if self.is_dry_run:
-            gcode.append("(*************************************************)")
-            gcode.append("(* DRY RUN - THIS PROGRAM DOES NOT CUT ANYTHING   *)")
-            gcode.append(f"(* Every move is raised {self.dry_run_lift:.2f} in above the work *)")
-            gcode.append("(* and the spindle is never started.              *)")
-            gcode.append("(* Regenerate with dry run OFF to cut for real.   *)")
-            gcode.append("(*************************************************)")
-            gcode.append("")
+        gcode.extend(self._dry_run_banner())
 
         gcode.append("(Z-AXIS REFERENCE:)")
         gcode.append("(  Z=0 is at " + ("TOP OF STOCK" if self.z_datum == Z_DATUM_STOCK_TOP
@@ -5594,8 +5726,10 @@ class FRCPostProcessor:
         end_x = -clearance  # Near side
 
         # Z positions
-        z_top = tube_height  # Top of tube
-        z_safe = tube_height + 0.25  # Safe height above tube
+        # + dry_run_lift: in a dry run the whole tube frame rises with the plate
+        # frame, so the tool traces the same path in the air above the jig.
+        z_top = tube_height + self.dry_run_lift        # Top of tube
+        z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
         z_final = z_top - total_depth  # Final depth (just over half height)
 
         chord_face = roughing_y + tool_radius  # Face position at chord (start/end of arc)
@@ -5832,6 +5966,7 @@ class FRCPostProcessor:
         gcode.append(f'( Tube size: {tube_size} )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" end mill )')
         gcode.append('( )')
+        gcode.extend(self._dry_run_banner())
         gcode.append('( SETUP INSTRUCTIONS: )')
         gcode.append('( 1. Mount tube in jig with end facing user )')
         gcode.append(self._tube_wcs_setup_comment())
@@ -5856,7 +5991,7 @@ class FRCPostProcessor:
         gcode.append('')
 
         # Safe height above the tube, in work coordinates (portable - no G53).
-        tube_safe_z = tube_height + 0.25
+        tube_safe_z = tube_height + self.dry_run_lift + 0.25
 
         # === PHASE 1: FACE FIRST HALF ===
         gcode.append('( === PHASE 1: FACE FIRST HALF === )')
@@ -6089,6 +6224,7 @@ class FRCPostProcessor:
         else:
             gcode.append('( One-face mode: face 1 pattern mirrored onto opposite side )')
         gcode.append('( )')
+        gcode.extend(self._dry_run_banner())
         gcode.append('( SETUP INSTRUCTIONS: )')
         gcode.append('( 1. Mount tube in jig with end facing spindle )')
         if self.tube_wcs == 'G54':
@@ -6116,7 +6252,7 @@ class FRCPostProcessor:
         gcode.append('')
 
         # Safe height above the tube, in work coordinates (portable - no G53).
-        tube_safe_z = tube_height + 0.25
+        tube_safe_z = tube_height + self.dry_run_lift + 0.25
 
         # Retract BEFORE the first lateral move. Without this the program went straight
         # from the WCS line to `G0 X.. Y..`, so the first rapid ran at whatever height the
@@ -6567,8 +6703,10 @@ class FRCPostProcessor:
         end_x = -clearance  # Near side
 
         # Z positions
-        z_top = tube_height  # Top of tube
-        z_safe = tube_height + 0.25  # Safe height above tube
+        # + dry_run_lift: in a dry run the whole tube frame rises with the plate
+        # frame, so the tool traces the same path in the air above the jig.
+        z_top = tube_height + self.dry_run_lift        # Top of tube
+        z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
         z_final = z_top - total_depth  # Final depth (just over half height)
 
         gcode.append(f'( Tube width: {tube_width:.2f}" x height: {tube_height:.2f}" )')
@@ -6717,10 +6855,15 @@ class FRCPostProcessor:
         return gcode
 
 
-def validate_job_layout(parts, machine_x_max, machine_y_max, min_gap=0.0):
-    """Validate a multi-part job layout. The parts' combined bounding box IS the stock,
-    so the only fit check is that it fits the machine; there's no separate sheet to be
-    "outside" of. Parts also must not overlap or sit closer than min_gap.
+def validate_job_layout(parts, machine_x_max, machine_y_max, min_gap=0.0, stock=None):
+    """Validate a multi-part job layout: it fits the machine, it fits the stock, and no
+    two parts collide.
+
+    Without a sheet the parts' combined bounding box IS the stock, so the only fit check
+    is the machine. Given a sheet (`stock`), placements are absolute on that sheet and
+    every part has to be ON it - the check the browser does, repeated here because the
+    browser is not the only thing that can post a job, and a part hanging off the sheet
+    is a cut into the spoilboard or the clamps.
 
     Args:
         parts: list of dicts, each with 'name' and 'bbox' = (minX, minY, maxX, maxY),
@@ -6729,6 +6872,8 @@ def validate_job_layout(parts, machine_x_max, machine_y_max, min_gap=0.0):
         machine_x_max, machine_y_max: machine travel envelope (inches).
         min_gap: required clearance between parts (inches). Pass the tool diameter to
                  reject parts closer than one kerf. Defaults to 0 (touching allowed).
+        stock: (width, height) of the sheet the parts are placed on, or None when the
+               parts' own bounding box is the stock.
 
     Returns:
         List of error dicts: {'part_index': int|None, 'name': str|None, 'error': str}.
@@ -6737,9 +6882,32 @@ def validate_job_layout(parts, machine_x_max, machine_y_max, min_gap=0.0):
     errors = []
     tol = 1e-6
 
-    # The combined bounding box (the stock) must fit the machine.
     boxes = [p.get('bbox') for p in parts if p.get('bbox')]
-    if boxes:
+    if stock:
+        sheet_w, sheet_h = float(stock[0]), float(stock[1])
+        if sheet_w > machine_x_max + tol or sheet_h > machine_y_max + tol:
+            errors.append({
+                'part_index': None, 'name': None,
+                'error': (f"The stock ({sheet_w:.2f}\" x {sheet_h:.2f}\") exceeds the machine "
+                          f"({machine_x_max:.1f}\" x {machine_y_max:.1f}\").")
+            })
+        # The cutter rides half a kerf OUTSIDE the outline on a profile pass, so a part
+        # whose outline is flush with the sheet edge still cuts past it.
+        pad = min_gap / 2.0
+        for i, part in enumerate(parts):
+            b = part.get('bbox')
+            if b is None:
+                continue
+            if (b[0] - pad < -tol or b[1] - pad < -tol
+                    or b[2] + pad > sheet_w + tol or b[3] + pad > sheet_h + tol):
+                name = part.get('name', f'part {i + 1}')
+                errors.append({
+                    'part_index': i, 'name': name,
+                    'error': (f"{name} and its cut path do not fit on the "
+                              f"{sheet_w:.2f}\" x {sheet_h:.2f}\" stock.")
+                })
+    elif boxes:
+        # The combined bounding box (the stock) must fit the machine.
         w = max(b[2] for b in boxes) - min(b[0] for b in boxes)
         h = max(b[3] for b in boxes) - min(b[1] for b in boxes)
         if w > machine_x_max + tol or h > machine_y_max + tol:
@@ -6748,6 +6916,18 @@ def validate_job_layout(parts, machine_x_max, machine_y_max, min_gap=0.0):
                 'name': None,
                 'error': (f"Parts ({w:.2f}\" x {h:.2f}\") exceed the machine "
                           f"({machine_x_max:.1f}\" x {machine_y_max:.1f}\").")
+            })
+    if boxes:
+        # Absolute travel, not just size. Checking the bounding box's WIDTH was only
+        # ever equivalent while placements were bbox-relative; with a sheet they are
+        # absolute, so a part at X42 on a 48" sheet passed a 31" machine check.
+        far_x = max(b[2] for b in boxes) + min_gap / 2.0
+        far_y = max(b[3] for b in boxes) + min_gap / 2.0
+        if far_x > machine_x_max + tol or far_y > machine_y_max + tol:
+            errors.append({
+                'part_index': None, 'name': None,
+                'error': (f"The job reaches X{far_x:.2f}\" Y{far_y:.2f}\", past the machine's "
+                          f"{machine_x_max:.1f}\" x {machine_y_max:.1f}\" travel.")
             })
     for i, part in enumerate(parts):
         if part.get('bbox') is None:

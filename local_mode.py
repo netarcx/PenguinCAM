@@ -18,6 +18,7 @@ gate means anyone who can reach the port can use it.
 """
 
 import glob
+import math
 import os
 import re
 
@@ -197,8 +198,9 @@ def _yaml_scalar(value) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, float):
-        return f'{value:g}' if value == value and value not in (float('inf'), float('-inf')) \
-               else _yaml_quoted(value)
+        # repr, not %g: %g keeps six significant digits, so a hand-written value on an
+        # unknown field lost precision every time anything else in the block was saved.
+        return repr(value) if math.isfinite(value) else _yaml_quoted(value)
     if value is None:
         return 'null'
     if isinstance(value, (dict, list, tuple)):
@@ -252,6 +254,11 @@ def _yaml_scalar_or_quoted(field: str, value):
     """Numbers stay numbers where that reads better; names and measurements written as
     text ('6mm') stay quoted so their units survive."""
     if field in ('flutes', 'included_angle') or isinstance(value, bool):
+        return _yaml_scalar(value)
+    # A structured value on a KNOWN field - `notes:` written as a list, say - was
+    # str()'d into a quoted Python repr, so a team's two-line note came back as the
+    # single string "['bowed', 'clamp middle']" the first time anything was saved.
+    if isinstance(value, (dict, list, tuple)) or value is None:
         return _yaml_scalar(value)
     return _yaml_quoted(value)
 

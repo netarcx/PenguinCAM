@@ -1049,7 +1049,7 @@
     touch();
   };
 
-  api.buildFormData = function (placements, jobName, timestamp) {
+  api.buildFormData = function (placements, jobName, timestamp, stock) {
     var fd = new FormData();
     var job = {
       material: ctx.state.material,
@@ -1064,6 +1064,9 @@
     // Job-wide, not per operation: every tool change re-zeros Z to the same surface.
     job.z_datum = ctx.state.zDatum || 'board';
     if (ctx.state.dryRun) job.dry_run_lift = 2.0;
+    // The sheet the placements are absolute on, so the server checks the parts against
+    // the real stock rather than against their own bounding box.
+    if (stock) job.stock = stock;
     ctx.state.parts.forEach(function (part, i) {
       var place = placements[i] || { x: 0, y: 0 };
       job.parts.push({
