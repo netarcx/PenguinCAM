@@ -19,6 +19,8 @@ from typing import List, Tuple, Optional, Dict, Any
 
 # Third-party
 import ezdxf
+
+import stroke_font
 import yaml
 from shapely import affinity
 from shapely.geometry import Point, Polygon, LinearRing, MultiPolygon, LineString
@@ -321,6 +323,14 @@ class FRCPostProcessor:
         # 'targets'}) to append a V-bit edge-break pass after the profile cut, behind a
         # manual tool change. None (the default) leaves the program exactly as before.
         self.chamfer_pass = None
+        # Engrave the part's name into its own face, so a nest of twelve similar
+        # brackets is not a puzzle once it is off the machine. None = off; otherwise
+        # {'text': str, 'height': in, 'depth': in}.
+        self.engrave = None
+        # Advice raised while building a toolpath, as opposed to self.errors which
+        # refuses the program. A skipped engraving is the case that needs it: silence
+        # would leave an operator expecting a label that is not there.
+        self.warnings = []
 
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
@@ -1904,6 +1914,7 @@ class FRCPostProcessor:
         # (wider than the bit can cut, through the stock, part too narrow for the break)
         # fails the whole program here rather than surfacing as errors recorded on an
         # otherwise "successful" result.
+        self.warnings = []
         chamfer_body = []
         if self.chamfer_pass:
             self._deferred_tab_positions = []
@@ -1920,6 +1931,12 @@ class FRCPostProcessor:
         if self.chamfer_pass and not chamfer_body:
             warnings.append('The deburr / chamfer pass matched no edges on this part '
                             'and was skipped.')
+
+        # Engraved part name, cut into the face while the stock is still whole. After
+        # the profile the part is held by tabs alone, and a label is exactly the kind of
+        # light, chattery cut that would break one.
+        if self.engrave:
+            gcode.extend(self._engrave_body())
 
         # Interior features (holes + pockets). Extracted to a shared helper so the
         # multi-part job assembler can collate interiors across parts. In single-part
@@ -1979,7 +1996,7 @@ class FRCPostProcessor:
             success=True,
             gcode='\n'.join(gcode),
             filename=filename,
-            warnings=warnings,
+            warnings=warnings + [w for w in self.warnings if w not in warnings],
             stats={
                 'num_holes': len(self.holes) if hasattr(self, 'holes') else 0,
                 'num_pockets': len(self.pockets) if hasattr(self, 'pockets') else 0,
@@ -2026,9 +2043,15 @@ class FRCPostProcessor:
         # _emit_phase), so the tool starts each phase up at safe height: flag the first
         # feature of each to rapid down to the clearance plane before its plunge feed.
 
-        # Phase A: interiors (holes + pockets), no per-feature pauses.
+        # Phase A: interiors (holes + pockets), no per-feature pauses, preceded by the
+        # engraved part name - cut while the stock is still whole, because afterwards the
+        # part hangs on tabs and a light chattery label cut is exactly what breaks one.
         self._pending_clearance_rapid = True
-        interior = self._generate_interior_gcode(emit_contour_pauses=False)
+        self.warnings = []
+        interior = self._engrave_body() if self.engrave else []
+        if interior:
+            self._pending_clearance_rapid = True
+        interior = interior + self._generate_interior_gcode(emit_contour_pauses=False)
 
         # Phase C: perimeter cut, deferring tab removal to phase D.
         perimeter = []
@@ -2054,7 +2077,8 @@ class FRCPostProcessor:
             tab_removal = self._generate_tab_removal_gcode(self._deferred_tab_positions)
 
         return {'interior': interior, 'perimeter': perimeter, 'chamfer': chamfer,
-                'tab_removal': tab_removal, 'errors': list(self.errors)}
+                'tab_removal': tab_removal, 'errors': list(self.errors),
+                'warnings': list(self.warnings)}
 
     # ---- Portability helpers: work-coordinate safe moves + optional coolant/park -------
     # Everything below emits G54 work-coordinate G-code by default. Machine-coordinate
@@ -2185,6 +2209,72 @@ class FRCPostProcessor:
             self.set_z_datum(Z_DATUM_BOARD)
             print("  Note: tube jobs are zeroed to the tube in its jig; the stock-top Z "
                   "datum does not apply and was not used.")
+
+    # ---- engraving ------------------------------------------------------------
+
+    def _engrave_body(self) -> List[str]:
+        """Cut the part's name into its own face, shallow, with the loaded tool.
+
+        Placed inside the part's own outline and scaled to fit there, so the label
+        travels with the part rather than being cut into the offcut. Skipped - with a
+        warning, never silently - when the part is too small to carry a legible one: a
+        label smaller than the cutter is a smear, and a label that runs off the part is
+        a gouge in whatever is beside it.
+        """
+        spec = self.engrave or {}
+        text = sanitize_comment(str(spec.get('text') or ''), fallback='')
+        if not text:
+            return []
+        if self.perimeter is None:
+            self.warnings.append('Nothing to engrave on: this part has no outline.')
+            return []
+
+        height = float(spec.get('height') or 0.18)
+        depth = float(spec.get('depth') or 0.01)
+        poly = Polygon(self.perimeter)
+        # Keep the label off the edge by the tool radius plus a margin, so a wide
+        # cutter cannot walk over the profile it is labelling.
+        inner = poly.buffer(-(self.tool_radius + 0.05))
+        if inner.is_empty:
+            self.warnings.append(f'{text}: too small to engrave a name on; skipped.')
+            return []
+        if hasattr(inner, 'geoms'):
+            inner = max(inner.geoms, key=lambda g: g.area)
+
+        minx, miny, maxx, maxy = inner.bounds
+        avail_w, avail_h = maxx - minx, maxy - miny
+        height = min(height, avail_h * 0.8)
+        width = stroke_font.text_width(text, height)
+        if width > avail_w:                     # shrink to fit, then give up
+            height *= avail_w / width
+            width = stroke_font.text_width(text, height)
+        if height < max(self.tool_diameter * 1.2, 0.08):
+            self.warnings.append(f'{text}: no room for a legible name on this part; skipped.')
+            return []
+
+        strokes, width = stroke_font.text_strokes(text, height)
+        ox = minx + (avail_w - width) / 2.0
+        oy = miny + (avail_h - height) / 2.0
+
+        cut_z = self.material_top - depth
+        clear_z = self.material_top + 0.1
+        gcode = ['', '(===== ENGRAVE PART NAME =====)',
+                 f'(Text: {text})',
+                 f'(Cap height {height:.3f} in, {depth:.3f} in deep, '
+                 f'{self.tool_diameter:.4f} in tool)',
+                 f'G0 Z{self._safe_z():.4f}  ; Safe Z clearance']
+        for stroke in strokes:
+            if len(stroke) < 2:
+                continue
+            x0, y0 = ox + stroke[0][0], oy + stroke[0][1]
+            gcode.append(f'G0 X{x0:.4f} Y{y0:.4f}')
+            gcode.append(f'G0 Z{clear_z:.4f}')
+            gcode.append(f'G1 Z{cut_z:.4f} F{self.plunge_rate:.1f}  ; Down to engraving depth')
+            for x, y in stroke[1:]:
+                gcode.append(f'G1 X{ox + x:.4f} Y{oy + y:.4f} F{self.feed_rate:.1f}')
+            gcode.append(f'G0 Z{clear_z:.4f}')
+        gcode.append(f'G0 Z{self._safe_z():.4f}  ; Safe Z clearance')
+        return gcode
 
     def _tube_wcs_activate_gcode(self) -> str:
         """The work-coordinate-system line that opens a tube program. Default G54 (the

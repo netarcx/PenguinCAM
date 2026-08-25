@@ -60,6 +60,9 @@
     // and the origin is the SHEET's corner, so a part keeps its place on the material
     // between jobs.
     stock: null,
+    // Cut each part's name into its own face. Off by default: it costs cycle time and
+    // needs a fine cutter, so it should be a decision rather than a surprise.
+    engrave: false,
     // Optional ceiling on the depth of one contour pass (inches; null = automatic).
     // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
     max_pass_depth: null,
@@ -452,6 +455,7 @@
     // Always shown, both ways round: this is the number the operator has to match on
     // the machine, so it should never be something you have to remember choosing.
     if (state.dryRun) chips.push('DRY RUN - cuts air');
+    if (state.engrave && state.mode === '2d') chips.push('names engraved');
     chips.push(state.mode === 'tubing' ? 'Z0 = tube origin'
                : (state.zDatum === 'stock_top' ? 'Z0 = stock top' : 'Z0 = spoilboard'));
     if (state.mode === 'tubing') {
@@ -670,6 +674,16 @@
       bitSel.addEventListener('change', function () {
         if (this.value) applyBit(this.value);
         this.value = '';           // a picker, not a setting: the field is the truth
+      });
+    }
+
+    var engraveBox = $('#f-engrave');
+    if (engraveBox) {
+      engraveBox.addEventListener('change', function () {
+        state.engrave = this.checked;
+        var note = $('#engrave-note'); if (note) note.style.display = this.checked ? '' : 'none';
+        updateSummary();
+        invalidatePreview();
       });
     }
 
@@ -2549,6 +2563,7 @@
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     job.z_datum = state.zDatum;
     if (state.dryRun) job.dry_run = '1';
+    if (state.engrave) job.engrave = '1';
     var sheet = state.stock;
     if (sheet) {
       // The sheet is the stock, so placements are absolute on it and the origin is
@@ -2624,6 +2639,7 @@
     if (state.max_pass_depth) fd.append('max_pass_depth', state.max_pass_depth);
     fd.append('z_datum', state.zDatum);
     if (state.dryRun) fd.append('dry_run', '1');
+    if (state.engrave) fd.append('engrave', '1');
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'process');

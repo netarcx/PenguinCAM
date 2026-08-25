@@ -445,6 +445,11 @@ def _maybe_refresh_team_config():
 #: How far a dry run lifts the whole program above the work.
 DRY_RUN_LIFT_IN = 2.0
 
+#: Engraved part names: cap height and depth. Shallow on purpose - a label is read, not
+#: structural, and every thousandth costs cycle time on a light chattery cut.
+ENGRAVE_HEIGHT_IN = 0.18
+ENGRAVE_DEPTH_IN = 0.01
+
 
 def _wants_dry_run(value) -> bool:
     """Did this request ask for a dry run? Anything but an explicit yes is a real cut,
@@ -1284,6 +1289,7 @@ def process_file():
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
         dry_run = _wants_dry_run(request.form.get('dry_run'))
+        engrave = _wants_dry_run(request.form.get('engrave'))
         log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
 
         # Call post-processor API based on mode
@@ -1409,6 +1415,9 @@ def process_file():
                 )
                 if dry_run:
                     pp.set_dry_run(DRY_RUN_LIFT_IN)
+                if engrave:
+                    pp.engrave = {'text': base_name, 'height': ENGRAVE_HEIGHT_IN,
+                                  'depth': ENGRAVE_DEPTH_IN}
 
                 # Apply material preset (for specific machine if selected), then scale
                 # it to the actual tool - the preset numbers are tuned for the 4 mm
@@ -1687,6 +1696,7 @@ def process_job():
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
         dry_run = _wants_dry_run(job.get('dry_run'))
+        engrave = _wants_dry_run(job.get('engrave'))
 
         log(f"[JOB] {len(parts_spec)} parts, tool {tool_diameter}, material {material}, thickness {thickness}")
 
@@ -1718,6 +1728,11 @@ def process_job():
                                   units='inch', config=team_config, z_datum=z_datum)
             if dry_run:
                 pp.set_dry_run(DRY_RUN_LIFT_IN)
+            if engrave:
+                # Its OWN name: the whole point is telling one part from another once
+                # they are off the machine and in a pile.
+                pp.engrave = {'text': name, 'height': ENGRAVE_HEIGHT_IN,
+                              'depth': ENGRAVE_DEPTH_IN}
             pp.apply_material_preset(material, machine_id)
             pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
             if max_pass_depth is not None:
@@ -1756,10 +1771,14 @@ def process_job():
             return jsonify({'success': False, 'part_errors': layout_errors}), 400
 
         # Pass 2: generate each part's toolpath body, then stitch into one program.
+        job_warnings = []
         part_jobs = []
         response_parts = []
         for i, item in enumerate(prepared):
             phases = item['pp'].generate_part_phases()
+            # A skipped engraving is advice, not a refusal - but it must reach the
+            # operator, who is otherwise expecting a label that is not there.
+            job_warnings.extend(phases.get('warnings') or [])
             if phases['errors']:
                 for e in phases['errors']:
                     gen_errors.append({'part_index': i, 'name': item['name'], 'error': e})
@@ -1808,6 +1827,9 @@ def process_job():
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),
             'stock': {'width': round(stock_w, 4), 'height': round(stock_h, 4)},
             'parts': response_parts,
+            # Advice from the toolpath builders - a name too small to engrave, say.
+            # The job response never carried these, so they had nowhere to surface.
+            'warnings': job_warnings + list(result.warnings or []),
         })
 
     except ValueError as e:

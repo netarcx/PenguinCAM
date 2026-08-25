@@ -539,6 +539,27 @@ def main():
             Operation('perimeter', 2)])]),
           expect_drill=True, max_engagement=1 / 32)
 
+    # Engraved part names: user text reaching a G-code comment, and a light cut in the
+    # middle of a face. The audit's text rules (ASCII, no nested parens, no brackets)
+    # are exactly what a part name can break.
+    def engraved_run(name):
+        def _go():
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(material_thickness=0.25, tool_diameter=0.0625,
+                                      units='inch')
+                pp.apply_material_preset('plywood')
+                pp.engrave = {'text': name, 'height': 0.18, 'depth': 0.01}
+                pp.load_dxf(plate(HOLES, POCKET))
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                return pp.generate_gcode(suggested_filename='engraved',
+                                         timestamp='2026-08-25 03:00:00')
+        return _go
+
+    for label in ('GEARBOX-L', 'Bracket (left) [v2]', 'ARM_2129#3'):
+        audit(f'engrave/{label[:12]}', engraved_run(label))
+
     # Standard-mode (single-tool) programs with the deburr / chamfer pass appended:
     # the same physical checks, on the non-multitool path that generates them. Two
     # angles, because the depth follows from the angle and a wrong tangent would move

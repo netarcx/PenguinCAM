@@ -171,6 +171,17 @@
                     pauses for a manual tool change, and you re-zero Z, at every switch.
                 </p>
 
+                <label class="field inline" id="engrave-toggle">
+                    <input type="checkbox" id="f-engrave" autocomplete="off">
+                    <span>Engrave each part&rsquo;s name into it</span>
+                </label>
+                <p class="hint" id="engrave-note" style="display:none">
+                    Cut shallow into the face while the sheet is still whole, so a nest of
+                    similar parts is not a puzzle once it is off the machine. Needs a fine
+                    cutter &mdash; a name is skipped, with a warning, on a part too small
+                    to carry a legible one.
+                </p>
+
                 <!-- Deburr / chamfer pass (2D standard mode only). -->
                 <div id="chamfer-fields">
                     <label class="field inline">
