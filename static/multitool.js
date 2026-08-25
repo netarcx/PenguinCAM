@@ -877,6 +877,56 @@
 
   /** Build the multipart body for /process-multitool. `placements` comes from wizard.js,
    *  which owns the layout canvas and therefore where each part sits on the stock. */
+  /** The Setup step's deburr checkbox, realized as multi-tool operations: make sure a
+   *  matching V-bit is in the tool table and every part's plan ends with a chamfer op.
+   *  Idempotent - parts that already have a chamfer op (auto or hand-made) are left
+   *  alone, so re-running after adding a part only fills the gap. */
+  api.applyDeburr = function (chamfer) {
+    if (!api.enabled()) return;
+    var vbit = tools().filter(function (t) {
+      return t.type === 'vbit' && Math.abs((t.diameter || 0) - chamfer.bit) < 5e-4
+             && Math.abs((t.included_angle || 90) - chamfer.angle) < 0.5;
+    })[0];
+    if (!vbit) {
+      vbit = { slot: nextSlot(), name: chamfer.angle + ' deg V-bit',
+               diameter: chamfer.bit, diameter_text: String(chamfer.bit),
+               flutes: 2, type: 'vbit', included_angle: chamfer.angle, _deburr: true };
+      tools().push(vbit);
+    }
+    var targets = [];
+    if (chamfer.perimeter) targets.push('perimeter');
+    if (chamfer.holes) targets.push('holes');
+    if (chamfer.pockets) targets.push('pockets');
+    ctx.state.parts.forEach(function (part) {
+      var ops = opsFor(part);
+      if (ops.some(function (o) { return o.op_type === 'chamfer'; })) return;
+      ops.push({ op_type: 'chamfer', tool_slot: vbit.slot, name: 'Edge break',
+                 depth: null, scope: { targets: targets.slice(), width: chamfer.width },
+                 _deburr: true });
+    });
+    api.render();
+    touch();
+  };
+
+  /** Undo of applyDeburr: removes only what it added (flagged _deburr), so chamfer
+   *  operations and V-bits the user authored by hand survive unticking the box. */
+  api.clearDeburr = function () {
+    if (!ctx) return;
+    ctx.state.parts.forEach(function (part) {
+      part.ops = opsFor(part).filter(function (o) { return !o._deburr; });
+    });
+    var stillUsed = ctx.state.parts.some(function (p) {
+      return opsFor(p).some(function (o) {
+        var t = toolBySlot(o.tool_slot);
+        return t && t._deburr;
+      });
+    });
+    if (!stillUsed) ctx.state.tools = tools().filter(function (t) { return !t._deburr; });
+    if (!tools().length) ctx.state.tools = defaultTools();
+    api.render();
+    touch();
+  };
+
   api.buildFormData = function (placements, jobName, timestamp) {
     var fd = new FormData();
     var job = {
@@ -888,6 +938,7 @@
       tools: api.toolsPayload(),
       parts: [],
     };
+    if (ctx.state.max_pass_depth) job.max_pass_depth = ctx.state.max_pass_depth;
     ctx.state.parts.forEach(function (part, i) {
       var place = placements[i] || { x: 0, y: 0 };
       job.parts.push({

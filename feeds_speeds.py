@@ -13,7 +13,8 @@ Model (all lengths in inches, feeds in IPM, RPM in rev/min)::
 
     chipload_target = chipload_ref * (D / D_ref) ** DIAMETER_EXPONENT * op_factor
     rpm             = clamp(material.preferred_rpm, machine.rpm_min, machine.rpm_max)
-    feed_raw        = rpm * flutes * chipload_target * rigidity_factor
+    feed_flutes     = min(flutes, material.feed_flutes_max)   # evacuation limit (metals)
+    feed_raw        = rpm * feed_flutes * chipload_target * rigidity_factor
     feed            = min(feed_raw, machine.xy_feed_max)          # machine limit
     chipload_done   = feed / (rpm * flutes)                       # achieved chipload
     ramp_feed       = feed * ramp_multiplier
@@ -150,14 +151,28 @@ MATERIALS = {
         'max_flutes_soft': 1,
     },
     'aluminum_6061': {
+        # Derated 2026-08-24 in lockstep with the aluminum preset (30 IPM, 0.06"
+        # slot at the 4 mm reference): the old constants reproduced the 55 IPM /
+        # 1.27 x D numbers that snapped real 1/8" cutters. slotting_multiplier and
+        # slot_stepdown_ratio now land on the derated preset; chipload_ref stays for
+        # partial-engagement work, and chipload_min drops to 0.0010 - conservative
+        # single-flute practice on light routers runs there without rubbing, and a
+        # floor of 0.0015 would flag the derated feeds themselves.
         'unit_power_hp': 0.3,
         'name': '6061 Aluminum',
         'preferred_rpm': 18000,
-        'chipload_ref': 0.0032, 'chipload_min': 0.0015, 'chipload_max': 0.0050,
-        'slotting_multiplier': 0.875,
+        'chipload_ref': 0.0032, 'chipload_min': 0.0010, 'chipload_max': 0.0050,
+        'slotting_multiplier': 0.52,
         'ramp_multiplier': 0.64, 'plunge_multiplier': 0.28,
-        'stepover_ratio': 0.25, 'slot_stepdown_ratio': 1.27,
+        'stepover_ratio': 0.25, 'slot_stepdown_ratio': 0.38,
         'max_flutes_soft': 3,
+        # Feed never scales past this many flutes. Gummy 6061 in a slot cannot clear
+        # chips from more gullets than this: the extra flutes recut and weld their
+        # chips instead of evacuating them, the tool seizes, and it snaps - so feeding
+        # a 4-flute at 4x the per-tooth rate commanded 150+ IPM on a 1/8 in cutter and
+        # broke it. Metals seize where plastics melt and wood clears, which is why
+        # only this entry carries the cap; elsewhere max_flutes_soft stays advisory.
+        'feed_flutes_max': 2,
     },
 }
 
@@ -317,7 +332,23 @@ def calculate_feeds(machine, material, tool, operation='profile'):
     chipload_target = mat['chipload_ref'] * diameter_scale * op_factor
 
     # Feed from chipload, boosted by machine rigidity, then clamped to machine limit.
-    feed_raw = rpm * flutes * chipload_target * rigidity_factor
+    # Flutes multiply feed only up to the material's evacuation limit: in a gummy
+    # metal, flutes past feed_flutes_max cannot clear their chips from a slot - they
+    # recut and weld them, the tool seizes, and it snaps. Extra flutes therefore buy
+    # no feed at all; the per-tooth chip just gets thinner (and the rubbing check
+    # below will say so).
+    feed_flutes = flutes
+    flutes_capped = False
+    feed_flutes_max = mat.get('feed_flutes_max')
+    if feed_flutes_max and flutes > feed_flutes_max:
+        feed_flutes = feed_flutes_max
+        flutes_capped = True
+        warnings.append(
+            f"Feed held to the {feed_flutes_max}-flute rate: {flutes} flutes cannot "
+            f"clear their chips from a slot in {mat.get('name', 'this material')} - "
+            f"they pack, weld, and snap the tool. Use a 1- or 2-flute cutter to run "
+            f"this material at full feed.")
+    feed_raw = rpm * feed_flutes * chipload_target * rigidity_factor
     feed = min(feed_raw, m['xy_feed_max'])
     if feed_raw > m['xy_feed_max']:
         warnings.append(
@@ -332,14 +363,16 @@ def calculate_feeds(machine, material, tool, operation='profile'):
         warnings.append(
             f"Achieved chipload {chipload_achieved:.4f} in/tooth is below the "
             f"recommended minimum {mat['chipload_min']:.4f} - risk of rubbing and heat. "
-            f"Consider fewer flutes or lower RPM.")
+            + ("A tool with fewer flutes fixes this." if flutes_capped
+               else "Consider fewer flutes or lower RPM."))
     elif chipload_achieved > mat['chipload_max']:
         warnings.append(
             f"Achieved chipload {chipload_achieved:.4f} in/tooth exceeds the "
             f"recommended maximum {mat['chipload_max']:.4f} - risk of tool deflection "
             f"or breakage. Consider more flutes or higher RPM.")
 
-    if flutes > mat['max_flutes_soft']:
+    # Advisory only where no hard cap fired - the cap's own warning already says it.
+    if flutes > mat['max_flutes_soft'] and not flutes_capped:
         warnings.append(
             f"{flutes}-flute tool in {mat.get('name', 'this material')}: soft/gummy "
             f"materials evacuate chips poorly with high flute counts - the tool may "
@@ -362,7 +395,7 @@ def calculate_feeds(machine, material, tool, operation='profile'):
     formulas = [
         f"chipload_target = chipload_ref * (D / {d_ref:.3f})^{DIAMETER_EXPONENT}"
         + (" * slotting_multiplier" if is_slot else ""),
-        "feed = RPM * flutes * chipload_target * rigidity_factor",
+        "feed = RPM * min(flutes, feed_flutes_max) * chipload_target * rigidity_factor",
         "ramp_feed = feed * ramp_multiplier",
         "peck_feed = feed * plunge_multiplier",
         "stepover = stepover_ratio * D",

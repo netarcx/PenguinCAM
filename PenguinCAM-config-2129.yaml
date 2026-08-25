@@ -135,10 +135,13 @@ machines:
 
       aluminum:
         name: "Aluminum"
-        description: "6061 on the Omio X8 - 18K RPM, 55 IPM, shallow 4 deg ramp"
+        # Derated 2026-08-24: the old 55 IPM / 0.2" slot numbers were never proven -
+        # what the shop actually produced at them was snapped 1/8" end mills. These
+        # match Omio-class community practice: ~0.4 x D per pass, light chipload, dry.
+        description: "6061 on the Omio X8 - 18K RPM, 30 IPM, 0.06 in max pass, 4 deg ramp"
         spindle_speed: 18000
-        feed_rate: 55.0
-        ramp_feed_rate: 35.0
+        feed_rate: 30.0
+        ramp_feed_rate: 19.0
         plunge_rate: 15.0
         traverse_rate: 200.0
         approach_rate: 35.0
@@ -146,7 +149,7 @@ machines:
         ramp_start_clearance: 0.050
         stepover_percentage: 0.25      # conservative radial engagement
         helix_radius_multiplier: 0.5
-        max_slotting_depth: 0.2
+        max_slotting_depth: 0.06       # 0.38 x the 4mm reference tool; scaled per tool
         corner_min_feed_scale: 0.4     # force-limited: ease hard through corners
         tab_width: 0.25
         tab_height: 0.15

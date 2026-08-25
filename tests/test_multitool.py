@@ -213,6 +213,74 @@ class TestFeeds(unittest.TestCase):
         self.assertGreater(large['feed_xy'], small['feed_xy'])
         self.assertGreater(large['stepover'], small['stepover'])
 
+    def test_flutes_past_the_evacuation_limit_buy_no_feed_in_aluminum(self):
+        """A 4-flute in 6061 was fed at 4x the per-tooth rate - 172 IPM wanted, 150
+        after the machine clamp - on the theory that every flute takes a healthy chip.
+        In a slot in gummy aluminum the extra flutes cannot clear their chips: they
+        pack, weld, and snap the tool (this broke real 1/8 in cutters). Feed must stop
+        scaling at the material's evacuation limit, and the operator must be told."""
+        two = feeds_speeds.calculate_feeds('omio_x8', 'aluminum_6061',
+                                           {'diameter': 0.125, 'flutes': 2}, 'profile')
+        four = feeds_speeds.calculate_feeds('omio_x8', 'aluminum_6061',
+                                            {'diameter': 0.125, 'flutes': 4}, 'profile')
+        self.assertEqual(four['feed_xy'], two['feed_xy'])
+        self.assertLess(four['feed_xy'], 100.0)   # nowhere near the old 150 IPM
+        self.assertTrue(any('2-flute rate' in w for w in four['warnings']),
+                        four['warnings'])
+        # With four teeth sharing a two-flute feed, each takes half a chip: the
+        # rubbing check must say so and point at the actual fix.
+        self.assertTrue(any('below the recommended minimum' in w
+                            for w in four['warnings']), four['warnings'])
+        self.assertEqual(two['warnings'], [])     # 2F is the limit, not past it
+
+    def test_job_level_max_pass_depth_reaches_every_operation(self):
+        """The operator's depth-per-pass ceiling: more, shallower passes for fragile
+        or multi-flute cutters. Applied after every automatic clamp, clamp-only."""
+        import re
+        shallow = generate(build_job(max_pass_depth=0.05))
+        self.assertTrue(shallow.success, shallow.errors)
+        for m in re.finditer(r'passes @ (\d+\.\d+)" each', shallow.gcode):
+            self.assertLessEqual(float(m.group(1)), 0.05 + 1e-9, shallow.gcode[:200])
+        # A ceiling above the automatic value changes nothing.
+        loose = generate(build_job(max_pass_depth=5.0))
+        normal = generate(build_job())
+        self.assertEqual(loose.gcode, normal.gcode)
+
+    def test_metal_feed_is_anchored_to_the_tested_preset(self):
+        """The chipload model quoted a 1/8" cutter 85.9 IPM in 6061 - 56% above the
+        55 IPM the preset was actually tested at - and a real bit broke. In metal the
+        model may only DERATE the preset's diameter-scaled rate, never exceed it."""
+        import re
+        job = build_job(material='aluminum', thickness=0.125,
+                        tools=[Tool(1, '8th', 0.125, 4)],
+                        parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
+                                       operations=[Operation('perimeter', 1)])])
+        result = generate(job)
+        self.assertTrue(result.success, result.errors)
+        anchor = 55.0 * (0.125 / 0.157) ** feeds_speeds.DIAMETER_EXPONENT
+        for feed in set(float(f) for f in
+                        re.findall(r'X-?[\d.]+ Y-?[\d.]+ F([\d.]+)', result.gcode)):
+            if feed >= 199.0:
+                continue                     # traverse moves above the material
+            self.assertLessEqual(feed, anchor + 0.1, f'cutting feed {feed}')
+        self.assertTrue(any('tested' in w and 'held to' in w for w in result.warnings),
+                        result.warnings)
+        # Wood keeps the model's numbers - no anchor warning there.
+        wood = generate(build_job(tools=[Tool(1, '8th', 0.125, 4)],
+                                  parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
+                                                 operations=[Operation('perimeter', 1)])]))
+        self.assertFalse(any('tested' in w and 'held to' in w for w in wood.warnings),
+                         wood.warnings)
+
+    def test_flutes_still_scale_feed_in_wood(self):
+        """Wood clears chips; the evacuation cap is a property of gummy metals and
+        must not slow every plywood job down."""
+        one = feeds_speeds.calculate_feeds('omio_x8', 'plywood',
+                                           {'diameter': 0.0625, 'flutes': 1}, 'profile')
+        two = feeds_speeds.calculate_feeds('omio_x8', 'plywood',
+                                           {'diameter': 0.0625, 'flutes': 2}, 'profile')
+        self.assertGreater(two['feed_xy'], one['feed_xy'])
+
     def test_explicit_overrides_win(self):
         pp = FRCPostProcessor(0.25, 0.25)
         pp.apply_material_preset('plywood')
@@ -420,8 +488,16 @@ class TestSpindlePowerGuard(unittest.TestCase):
     spindle than it has. On a router that is how end mills break: the spindle bogs, the
     cutter grabs, the tool snaps."""
 
-    def _applied(self, material, diameter, flutes, machine='omio_x8'):
-        pp = FRCPostProcessor(0.25, diameter)
+    #: A team config still running the pre-derate aluminum numbers (55 IPM, 0.2" slot).
+    #: The 2026-08-24 derate made the stock presets shallow enough that the spindle
+    #: power guard can no longer bind on them - it remains the backstop for configs
+    #: like this one.
+    HOT_ALUMINUM = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+        'materials': {'aluminum': {'feed_rate': 55.0, 'ramp_feed_rate': 35.0,
+                                   'max_slotting_depth': 0.2}}}}})
+
+    def _applied(self, material, diameter, flutes, machine='omio_x8', config=None):
+        pp = FRCPostProcessor(0.25, diameter, config=config)
         tool = Tool(1, 'T', diameter, flutes)
         with redirect_stdout(io.StringIO()):
             pp.apply_material_preset(material)
@@ -432,9 +508,13 @@ class TestSpindlePowerGuard(unittest.TestCase):
                 getattr(pp, 'power_limited_depth', False), feeds)
 
     def test_a_big_cutter_in_aluminium_is_depth_limited(self):
-        preset, applied, bound, _ = self._applied('aluminum', 0.5, 4)
+        # Under a hot config, a 1/2" 4-flute's full-width pass would out-demand the
+        # spindle at the config's 0.2" depth; the guard must clamp it well below.
+        preset, applied, bound, _ = self._applied('aluminum', 0.5, 4,
+                                                  config=self.HOT_ALUMINUM)
         self.assertTrue(bound)
-        self.assertLess(applied, preset / 2)
+        self.assertLess(applied, 0.15)
+        self.assertLess(applied, preset)
 
     def test_the_resulting_load_is_inside_the_spindle(self):
         for diameter, flutes in ((0.25, 2), (0.375, 2), (0.5, 3), (0.5, 4)):
@@ -478,7 +558,10 @@ class TestSpindlePowerGuard(unittest.TestCase):
             'aluminum_6061', 0.375, 150.0))
 
     def test_the_operator_is_told_why_the_job_got_slower(self):
+        # Needs the hot config: the derated stock presets are shallow enough that the
+        # power guard cannot bind on them, which is the point of the derate.
         job = build_job(material='aluminum', tools=[Tool(1, '1/2 4F', 0.5, 4)],
+                        config=self.HOT_ALUMINUM,
                         parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
                                        operations=[Operation('perimeter', 1)])])
         result = generate(job)

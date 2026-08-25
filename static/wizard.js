@@ -38,6 +38,16 @@
     thickness: 0.25,
     thickness_text: '0.25"',
     tab_spacing: 6.0,
+    // Optional deburr / chamfer pass (2D standard mode): a V-bit edge break run after
+    // the profile, behind a manual tool change. Widths/diameters are inches; the _text
+    // fields keep the user's raw input (e.g. '1/2"' or "6mm") for display.
+    chamfer: { on: false, bit: 0.5, bit_text: '1/2"', angle: 90,
+               width: 0.02, width_text: '0.02"',
+               perimeter: true, holes: true, pockets: false },
+    // Optional ceiling on the depth of one contour pass (inches; null = automatic).
+    // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
+    max_pass_depth: null,
+    max_pass_depth_text: '',
     // Tubing-only settings.
     tubeHeight: 1.0,
     tubeHeight_text: '1"',
@@ -367,6 +377,13 @@
         ? '⌀ 0.201" twist drill'
         : '⌀ ' + state.tool_diameter_text + ' tool');
     }
+    if (state.chamfer.on && state.mode === '2d') {
+      chips.push(state.chamfer.width_text + ' chamfer · '
+                 + state.chamfer.angle + '° V-bit');
+    }
+    if (state.max_pass_depth && state.mode !== 'tubing') {
+      chips.push('≤ ' + state.max_pass_depth_text + ' per pass');
+    }
     if (state.mode === 'tubing') {
       if (!tubePatternOn()) chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
     } else {
@@ -607,6 +624,67 @@
       });
     $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
     $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
+    var maxPass = $('#f-max-pass');
+    if (maxPass) {
+      // Optional field: blank is a valid state (automatic), so bindLengthField's
+      // revert-on-blur behavior doesn't fit here.
+      var commitMaxPass = function (el) {
+        var raw = el.value.trim();
+        if (!raw) {
+          state.max_pass_depth = null; state.max_pass_depth_text = '';
+          el.classList.remove('invalid'); invalidatePreview(); return true;
+        }
+        var inches = parseLength(/^[+-]?[0-9.\/\s]+$/.test(raw) ? raw + '"' : raw);
+        el.classList.toggle('invalid', !inches);
+        if (inches) {
+          state.max_pass_depth = inches; state.max_pass_depth_text = raw;
+          invalidatePreview();
+        }
+        return !!inches;
+      };
+      maxPass.addEventListener('input', function () { commitMaxPass(this); });
+      maxPass.addEventListener('change', function () {
+        if (!commitMaxPass(this)) { this.value = state.max_pass_depth_text; this.classList.remove('invalid'); }
+      });
+    }
+    var chamferBox = $('#f-chamfer');
+    if (chamferBox) {
+      chamferBox.addEventListener('change', function () {
+        state.chamfer.on = this.checked;
+        $('#chamfer-options').hidden = !this.checked;
+        // In multi-tool mode the checkbox drives the operations editor: it adds a
+        // V-bit and a chamfer operation per part (or removes the ones it added).
+        if (multiToolOn() && window.PCMultiTool) {
+          if (this.checked) window.PCMultiTool.applyDeburr(state.chamfer);
+          else window.PCMultiTool.clearDeburr();
+        }
+        invalidatePreview(); updateSummary();
+      });
+      bindLengthField($('#f-chamfer-bit'),
+        function () { return state.chamfer.bit_text; },
+        function (inches, text) {
+          state.chamfer.bit = inches; state.chamfer.bit_text = text;
+          invalidatePreview();
+        });
+      bindLengthField($('#f-chamfer-width'),
+        function () { return state.chamfer.width_text; },
+        function (inches, text) {
+          state.chamfer.width = inches; state.chamfer.width_text = text;
+          invalidatePreview(); updateSummary();
+        });
+      $('#f-chamfer-angle').addEventListener('change', function () {
+        var v = parseFloat(this.value);
+        if (isFinite(v) && v > 0 && v < 180) state.chamfer.angle = v;
+        else this.value = state.chamfer.angle;   // reject rather than send a bad angle
+        invalidatePreview();
+      });
+      ['perimeter', 'holes', 'pockets'].forEach(function (t) {
+        $('#f-chamfer-' + t).addEventListener('change', function () {
+          state.chamfer[t] = this.checked;
+          invalidatePreview();
+        });
+      });
+    }
     var mt = $('#f-multitool');
     if (mt && !window.PCMultiTool) {
       // The editor lives in its own file. If it failed to load, a checkbox that silently
@@ -847,6 +925,13 @@
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
     var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
+    // The deburr / chamfer pass is 2D-only: 2.5D refuses it server-side (layered
+    // depths) and tubing runs its own program. In multi-tool mode the same checkbox
+    // stays and drives the operations editor instead (a V-bit + chamfer op per part).
+    var cf = $('#chamfer-fields'); if (cf) cf.hidden = is25 || isTube;
+    // Depth-per-pass ceiling applies anywhere contours are milled except tubing.
+    var mp = $('#max-pass-field'); if (mp) mp.hidden = isTube;
+    var mph = $('#max-pass-hint'); if (mph) mph.hidden = isTube;
     if (isTube) syncTubeHeightToSize();
     // The thickness field carries the sheet default (1/4") into tubing, where it means
     // WALL thickness. Real 1x1 and 2x1 is 1/16"-1/8", so every tube job quoted a cycle
@@ -890,6 +975,10 @@
     var on = multiToolOn();
     var toolField = $('#tool-field'); if (toolField) toolField.style.display = on ? 'none' : '';
     var note = $('#multitool-note'); if (note) note.style.display = on ? '' : 'none';
+    // The deburr checkbox stays in both flavors of 2D; entering multi-tool mode with
+    // it already checked materializes the V-bit + chamfer ops in the editor.
+    var cf = $('#chamfer-fields'); if (cf) cf.hidden = state.mode !== '2d';
+    if (on && state.chamfer.on && window.PCMultiTool) window.PCMultiTool.applyDeburr(state.chamfer);
     $('#wizard').classList.toggle('has-tools', on);
     // The toggle changes which steps exist, and gotoStep is the ONLY thing that decides
     // which sections are visible. Without re-running it, ticking the box applied the
@@ -1711,6 +1800,17 @@
       stock: { width: bb.w, height: bb.h },
       name: jobFilename(), parts: [],
     };
+    if (state.chamfer.on) {
+      var chamferTargets = [];
+      if (state.chamfer.perimeter) chamferTargets.push('perimeter');
+      if (state.chamfer.holes) chamferTargets.push('holes');
+      if (state.chamfer.pockets) chamferTargets.push('pockets');
+      job.chamfer = {
+        width: state.chamfer.width, bit_diameter: state.chamfer.bit,
+        bit_angle: state.chamfer.angle, targets: chamferTargets,
+      };
+    }
+    if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     state.parts.forEach(function (p, i) {
       var pl = placement(p);
       job.parts.push({
@@ -1742,6 +1842,9 @@
       var pl = placement(p);
       return { x: pl.x - bb.minX, y: pl.y - bb.minY };
     });
+    // A part added after the deburr box was ticked has no chamfer op yet; the sync is
+    // idempotent, so re-running it here catches up before the payload is built.
+    if (state.chamfer.on) window.PCMultiTool.applyDeburr(state.chamfer);
     var fd = window.PCMultiTool.buildFormData(placements, jobFilename(), timestamp());
     dbg('process-multitool:req', { parts: state.parts.length });
     return fetch('/process-multitool', { method: 'POST', body: fd })
@@ -1772,6 +1875,7 @@
     fd.append('rotation', Math.round(p.rotation) % 360);
     fd.append('mirror', '0');  // 2.5D never mirrors (flip disabled in this mode)
     fd.append('tab_spacing', state.tab_spacing);
+    if (state.max_pass_depth) fd.append('max_pass_depth', state.max_pass_depth);
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'process');

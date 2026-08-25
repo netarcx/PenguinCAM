@@ -295,9 +295,12 @@ class TestMaterialPresets(unittest.TestCase):
         self.assertEqual(pp.stepover_percentage, 0.65)
 
     def test_aluminum_preset_applies_correctly(self):
+        # 30 IPM / 0.06" slot since the 2026-08-24 derate (real 1/8" bits snapped at
+        # the old 55 IPM / 0.2" numbers; see MULTI_TOOL_STATUS item 10).
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('aluminum')
-        self.assertEqual(pp.feed_rate, 55.0)
+        self.assertEqual(pp.feed_rate, 30.0)
+        self.assertEqual(pp.max_slotting_depth, 0.06)
         self.assertEqual(pp.spindle_speed, 18000)
         self.assertEqual(pp.ramp_angle, 4.0)
         self.assertEqual(pp.stepover_percentage, 0.25)

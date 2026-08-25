@@ -119,6 +119,37 @@ Each exists because it was actually violated at some point in development:
    is reported, never guessed.
 9. Job cost is O(parts × operations) — each operation re-reads the DXF. Capped at 120
    operations / 60 parts. Fine for real plates; would need caching to go much beyond.
+10. **FIELD FAILURE, 2026-08-24 (fixed):** a 1/8" 4-flute end mill snapped on a real
+   0.125" 6061 part (WCP-0543). Verified by simulating both generated programs with an
+   independent engagement checker (`gcode_audit.max_lateral_engagement`):
+   - The program matching what the operator watched — full plate thickness in one
+     pass, "faster than ever" — is the one generated 40 seconds BEFORE the depth
+     ceiling was set: a single 0.133" full-width pass at 85.9 IPM, tabs included,
+     *legal* under the automatic per-pass limit (1.27 x D = 0.159" > the whole
+     plate). Two programs a minute apart is a stale-download trap: the filename
+     timestamp and the header's "limited to ... by operator" line tell them apart.
+   - The ceiling program measured clean (worst true bite ~0.033" vs its 0.031"
+     ceiling, within instrument error) — its five perimeter passes pre-thinned the
+     tabs before removal ran.
+   Fixed regardless: **(a)** the 85.9 IPM was 2-flute chipload theory against the 55
+   IPM the machine had actually been tested at — metal feeds are now anchored to the
+   preset's diameter-scaled tested rate (`tooling._anchor_metal_feed`); **(b)** tab
+   removal genuinely ignored `max_slotting_depth` in code (it slots whatever is
+   standing in one move) — safe here only because the passes had thinned the tabs
+   first; it now steps down like every other cut, fed the true standing-tab height
+   by the contour generator; **(c)** the audit permanently carries this program
+   shape plus the engagement checker, which fails any future path that escapes the
+   per-pass limit by more than the checker's error band.
+11. **The drilled tube pattern runs its 0.201" twist drill at the material preset's
+   18,000 RPM with a 15 IPM plunge** — about 950 SFM at 0.0008 IPR in aluminum, i.e.
+   ~4× the surface speed HSS tolerates while feeding ~4× too lightly. That is the
+   rubbing/work-hardening regime that burns and snaps drills.
+   `feeds_speeds.calculate_drill_feeds` already computes the right numbers (clamped to
+   the spindle's 6,000 RPM floor, ~21 IPM plunge) and the multi-tool drill path uses
+   it; the fixed tube program does not. Found 2026-08-24 while chasing snapped end
+   mills (which turned out to be the 4mm-referenced presets, since fixed by
+   `scale_feeds_to_tool`); left alone because changing a tube program's spindle speed
+   deserves its own decision and a dry run.
 
 ---
 

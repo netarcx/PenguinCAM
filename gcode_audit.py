@@ -275,10 +275,81 @@ def audit_tube_design(name, design, face_width, tube_length, tube_height,
         fail(name, 'a 1.125" bearing bore was cut without a helical entry')
 
 
-def audit(name, job, expect_drill=False):
+def max_lateral_engagement(gcode):
+    """Independently measure the deepest bite any straight feed move takes.
+
+    Walks the program with a coarse occupancy grid of cut floors: for every lateral G1
+    below the material top, the axial engagement is how far the move's Z sits below the
+    lowest floor previously cut along its path. This is the premise the unit tests did
+    not have - they checked that the PASS COMMENTS obeyed the depth limit, while the
+    tab-removal pass quietly slotted the full plate thickness in one move with no pass
+    comment at all. Arcs are skipped (bores are axially fed by design); straight moves
+    are where profiles, pockets and tabs live.
+
+    Returns (engagement, offending line) for the worst move found.
+    """
+    cell = 0.04
+    floors = {}
+    x = y = z = 10.0
+    material_top = None
+    worst = (0.0, '')
+
+    def cells_on(x0, y0, x1, y1, z0=None, z1=None):
+        """Cells along the move, each with the interpolated Z there - a ramp cuts a
+        sloped floor, and marking only its endpoints made a pass's closing move over
+        its own just-ramped path read as a deep bite into virgin stock."""
+        length = math.hypot(x1 - x0, y1 - y0)
+        steps = max(1, int(length / cell))
+        for i in range(steps + 1):
+            t = i / steps
+            zt = z0 + (z1 - z0) * t if z0 is not None else None
+            yield (round((x0 + (x1 - x0) * t) / cell),
+                   round((y0 + (y1 - y0) * t) / cell)), zt
+
+    for raw in gcode.splitlines():
+        if 'Material top:' in raw:
+            m = re.search(r'Z=(-?[\d.]+)', raw)
+            if m:
+                material_top = float(m.group(1))
+        code = re.sub(r'\(.*?\)', '', raw.split(';')[0]).strip()
+        if not code:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        head = code.split()[0]
+        if not head.startswith(('G0', 'G1', 'G2', 'G3')):
+            continue
+        nx, ny, nz = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        if head.startswith(('G1', 'G2', 'G3')) and material_top is not None:
+            samples = list(cells_on(x, y, nx, ny, z, nz))
+            flat_lateral = ((abs(nx - x) > 1e-9 or abs(ny - y) > 1e-9)
+                            and nz < material_top - 1e-6 and abs(nz - z) < 1e-9
+                            and head.startswith('G1'))
+            if flat_lateral:
+                # A sample counts as previously cut if ANY neighboring cell was -
+                # grid quantization otherwise flags a re-traced kerf whose samples
+                # round into the next cell over. A genuinely virgin span (a tab) has
+                # interior samples with fully-uncut neighborhoods and gets caught.
+                def floor_near(k):
+                    kx, ky = k
+                    return min(floors.get((kx + dx, ky + dy), material_top)
+                               for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+                bite = max(floor_near(k) for k, _ in samples) - nz
+                if bite > worst[0]:
+                    worst = (bite, raw.strip())
+            for k, zt in samples:
+                floors[k] = min(floors.get(k, material_top), zt)
+        x, y, z = nx, ny, nz
+    return worst
+
+
+def audit(name, job, expect_drill=False, max_engagement=None):
+    """Audit one program. `job` is a MultiToolJob, or a zero-arg callable returning a
+    PostProcessorResult (used for standard-mode programs such as the deburr pass).
+    `max_engagement`, when given, is the deepest axial bite any single straight feed
+    move is allowed to take - the check that catches a pass ignoring the depth limit."""
     global checked
     checked += 1
-    result = run(job)
+    result = job() if callable(job) else run(job)
     if not result.success:
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
@@ -286,6 +357,17 @@ def audit(name, job, expect_drill=False):
     lines = g.splitlines()
 
     check_text_rules(name, lines)
+
+    if max_engagement is not None:
+        # The grid checker is a coarse independent instrument with ~25% reading error
+        # on legitimate re-traced kerfs (measured against real programs). The failure
+        # it exists to catch - the tab-removal pass slotting a full 0.133" plate under
+        # a 0.031" ceiling - reads 4x over, so a 1.35x acceptance band rejects the bug
+        # class without false alarms on quantization noise.
+        bite, line = max_lateral_engagement(g)
+        if bite > max_engagement * 1.35 + 1e-6:
+            fail(name, f'a straight feed move bites {bite:.4f}" of material, far over '
+                       f'the {max_engagement:.4f}" per-pass limit: {line[:60]}')
 
     # --- header claims vs reality ---------------------------------------------------
     sim = simulate(g)
@@ -382,6 +464,46 @@ def main():
             Operation('holes', 1, scope={'max_diameter': 0.4}),
             Operation('holes', 2, scope={'min_diameter': 0.4}),
             Operation('pockets', 2), Operation('perimeter', 2)])]))
+
+    # The 2026-08-24 field-failure shape, audited forever: thin aluminum, a small
+    # multi-flute cutter, and an operator depth-per-pass ceiling. The original bug hid
+    # in the tab-removal pass (full plate thickness in one move while the profile
+    # politely stepped down), which no other case exercised.
+    audit('thin-al/ceiling', MultiToolJob(
+        material='aluminum', thickness=0.125, machine_id='omio_x8',
+        max_pass_depth=1 / 32,
+        tools=[Tool(1, '1/8 4F', 0.125, 4)],
+        parts=[PartOps(dxf_path=plate(HOLES), name='p', operations=[
+            Operation('holes', 1), Operation('perimeter', 1)])]),
+          max_engagement=1 / 32)
+
+    # Standard-mode (single-tool) programs with the deburr / chamfer pass appended:
+    # the same physical checks, on the non-multitool path that generates them. Two
+    # angles, because the depth follows from the angle and a wrong tangent would move
+    # real metal.
+    from frc_cam_postprocessor import parse_chamfer_spec
+
+    def standard_chamfer_run(material, thickness, angle):
+        def _go():
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=0.157,
+                                      units='inch')
+                pp.apply_material_preset(material)
+                pp.load_dxf(plate(HOLES + BORE, POCKET))
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                pp.chamfer_pass = parse_chamfer_spec({
+                    'width': 0.02, 'bit_diameter': 0.5, 'bit_angle': angle,
+                    'targets': ['perimeter', 'holes', 'pockets']})
+                return pp.generate_gcode(suggested_filename='std_chamfer',
+                                         timestamp='2026-08-20 18:00:00')
+        return _go
+
+    for material in ('plywood', 'aluminum'):
+        for angle in (60, 90):
+            audit(f'std-chamfer/{material}/{angle}deg',
+                  standard_chamfer_run(material, 0.25, angle))
 
     # Pre-designed tube patterns (1x1 and 2x1, with and without lightening).
     for face_width, height, label in ((1.0, 1.0, '1x1'), (2.0, 1.0, '2x1-flat'),

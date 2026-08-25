@@ -22,12 +22,12 @@ TOLERANCE = 0.10
 PRESETS = {
     'omio_x8': {
         'plywood':       {'feed_rate': 70.0, 'ramp_feed_rate': 45.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
-        'aluminum_6061': {'feed_rate': 50.0, 'ramp_feed_rate': 32.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.2,  'spindle_speed': 18000},
+        'aluminum_6061': {'feed_rate': 30.0, 'ramp_feed_rate': 19.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 18000},
         'polycarbonate': {'feed_rate': 70.0, 'ramp_feed_rate': 45.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
     },
     'avid_pro2424': {
         'plywood':       {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
-        'aluminum_6061': {'feed_rate': 55.0, 'ramp_feed_rate': 35.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.2,  'spindle_speed': 18000},
+        'aluminum_6061': {'feed_rate': 33.0, 'ramp_feed_rate': 21.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 18000},
         'polycarbonate': {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
     },
 }

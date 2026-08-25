@@ -106,6 +106,53 @@
                     Thickness is derived from the CAD part in 2.5D mode.
                 </p>
 
+                <!-- Deburr / chamfer pass (2D standard mode only). -->
+                <div id="chamfer-fields">
+                    <label class="field inline">
+                        <input type="checkbox" id="f-chamfer" autocomplete="off">
+                        <span>Deburring / chamfer pass (break the top edges with a V-bit)</span>
+                    </label>
+                    <div id="chamfer-options" hidden>
+                        <label class="field">
+                            <span>V-bit diameter (in or mm)</span>
+                            <input type="text" id="f-chamfer-bit" inputmode="text" autocomplete="off"
+                                   spellcheck="false" placeholder='e.g. 1/2" or 6mm' value='1/2"'>
+                        </label>
+                        <label class="field">
+                            <span>V-bit included angle (degrees)</span>
+                            <input type="number" id="f-chamfer-angle" min="10" max="170" step="1"
+                                   autocomplete="off" value="90">
+                        </label>
+                        <label class="field">
+                            <span>Chamfer width (in or mm)</span>
+                            <input type="text" id="f-chamfer-width" inputmode="text" autocomplete="off"
+                                   spellcheck="false" placeholder='e.g. 0.02"' value='0.02"'>
+                        </label>
+                        <label class="radio"><input type="checkbox" id="f-chamfer-perimeter"
+                               autocomplete="off" checked> Break the outside profile edge</label>
+                        <label class="radio"><input type="checkbox" id="f-chamfer-holes"
+                               autocomplete="off" checked> Break hole edges</label>
+                        <label class="radio"><input type="checkbox" id="f-chamfer-pockets"
+                               autocomplete="off"> Break pocket edges</label>
+                        <p class="hint">
+                            Runs after the profile while the tabs still hold every part. The
+                            program pauses to swap in the V-bit, and pauses again to swap back
+                            before tab removal.
+                        </p>
+                    </div>
+                </div>
+
+                <label class="field" id="max-pass-field">
+                    <span>Max depth per pass (in or mm, blank = automatic)</span>
+                    <input type="text" id="f-max-pass" inputmode="text" autocomplete="off"
+                           spellcheck="false" placeholder='e.g. 0.05"'>
+                </label>
+                <p class="hint" id="max-pass-hint">
+                    Profiles and pockets split into more, shallower passes. Lower this to
+                    baby fragile or multi-flute cutters; it only ever reduces the
+                    automatic depth.
+                </p>
+
                 <!-- Tubing-only settings (shown when mode = tubing). -->
                 <div id="tube-fields" hidden>
                     <label class="field">

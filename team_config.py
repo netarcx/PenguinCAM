@@ -189,10 +189,12 @@ TEAM_6238_DEFAULTS = {
             'tab_height': 0.15
         },
         'aluminum': {
+            # Derated 2026-08-24: 55 IPM / 0.2" slot let a 1/8" plate be slotted in
+            # one full-thickness pass and snapped real cutters. See MULTI_TOOL_STATUS.
             'name': 'Aluminum',
             'spindle_speed': 18000,
-            'feed_rate': 55.0,
-            'ramp_feed_rate': 35.0,
+            'feed_rate': 30.0,
+            'ramp_feed_rate': 19.0,
             'plunge_rate': 15.0,
             'traverse_rate': 200.0,
             'approach_rate': 35.0,
@@ -200,7 +202,7 @@ TEAM_6238_DEFAULTS = {
             'ramp_start_clearance': 0.050,
             'stepover_percentage': 0.25,
             'helix_radius_multiplier': 0.5,
-            'max_slotting_depth': 0.2,
+            'max_slotting_depth': 0.06,     # 0.38 x the 4mm reference diameter
             'peck_drill_depth': 0.05,
             'corner_min_feed_scale': 0.4,   # force-limited: aggressive corner slowdown to protect the tool
             'tab_width': 0.25,

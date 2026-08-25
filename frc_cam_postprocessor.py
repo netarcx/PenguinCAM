@@ -71,20 +71,24 @@ MATERIAL_PRESETS = {
         'description': 'Standard plywood settings - 18K RPM, 75 IPM cutting'
     },
     'aluminum': {
+        # Derated 2026-08-24 after real 1/8" bits kept snapping: the old 55 IPM /
+        # 0.2" slot numbers let a 1/8" plate be slotted full-thickness in one pass,
+        # which no hobby-router aluminum practice supports. These match the
+        # FRC/Omio-class consensus (~0.4 x D per pass, light chipload, dry).
         'name': 'Aluminum',
-        'feed_rate': 55.0,        # Cutting feed rate (IPM)
-        'ramp_feed_rate': 35.0,   # Ramp feed rate (IPM)
+        'feed_rate': 30.0,        # Cutting feed rate (IPM) - 0.0017 in/tooth at 18K 1F
+        'ramp_feed_rate': 19.0,   # Ramp feed rate (IPM)
         'plunge_rate': 15.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 4.0,        # Ramp angle in degrees
         'ramp_start_clearance': 0.050,  # Clearance above material to start ramping (inches)
         'stepover_percentage': 0.25,    # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
         'helix_radius_multiplier': 0.5,  # Helix entry radius as fraction of tool radius (conservative for aluminum)
-        'max_slotting_depth': 0.2,      # Maximum depth per pass for perimeter slotting (inches)
+        'max_slotting_depth': 0.06,     # Maximum depth per pass for slotting (0.38 x reference diameter)
         'corner_min_feed_scale': 0.4,   # Corner-slowdown feed floor (aggressive; aluminum is force-limited)
         'tab_width': 0.25,        # Tab width (inches) - same as plywood
         'tab_height': 0.15,       # Tab height (inches) - same as plywood
-        'description': 'Aluminum box tubing - 18K RPM, 55 IPM cutting, 4° ramp'
+        'description': 'Aluminum - 18K RPM, 30 IPM cutting, 0.06" max pass, 4° ramp'
     },
     'polycarbonate': {
         'name': 'Polycarbonate',
@@ -265,6 +269,12 @@ class FRCPostProcessor:
         # Fixturing preferences from config
         self.pause_before_perimeter = config.pause_before_perimeter  # Pause before perimeter for screw fixturing
 
+        # Optional deburr / chamfer pass (standard 2D mode only). Set to the dict
+        # parse_chamfer_spec() returns ({'width', 'bit_diameter', 'bit_angle',
+        # 'targets'}) to append a V-bit edge-break pass after the profile cut, behind a
+        # manual tool change. None (the default) leaves the program exactly as before.
+        self.chamfer_pass = None
+
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
 
@@ -312,6 +322,8 @@ class FRCPostProcessor:
             preset = self.config.get_material_preset('plywood', machine_id)
 
         self.material_name = preset.get('name', material.capitalize())  # Store material name for header
+        self.material_id = material            # preset key, for scale_feeds_to_tool
+        self.machine_preset_id = machine_id    # machine key, for the spindle-power clamp
 
         # Preset values are defined in IPM - convert to mm/min if needed
         if self.units == 'mm':
@@ -373,6 +385,132 @@ class FRCPostProcessor:
         print(f"  Ramp angle: {self.ramp_angle}°")
         print(f"  Stepover: {self.stepover_percentage*100:.0f}% of tool diameter")
         print(f"  Tab size: {preset['tab_width']}\" x {preset['tab_height']}\" (W x H)")
+
+    #: Preset ids mapped onto the feeds_speeds material table (custom team materials
+    #: have no entry there; they get the geometric scaling but no power clamp).
+    _FEEDS_MODEL_MATERIALS = {'plywood': 'plywood', 'aluminum': 'aluminum_6061',
+                              'polycarbonate': 'polycarbonate', 'hdpe': 'hdpe',
+                              'srpp': 'srpp'}
+
+    def scale_feeds_to_tool(self) -> List[str]:
+        """Clamp the applied material preset's feeds and per-pass depths to the ACTUAL tool.
+
+        The material presets are the feeds/speeds model evaluated at its 4 mm
+        single-flute reference tool and frozen - which is exactly right for the default
+        cutter and wrong for every other one. A 1/8 in end mill in aluminum was being
+        run at the 4 mm tool's 55 IPM into a 0.2 in deep full-width slot: over its
+        scaled chipload AND over its scaled depth at once, which is how small end mills
+        snap. (The multi-tool path already derives feeds per tool in tooling.py; this
+        brings the same physics to the single-tool flows.)
+
+        Scaling is RELATIVE and only ever downward:
+          feed factor  = (D / D_ref) ^ DIAMETER_EXPONENT   capped at 1.0
+          depth factor =  D / D_ref                        capped at 1.0
+        so the reference tool reproduces the tested preset exactly - including a team's
+        own config overrides, which are tuned at that same reference - and a larger
+        cutter keeps the tested numbers rather than being scaled up on the strength of
+        a model (the same never-raise rule tooling.py follows). A larger cutter does
+        get the spindle-power ceiling applied, because that is the one direction where
+        bigger is more dangerous: a wide slot at full preset feed can demand more power
+        than the spindle has, and a bogged router snaps the tool.
+
+        Call after apply_material_preset. Returns the adjustments made (also kept on
+        self.feed_scale_note for the G-code header, so the program tells the operator
+        it derated itself and why).
+        """
+        import feeds_speeds
+
+        if not hasattr(self, 'max_slotting_depth'):
+            # No preset applied yet - there is nothing tested to scale down from.
+            return []
+
+        to_inch = (1.0 / 25.4) if self.units == 'mm' else 1.0
+        diameter_in = self.tool_diameter * to_inch
+        if diameter_in <= 0:
+            return []
+        d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
+        notes = []
+
+        def _floor_tenth(value: float) -> float:
+            # Emitted verbatim as F words; floored so rounding can never nudge a
+            # clamped feed back above its limit, and to a sane number of digits.
+            return math.floor(value * 10.0) / 10.0
+
+        feed_factor = min(1.0, (diameter_in / d_ref) ** feeds_speeds.DIAMETER_EXPONENT)
+        if feed_factor < 1.0 - 1e-9:
+            self.feed_rate = _floor_tenth(self.feed_rate * feed_factor)
+            self.ramp_feed_rate = _floor_tenth(self.ramp_feed_rate * feed_factor)
+            self.plunge_rate = _floor_tenth(self.plunge_rate * feed_factor)
+            unit = 'mm/min' if self.units == 'mm' else 'ipm'
+            notes.append(f"feed scaled to {self.feed_rate:.1f} {unit} for the "
+                         f"{diameter_in:.3f} in tool, from the 4 mm reference")
+
+        depth_factor = min(1.0, diameter_in / d_ref)
+        if depth_factor < 1.0 - 1e-9:
+            self.max_slotting_depth *= depth_factor
+            self.peck_drill_depth *= depth_factor
+            unit = 'mm' if self.units == 'mm' else 'in'
+            notes.append(f"max depth per pass scaled to "
+                         f"{self.max_slotting_depth:.3f} {unit}")
+
+        # Spindle-power ceiling. The chipload scaling above never binds for a cutter
+        # LARGER than the reference, but power does: cutting power is MRR x unit power,
+        # and a wide cutter slotting at full preset feed can ask for more than the
+        # spindle delivers - it bogs, grabs, and snaps the tool.
+        material_key = self._FEEDS_MODEL_MATERIALS.get(
+            (getattr(self, 'material_id', None) or '').lower())
+        machine_key = getattr(self, 'machine_preset_id', None)
+        if material_key and machine_key in feeds_speeds.MACHINES:
+            limit_in = feeds_speeds.max_depth_for_power(
+                machine_key, material_key, diameter_in, self.feed_rate * to_inch)
+            if limit_in is not None:
+                limit = limit_in / to_inch   # back to native units
+                if limit < self.max_slotting_depth - 1e-9:
+                    self.max_slotting_depth = limit
+                    unit = 'mm' if self.units == 'mm' else 'in'
+                    notes.append(f"max depth per pass held to {limit:.3f} {unit} "
+                                 f"by spindle power")
+
+        # A tiny cutter at the preset RPM can end up below the material's minimum
+        # chipload, where it rubs instead of cutting - in aluminum that work-hardens
+        # the wall and breaks the tool anyway. Nothing safe to do automatically
+        # (raising feed defeats the derate), so say it out loud.
+        if material_key and self.spindle_speed > 0:
+            chipload_min = feeds_speeds.MATERIALS[material_key].get('chipload_min')
+            chipload = (self.feed_rate * to_inch) / self.spindle_speed  # 1 flute assumed
+            if chipload_min and chipload < chipload_min:
+                notes.append(f"chipload {chipload:.4f} is below the material minimum "
+                             f"{chipload_min:.4f} - the cutter may rub; use a larger "
+                             f"tool or a single-flute cutter for this material")
+
+        if notes:
+            self.feed_scale_note = '; '.join(notes)
+            for note in notes:
+                print(f"  Tool-scaled: {note}")
+        return notes
+
+    def apply_max_pass_depth(self, depth: float) -> None:
+        """Operator ceiling on the depth of one contour pass, in this pp's units.
+
+        Contour cuts (perimeter, pockets, interior cutouts) already split into
+        ceil(total / max_slotting_depth) passes; this lowers that per-pass depth so the
+        cut takes MORE, shallower passes - the standard way to baby a fragile or
+        multi-flute cutter, trading cycle time for tool life. Clamp-only: a value
+        above what is already in effect changes nothing, because the automatic value
+        is itself a safety ceiling (tested preset, tool scaling, spindle power) and an
+        operator setting must never override a limit upward.
+        """
+        if not (isinstance(depth, (int, float)) and math.isfinite(depth) and depth > 0):
+            raise ValueError(f'Max depth per pass must be a positive number, '
+                             f'got {depth!r}.')
+        if not hasattr(self, 'max_slotting_depth') or depth >= self.max_slotting_depth:
+            return
+        self.max_slotting_depth = depth
+        unit = 'mm' if self.units == 'mm' else 'in'
+        note = f"max depth per pass limited to {depth:.3f} {unit} by operator"
+        existing = getattr(self, 'feed_scale_note', None)
+        self.feed_scale_note = f"{existing}; {note}" if existing else note
+        print(f"  Operator limit: {note}")
 
     def _distance_2d(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """Calculate 2D Euclidean distance between two points"""
@@ -1694,15 +1832,37 @@ class FRCPostProcessor:
 
         # Multi-layer processing
         if self.layer_data:
+            if self.chamfer_pass:
+                return PostProcessorResult(
+                    success=False,
+                    errors=['The deburr / chamfer pass supports 2D parts only; this part '
+                            'has multiple depth layers (2.5D).'])
             return self._generate_multilayer_gcode(suggested_filename, timestamp)
 
         # Use provided timestamp (from client's timezone) or generate one
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # The deburr / chamfer pass is validated and generated FIRST, so a refused pass
+        # (wider than the bit can cut, through the stock, part too narrow for the break)
+        # fails the whole program here rather than surfacing as errors recorded on an
+        # otherwise "successful" result.
+        chamfer_body = []
+        if self.chamfer_pass:
+            self._deferred_tab_positions = []
+            chamfer_body = self._chamfer_pass_body()
+            if self.errors:
+                return PostProcessorResult(success=False, errors=self.errors.copy())
+
         # Generate header (skipped for job-body mode; assemble_job_gcode adds one shared header)
-        gcode = self._generate_gcode_header(timestamp, is_multilayer=False) if include_header_footer else []
+        chamfer_tools = self._chamfer_pass_tool_table() if chamfer_body else None
+        gcode = (self._generate_gcode_header(timestamp, is_multilayer=False,
+                                             tool_table=chamfer_tools)
+                 if include_header_footer else [])
         warnings = []
+        if self.chamfer_pass and not chamfer_body:
+            warnings.append('The deburr / chamfer pass matched no edges on this part '
+                            'and was skipped.')
 
         # Interior features (holes + pockets). Extracted to a shared helper so the
         # multi-part job assembler can collate interiors across parts. In single-part
@@ -1729,8 +1889,20 @@ class FRCPostProcessor:
             else:
                 gcode.append("(===== PERIMETER (NO TABS) =====)")
 
-            gcode.extend(self._generate_perimeter_gcode(self.perimeter))
+            # With a chamfer pass coming, tab removal is deferred past it: the tabs are
+            # the only thing holding the part while the V-bit runs.
+            gcode.extend(self._generate_perimeter_gcode(
+                self.perimeter, defer_tab_removal=bool(chamfer_body)))
             gcode.append("")
+
+        # Deburr / chamfer pass: swap to the V-bit, break the edges, and - when the
+        # machine removes tabs - swap back to the end mill for the deferred tab pass.
+        if chamfer_body:
+            gcode.extend(self._chamfer_tool_change_gcode(to_vbit=True))
+            gcode.extend(chamfer_body)
+            if self.config.remove_tabs and self._deferred_tab_positions:
+                gcode.extend(self._chamfer_tool_change_gcode(to_vbit=False))
+                gcode.extend(self._generate_tab_removal_gcode(self._deferred_tab_positions))
 
         # Footer (skipped for job-body mode; assemble_job_gcode adds one shared footer)
         if include_header_footer:
@@ -1783,11 +1955,11 @@ class FRCPostProcessor:
         """
         # Fail fast on pre-existing validation errors (same guard as generate_gcode).
         if self.errors:
-            return {'interior': [], 'perimeter': [], 'tab_removal': [],
+            return {'interior': [], 'perimeter': [], 'chamfer': [], 'tab_removal': [],
                     'errors': self.errors.copy()}
 
         if self.layer_data:
-            return {'interior': [], 'perimeter': [], 'tab_removal': [],
+            return {'interior': [], 'perimeter': [], 'chamfer': [], 'tab_removal': [],
                     'errors': ['Multi-part jobs support single-layer (2D) parts only; '
                                'this part has multiple depth layers (2.5D).']}
 
@@ -1811,12 +1983,20 @@ class FRCPostProcessor:
                 perimeter.append("(===== PERIMETER (NO TABS) =====)")
             perimeter.extend(self._generate_perimeter_gcode(self.perimeter, defer_tab_removal=True))
 
+        # Phase C2: this part's deburr / chamfer body, V-bit toolpath only. The job
+        # assembler emits ONE shared tool change before the first chamfer body and (when
+        # needed) one change back before the tab-removal phase, so the body here carries
+        # no pause of its own. Refusals land on self.errors and fail the part.
+        chamfer = []
+        if self.chamfer_pass:
+            chamfer = self._chamfer_pass_body()
+
         # Phase D: tab removal, using the positions captured during the perimeter pass.
         tab_removal = []
         if self.config.remove_tabs and self._deferred_tab_positions:
             tab_removal = self._generate_tab_removal_gcode(self._deferred_tab_positions)
 
-        return {'interior': interior, 'perimeter': perimeter,
+        return {'interior': interior, 'perimeter': perimeter, 'chamfer': chamfer,
                 'tab_removal': tab_removal, 'errors': list(self.errors)}
 
     # ---- Portability helpers: work-coordinate safe moves + optional coolant/park -------
@@ -1979,6 +2159,10 @@ class FRCPostProcessor:
         else:
             gcode.append(f"(Tool: {self.tool_diameter}\" diam Flat End Mill)")
             gcode.append(f"(Spindle: {self.spindle_speed} RPM)")
+        if getattr(self, 'feed_scale_note', None):
+            # The program derated itself for this tool; the operator deserves to know
+            # the numbers in the moves below are deliberate, not a stale preset.
+            gcode.append(f"({sanitize_comment(self.feed_scale_note)})")
 
         if is_job and job_part_count is not None:
             gcode.append(f"(Parts in job: {job_part_count})")
@@ -4222,6 +4406,17 @@ class FRCPostProcessor:
         # Calculate equal depth per pass for consistent tool loading
         depth_per_pass = total_cut_depth / num_passes
 
+        # What actually remains standing in a tab when this contour finishes: material
+        # from the cut bottom up to the LAST pass that cut straight across the tab spans
+        # (only the final pass lifts over them), capped by the tab height and the stock
+        # itself. Stashed for the tab-removal pass, which must step through exactly this
+        # much material - on thin stock a single-pass profile leaves tabs the full plate
+        # thickness, and "the tabs" is not a place to abandon the depth-per-pass limit.
+        thinned_top = (self.material_top - (num_passes - 1) * depth_per_pass
+                       if num_passes > 1 else self.material_top)
+        self._tab_material_top = min(thinned_top, self.material_top,
+                                     self.cut_depth + self.tab_height)
+
         # Multi-pass cutting loop
         for pass_num in range(1, num_passes + 1):
             is_final_pass = (pass_num == num_passes)
@@ -4511,9 +4706,29 @@ class FRCPostProcessor:
         if not all_tab_positions:
             return gcode
 
+        # How much material is standing in each tab, and how many passes the active
+        # depth-per-pass limit needs to chew it. Until 2026-08-24 tab removal was the
+        # ONE cut that ignored max_slotting_depth: it plunged to the through depth and
+        # slotted the full tab height in a single move. On thin stock a tab can be the
+        # entire plate thickness, so a program whose profile politely stepped down in
+        # 0.027" passes still buried the cutter 0.133" deep at the tabs - which is how
+        # a 1/8" end mill snapped on a real 6061 part. Tabs now step down like every
+        # other cut, re-entering through the open kerf for each pass.
+        tab_top = getattr(self, '_tab_material_top', None)
+        if tab_top is None:   # deferred call without a prior contour pass: assume full tabs
+            tab_top = min(self.material_top, self.cut_depth + self.tab_height)
+        total_tab_depth = max(0.0, tab_top - self.cut_depth)
+        depth_limit = getattr(self, 'max_slotting_depth', None) or total_tab_depth
+        tab_passes = max(1, int(math.ceil(total_tab_depth / depth_limit))) \
+            if total_tab_depth > 0 and depth_limit > 0 else 1
+        tab_step = total_tab_depth / tab_passes
+
         gcode.append("")
         gcode.append("(===== TAB REMOVAL PASS =====)")
         gcode.append(f"(Removing {len(all_tab_positions)} tabs in star pattern)")
+        if tab_passes > 1:
+            gcode.append(f"(Each tab in {tab_passes} passes @ {tab_step:.3f}\" each, "
+                         f"max {depth_limit:.3f}\" per pass)")
 
         # all_tab_positions is already sorted by tab_idx.
 
@@ -4547,13 +4762,23 @@ class FRCPostProcessor:
             # Rapid to position just before the tab (in the kerf)
             gcode.append(f"G0 X{start_x:.4f} Y{start_y:.4f}  ; Move to tab start (in kerf)")
 
-            # Plunge to cut depth in empty kerf at approach rate (faster - no material)
-            gcode.append(f"G1 Z{self.cut_depth:.4f} F{self.approach_rate}  ; Plunge in kerf")
+            # Step down through the tab, one depth-limited pass at a time. Every pass
+            # re-enters through the kerf entry point, which the perimeter cut opened to
+            # full depth - so each plunge is into air, never into the tab itself.
+            for pass_num in range(1, tab_passes + 1):
+                pass_z = (self.cut_depth if pass_num == tab_passes
+                          else tab_top - pass_num * tab_step)
+                if pass_num > 1:
+                    gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract for next tab pass")
+                    gcode.append(f"G0 X{start_x:.4f} Y{start_y:.4f}  ; Back to tab start (in kerf)")
 
-            # Cut through each piece of the tab in contour order so curved
-            # tabs (spanning multiple short chord segments) get fully removed.
-            for ex, ey in waypoints[1:]:
-                gcode.append(f"G1 X{ex:.4f} Y{ey:.4f} F{self.feed_rate}  ; Cut through tab")
+                # Plunge to this pass's depth in empty kerf at approach rate
+                gcode.append(f"G1 Z{pass_z:.4f} F{self.approach_rate}  ; Plunge in kerf")
+
+                # Cut through each piece of the tab in contour order so curved
+                # tabs (spanning multiple short chord segments) get fully removed.
+                for ex, ey in waypoints[1:]:
+                    gcode.append(f"G1 X{ex:.4f} Y{ey:.4f} F{self.feed_rate}  ; Cut through tab")
 
             # Retract after each tab
             gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
@@ -4718,6 +4943,141 @@ class FRCPostProcessor:
             gcode.append("")
 
         return gcode
+
+    # ---- Standard-mode deburr / chamfer pass ------------------------------------------
+    # The single-tool flows (generate_gcode, generate_part_phases) can append one V-bit
+    # edge-break pass behind a manual tool change: profile first with tabs holding every
+    # part, then the chamfer, then (when the machine removes tabs) a change back to the
+    # end mill for the tab-removal pass. Tabs are what make cutting after the profile
+    # safe, so a tabless part with a perimeter refuses the pass outright - the same
+    # guard tooling.py enforces on multi-tool plans.
+
+    @staticmethod
+    def chamfer_fits(poly: Polygon, width: float) -> bool:
+        """Whether a `width` chamfer fits everywhere around this region.
+
+        The V-tool reaches `width` sideways from the edge at the material top, so
+        opposite edges less than 2 x width apart have their chamfers meet and the
+        material between them disappears. Eroding the region by `width` finds that
+        without measuring any particular feature: an EMPTY result means the shape is
+        thin everywhere, and MORE pieces than it started with means the erosion ate
+        through a neck - which is exactly the narrow spot in question. Testing only for
+        empty misses the common case: two generous lobes joined by a thin waist erode
+        to two healthy islands while the waist is machined away.
+        """
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            return False
+        eroded = poly.buffer(-width)
+        if eroded.is_empty:
+            return False
+        pieces = len(eroded.geoms) if hasattr(eroded, 'geoms') else 1
+        original = len(poly.geoms) if hasattr(poly, 'geoms') else 1
+        return pieces <= original
+
+    def _chamfer_pass_rings(self) -> List[Dict[str, Any]]:
+        """The contours the deburr pass traces, from this part's own features.
+
+        Uncompensated contours, as _generate_chamfer_gcode expects: the perimeter is
+        climb-milled clockwise as an outside edge, holes and pockets counter-clockwise
+        as inside edges. Only features the program actually cut are offered (self.holes
+        is the millable set), so the pass never rides an edge that does not exist.
+        Fit problems are recorded on self.errors.
+        """
+        spec = self.chamfer_pass
+        width = spec['width']
+        targets = spec['targets']
+        rings: List[Dict[str, Any]] = []
+
+        if 'perimeter' in targets and self.perimeter:
+            if not self.chamfer_fits(Polygon(self.perimeter), width):
+                self._add_error(
+                    f"Deburr pass: this part is too narrow somewhere for a {width:.4f} in "
+                    f"chamfer on both sides. The V-bit would cut away the material between "
+                    f"the two edges.")
+            else:
+                rings.append({'points': self.perimeter, 'clockwise': True,
+                              'label': 'Perimeter', 'min_radius': None})
+
+        if 'holes' in targets:
+            for hole in (self.holes or []):
+                cx, cy = hole['center']
+                radius = hole['diameter'] / 2.0
+                rings.append({'points': self._tessellate_circle(cx, cy, radius),
+                              'clockwise': False,
+                              'label': f"Hole {hole['diameter']:.3f} in dia at X{cx:.3f} Y{cy:.3f}",
+                              'min_radius': radius})
+
+        if 'pockets' in targets:
+            for points in (self.pockets or []):
+                poly = Polygon(points)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if not self.chamfer_fits(poly, width):
+                    self._add_error(
+                        f"Deburr pass: a pocket at X{poly.centroid.x:.3f} "
+                        f"Y{poly.centroid.y:.3f} is too narrow somewhere for a "
+                        f"{width:.4f} in chamfer on both walls.")
+                    continue
+                rings.append({'points': points, 'clockwise': False,
+                              'label': f"Pocket at X{poly.centroid.x:.3f} Y{poly.centroid.y:.3f}",
+                              'min_radius': None})
+
+        return rings
+
+    def _chamfer_pass_body(self) -> List[str]:
+        """The deburr pass toolpath body (no tool-change pause).
+
+        Generated with the V-bit's geometry: tool_diameter is swapped to the bit for the
+        duration so the width-vs-bit-radius check inside _generate_chamfer_gcode judges
+        the tool that will actually be in the spindle, then restored. Refusals land on
+        self.errors; callers must check for new errors after this returns.
+        """
+        spec = self.chamfer_pass
+        if self.perimeter and not self.tabs_enabled:
+            self._add_error(
+                'A deburr / chamfer pass needs tabs: without them the profile cut leaves '
+                'the part loose on the table before the V-bit runs. Enable tabs or remove '
+                'the chamfer pass.')
+            return []
+        rings = self._chamfer_pass_rings()
+        if not rings:
+            return []
+        original = self.tool_diameter
+        self.tool_diameter = spec['bit_diameter']
+        try:
+            return self._generate_chamfer_gcode(rings, spec['width'], spec['bit_angle'])
+        finally:
+            self.tool_diameter = original
+
+    def _chamfer_tool_change_gcode(self, to_vbit: bool) -> List[str]:
+        """The pause-and-park block that swaps between the milling cutter and the V-bit."""
+        spec = self.chamfer_pass
+        bit_desc = f"{spec['bit_diameter']:.4f} in {spec['bit_angle']:.0f} deg V-bit"
+        mill_desc = f"{self.tool_diameter:.4f} in end mill"
+        if to_vbit:
+            title = 'TOOL CHANGE - DEBURR CHAMFER PASS'
+            instructions = [f"Remove the {mill_desc}",
+                            f"Install the {bit_desc}"]
+        else:
+            title = 'TOOL CHANGE - BACK TO END MILL'
+            instructions = [f"Remove the {bit_desc}",
+                            f"Install the {mill_desc} for tab removal"]
+        instructions += [
+            'Re-zero Z to the sacrifice board surface with the new tool',
+            'Do NOT change the X or Y zero',
+        ]
+        return self._generate_pause_and_park_gcode(title, instructions)
+
+    def _chamfer_pass_tool_table(self) -> List[str]:
+        """Header tool list for a single-tool program that ends with the V-bit pass."""
+        spec = self.chamfer_pass
+        return [
+            f"T1: {self.tool_diameter:.4f} in end mill - all cutting",
+            f"T2: {spec['bit_diameter']:.4f} in {spec['bit_angle']:.0f} deg V-bit - "
+            f"deburr chamfer pass",
+        ]
 
     def _offset_coordinate(self, line: str, axis: str, offset: float) -> str:
         """
@@ -6119,7 +6479,15 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
     if not timestamp:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    gcode = header_pp._generate_gcode_header(timestamp, is_job=True, job_part_count=len(part_jobs))
+    # A job with a deburr / chamfer phase involves two tools, and the header must say so
+    # before the operator starts the program with only the end mill to hand.
+    has_chamfer = any(pj.get('chamfer') for pj in part_jobs)
+    chamfer_tools = (header_pp._chamfer_pass_tool_table()
+                     if has_chamfer and header_pp.chamfer_pass else None)
+
+    gcode = header_pp._generate_gcode_header(timestamp, is_job=True,
+                                             job_part_count=len(part_jobs),
+                                             tool_table=chamfer_tools)
 
     def _part_label(i, pj):
         name = pj.get('name', f'part {i}')
@@ -6164,6 +6532,17 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
     # Phase C: all parts' perimeters (tab removal deferred to phase D).
     _emit_phase("PHASE: PERIMETERS", 'perimeter')
 
+    # Phase C2: the optional deburr / chamfer pass - one shared V-bit change for the
+    # whole sheet, then every part's edges. Every part is still tabbed to the stock
+    # here (tab removal is phase D), which is what makes cutting after the profile
+    # safe. When the machine removes tabs, one change back to the end mill follows.
+    if has_chamfer and header_pp.chamfer_pass:
+        gcode.extend(header_pp._chamfer_tool_change_gcode(to_vbit=True))
+    _emit_phase("PHASE: DEBURR CHAMFER PASS", 'chamfer')
+    if (has_chamfer and header_pp.chamfer_pass
+            and any(pj.get('tab_removal') for pj in part_jobs)):
+        gcode.extend(header_pp._chamfer_tool_change_gcode(to_vbit=False))
+
     # Phase D: all parts' tab removals (only parts whose perimeter left tabs).
     _emit_phase("PHASE: TAB REMOVAL", 'tab_removal')
 
@@ -6190,6 +6569,72 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
             'dwell_time': header_pp._format_time(time_estimate['dwell'])
         }
     )
+
+
+#: The edges a deburr / chamfer pass may break, in the order the UI lists them.
+CHAMFER_TARGETS = ('perimeter', 'holes', 'pockets')
+
+
+def parse_chamfer_spec(spec) -> dict:
+    """Validate a deburr / chamfer pass request into the dict chamfer_pass holds.
+
+    Accepts {'width', 'bit_diameter', 'bit_angle', 'targets'} with numbers (or numeric
+    strings, as form fields arrive) in inches and degrees; targets may be a list or a
+    comma-separated string and defaults to the perimeter. Raises ValueError naming the
+    problem - these are numbers that reach Z arithmetic and erosion buffers directly,
+    so nothing non-finite or non-physical gets through. Geometry-dependent refusals
+    (wider than the bit can cut, through the stock, part too narrow) are judged later,
+    against the actual part.
+    """
+    if not isinstance(spec, dict):
+        raise ValueError('The chamfer pass must be an object with width, bit_diameter, '
+                         'bit_angle and targets.')
+
+    def _number(key, default=None):
+        raw = spec.get(key, default)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            raise ValueError(f'The chamfer pass needs a {key}.')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f'Chamfer {key} must be a number, got {raw!r}.')
+        if not math.isfinite(value):
+            raise ValueError(f'Chamfer {key} must be a finite number.')
+        return value
+
+    width = _number('width')
+    bit_diameter = _number('bit_diameter')
+    bit_angle = _number('bit_angle', 90.0)
+    if not 0 < width < 1.0:
+        raise ValueError(f'Chamfer width must be between 0 and 1 inch, got {width:g}.')
+    if not 0 < bit_diameter <= 2.0:
+        raise ValueError(f'Chamfer V-bit diameter must be between 0 and 2 inches, '
+                         f'got {bit_diameter:g}.')
+    if not 0 < bit_angle < 180:
+        raise ValueError(f'Chamfer V-bit included angle must be between 0 and 180 '
+                         f'degrees, got {bit_angle:g}.')
+
+    # None means "not specified" and defaults; an explicitly EMPTY list is the UI with
+    # every edge unchecked, and deserves the "needs at least one edge" error below.
+    targets_raw = spec.get('targets')
+    if targets_raw is None:
+        targets_raw = ['perimeter']
+    if isinstance(targets_raw, str):
+        targets_raw = [t.strip() for t in targets_raw.split(',') if t.strip()]
+    if not isinstance(targets_raw, (list, tuple)):
+        raise ValueError('Chamfer targets must be a list or comma-separated string.')
+    targets = []
+    for target in targets_raw:
+        if target not in CHAMFER_TARGETS:
+            raise ValueError(f'Unknown chamfer target {target!r}. Expected any of: '
+                             f'{", ".join(CHAMFER_TARGETS)}.')
+        if target not in targets:
+            targets.append(target)
+    if not targets:
+        raise ValueError('The chamfer pass needs at least one edge to break.')
+
+    return {'width': width, 'bit_diameter': bit_diameter, 'bit_angle': bit_angle,
+            'targets': targets}
 
 
 def add_timestamp_to_filename(filename: str) -> str:
@@ -6378,6 +6823,23 @@ def main():
                        help='How far to cut into sacrifice board in inches (default: 0.02")')
     parser.add_argument('--units', choices=['inch', 'mm'], default='inch',
                        help='Units (default: inch)')
+    parser.add_argument('--chamfer-width', type=float, default=None,
+                        help='Add a deburr / chamfer pass after the profile (standard mode '
+                             'only): horizontal edge-break width in inches, e.g. 0.02. '
+                             'The program pauses for a manual change to the V-bit.')
+    parser.add_argument('--chamfer-bit-diameter', type=float, default=0.5,
+                        help='V-bit diameter in inches for the chamfer pass (default: 0.5)')
+    parser.add_argument('--chamfer-bit-angle', type=float, default=90.0,
+                        help='V-bit full included angle in degrees for the chamfer pass '
+                             '(default: 90)')
+    parser.add_argument('--chamfer-targets', type=str, default='perimeter,holes',
+                        help='Comma-separated edges the chamfer pass breaks: perimeter, '
+                             'holes, pockets (default: perimeter,holes)')
+    parser.add_argument('--max-pass-depth', type=float, default=None,
+                        help='Ceiling on the depth of one contour pass (in the --units '
+                             'system). Profiles and pockets split into more, shallower '
+                             'passes - use this to baby fragile or multi-flute cutters. '
+                             'Only ever lowers the automatic per-pass depth.')
     parser.add_argument('--tab-spacing', type=float, default=6.0,
                        help='Desired spacing between tabs in inches (default: 6.0, minimum 3 tabs)')
     parser.add_argument('--origin-corner', default='bottom-left',
@@ -6398,6 +6860,12 @@ def main():
                        help='Plunge rate (default: 10 ipm or 339 mm/min depending on units)')
     
     args = parser.parse_args()
+
+    # The chamfer pass belongs to standard mode only. Refuse it loudly elsewhere: a
+    # deburr flag silently dropped from a tube program would read as a promise kept.
+    if args.chamfer_width is not None and (args.ops_file or args.mode != 'standard'):
+        parser.error('--chamfer-width is only supported in standard mode. Multi-tool '
+                     'jobs (--ops-file) describe a chamfer as an operation instead.')
 
     # A multi-tool job describes its own tools and operations, so it bypasses the
     # single-tool mode branching below entirely.
@@ -6476,8 +6944,11 @@ def main():
         # Store tube height for Z-offset calculations
         pp.tube_height = args.tube_height
 
-        # Apply material preset and user parameters (shared logic)
+        # Apply material preset and user parameters (shared logic). Scaled to the
+        # actual tool - a no-op for the drilled pattern's 0.201" bit, a derate for a
+        # custom design milled with a small cutter. Explicit feed flags come last.
         pp.apply_material_preset(args.material)
+        pp.scale_feeds_to_tool()
         if args.user:
             pp.user_name = args.user
         if args.spindle_speed != 18000:
@@ -6561,8 +7032,17 @@ def main():
                               units=args.units,
                               config=load_cli_config(args.config))
 
-        # Apply material preset and user parameters (shared logic)
+        # Apply material preset and user parameters (shared logic). The preset is tuned
+        # for the 4 mm reference tool; scale it to the tool actually specified. An
+        # explicit --feed-rate / --plunge-rate afterwards is the user overriding the
+        # derate on purpose, so those come last.
         pp.apply_material_preset(args.material)
+        pp.scale_feeds_to_tool()
+        if args.max_pass_depth is not None:
+            try:
+                pp.apply_max_pass_depth(args.max_pass_depth)
+            except ValueError as exc:
+                parser.error(str(exc))
         if args.user:
             pp.user_name = args.user
         if args.spindle_speed != 18000:
@@ -6576,6 +7056,18 @@ def main():
         pp.tab_spacing = args.tab_spacing
         pp.sacrifice_board_depth = args.sacrifice_depth
         pp.cut_depth = -pp.sacrifice_board_depth
+
+        # Optional deburr / chamfer pass with a user-specified V-bit.
+        if args.chamfer_width is not None:
+            try:
+                pp.chamfer_pass = parse_chamfer_spec({
+                    'width': args.chamfer_width,
+                    'bit_diameter': args.chamfer_bit_diameter,
+                    'bit_angle': args.chamfer_bit_angle,
+                    'targets': args.chamfer_targets,
+                })
+            except ValueError as exc:
+                parser.error(str(exc))
 
         # Load and process DXF (shared logic)
         pp.load_dxf(args.input_dxf)

@@ -418,6 +418,10 @@ class MultiToolJob:
     feeds_machine: Optional[str] = None   # None = fall back to machine_id, then the default
     tab_spacing: float = 6.0
     sacrifice_depth: Optional[float] = None
+    #: Operator ceiling on the depth of one contour pass, inches. Applied to every
+    #: milling tool AFTER the model/preset/power clamps, and only ever downward - it
+    #: buys more, shallower passes for fragile or multi-flute cutters.
+    max_pass_depth: Optional[float] = None
     drill_size_tolerance: float = DEFAULT_DRILL_SIZE_TOLERANCE
     config: Optional[TeamConfig] = None
     user_name: Optional[str] = None
@@ -573,6 +577,48 @@ def _power_limited_depth(tool: Tool, feeds: Dict[str, Any]) -> Optional[float]:
         return None
     return feeds_speeds.max_depth_for_power(machine, material, tool.diameter,
                                             float(feeds['feed_xy']))
+
+
+def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
+                       feeds: Dict[str, Any]) -> Optional[str]:
+    """In metal, hold the model's feed to the material preset's TESTED rate, scaled
+    for this tool's diameter. Mutates `feeds` in place; returns a warning when it binds.
+
+    The chipload model is theory; the preset feed is the one number this machine has
+    actually cut aluminium at (55 IPM for the 4 mm reference on the stock config, or
+    whatever the team tuned it to). The model was quoting a 1/8 in cutter 85.9 IPM -
+    56% over anything the machine had ever demonstrated - and a real bit broke at it.
+    The same never-raise-above-tested doctrine that already governs depth of cut now
+    governs feed in the materials that seize (those with feed_flutes_max); wood and
+    plastics keep the model's numbers, and an explicit per-tool feed override still
+    wins - pinning a feed is the operator overriding the anchor on purpose.
+
+    Must run BEFORE apply_tool_feeds: pp.feed_rate still holds the material preset's
+    feed at that point, and the power-limited depth inside apply_tool_feeds must be
+    computed from the feed the program will actually command.
+    """
+    material_key = feeds.get('material_key')
+    is_metal = bool(feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max'))
+    preset_feed = getattr(pp, 'feed_rate', None)
+    if not is_metal or not preset_feed or tool.type == 'drill' or tool.feed_rate:
+        return None
+    d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
+    # Floored, not rounded: a clamp must never nudge itself upward, and the single-tool
+    # path's scale_feeds_to_tool floors identically (46.8, not 46.9, for a 1/8" tool).
+    anchor = math.floor(preset_feed
+                        * (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT
+                        * 10.0) / 10.0
+    if anchor >= feeds['feed_xy']:
+        return None
+    scale = anchor / feeds['feed_xy']
+    original = feeds['feed_xy']
+    feeds['feed_xy'] = anchor
+    feeds['ramp_feed'] = round(feeds['ramp_feed'] * scale, 1)
+    feeds['peck_feed'] = round(feeds['peck_feed'] * scale, 1)
+    return (f"{tool.label}: feed held to {anchor:.1f} ipm, the tested "
+            f"{feeds_speeds.MATERIALS[material_key]['name']} preset rate scaled for "
+            f"this diameter. The chipload model wanted {original:.1f} ipm, but the "
+            f"preset is the only feed this machine has proven in metal.")
 
 
 def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) -> None:
@@ -1027,27 +1073,11 @@ def _check_tool_suits_operation(op: Operation, tool: Tool) -> Optional[str]:
 def _chamfer_fits(poly: Polygon, width: float) -> bool:
     """Whether a `width` chamfer fits everywhere around this contour.
 
-    The V-tool reaches `width` sideways from the edge at the material top, so opposite
-    edges less than 2 x width apart have their chamfers meet and the material between
-    them disappears. Eroding the region by `width` finds that condition without having to
-    measure any particular feature: if the erosion comes back EMPTY the shape is thin
-    everywhere, and if it comes back as MULTIPLE pieces the erosion ate through a neck
-    that was holding them together - which is exactly the narrow spot in question.
-
-    Testing only for empty (as this first did) misses the common case: a part with two
-    generous lobes joined by a thin waist erodes to two healthy islands, so the whole-part
-    test passes happily while the waist is machined away.
+    The erosion test itself lives on FRCPostProcessor.chamfer_fits (the standard-mode
+    deburr pass needs the identical judgement); see its docstring for why "eroded to
+    more pieces than it started with" matters as much as "eroded to nothing".
     """
-    if not poly.is_valid:
-        poly = poly.buffer(0)
-    if poly.is_empty:
-        return False
-    eroded = poly.buffer(-width)
-    if eroded.is_empty:
-        return False
-    pieces = len(eroded.geoms) if hasattr(eroded, 'geoms') else 1
-    original = len(poly.geoms) if hasattr(poly, 'geoms') else 1
-    return pieces <= original
+    return FRCPostProcessor.chamfer_fits(poly, width)
 
 
 def _chamfer_rings(pp: FRCPostProcessor, op: Operation, features: Dict[str, Any],
@@ -1134,7 +1164,14 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
                                          feeds_machine=job.feeds_machine)
 
     pp = build_part_postprocessor(job, part, tool.diameter)
+    anchor_warning = _anchor_metal_feed(pp, tool, feeds)
+    if anchor_warning:
+        warnings.append(anchor_warning)
     apply_tool_feeds(pp, tool, feeds)
+    if job.max_pass_depth is not None:
+        # Operator ceiling, applied after every automatic clamp and only downward:
+        # more, shallower passes to baby a fragile or multi-flute cutter.
+        pp.apply_max_pass_depth(job.max_pass_depth)
 
     if getattr(pp, 'power_limited_depth', False):
         warnings.append(
@@ -1737,6 +1774,8 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
             'drill_size_tolerance'),
         sacrifice_depth=(_expect_positive(spec['sacrifice_depth'], 'sacrifice_depth')
                          if spec.get('sacrifice_depth') is not None else None),
+        max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
+                        if spec.get('max_pass_depth') is not None else None),
         config=config,
         user_name=user_name,
         name=spec.get('name', 'job'),

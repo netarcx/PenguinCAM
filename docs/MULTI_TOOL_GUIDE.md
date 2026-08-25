@@ -192,6 +192,18 @@ Testing only for empty is not enough, and this is worth remembering: a part with
 generous lobes joined by a thin waist erodes to two healthy islands, so a whole-part
 "did it vanish" test passes happily while the waist is machined away.
 
+### The standard-mode deburr pass
+
+The same machinery is reachable without a multi-tool plan: standard 2D mode (the
+wizard's Setup step, `/process`, `/process-job`, or the CLI's `--chamfer-width` /
+`--chamfer-bit-diameter` / `--chamfer-bit-angle` / `--chamfer-targets` flags) can append
+one V-bit pass to a single-tool program. It runs after the profile with the tabs still
+holding every part, behind a manual tool change, and - when the machine removes tabs -
+changes back to the end mill for the deferred tab-removal pass. A tabless part with a
+perimeter refuses the pass for the same reason `order_operations` refuses cutting after
+a part is freed. The erosion fit test above (`FRCPostProcessor.chamfer_fits`, which
+`_chamfer_fits` here delegates to) guards it identically.
+
 ---
 
 ## Drilling
@@ -358,23 +370,63 @@ Engagement per op type: `holes` → `slot` (a helical bore engages all round), `
 `pocket` (partial engagement, full reference chipload), `perimeter` and `chamfer` →
 `profile`.
 
+### Flutes multiply feed only while chips can escape
+
+The chipload model feeds `RPM x flutes x chipload` — each flute takes a healthy chip, so
+more flutes mean more feed. That assumption breaks in gummy metal: in a 6061 slot, flutes
+past the material's `feed_flutes_max` (2 for aluminum) cannot clear their chips. They
+recut and weld them, the tool seizes, and it snaps. Feeding a 1/8" 4-flute at the 4-flute
+rate commanded 150+ IPM and broke real cutters, which is why the multiplier is now capped
+at the evacuation limit: a 4-flute in aluminum is fed at the 2-flute rate, and the
+warnings say both that the feed was held down and that each tooth is now taking half a
+chip (rubbing risk) — the actual fix being a 1- or 2-flute cutter. Wood and plastics keep
+the uncapped scaling; there `max_flutes_soft` stays advisory, because their chips clear
+(or the failure is melting, which slowing down makes worse, not better).
+
 ### Depth of cut is clamped, never raised
 
 `max_slotting_depth` is the one preset value the model would otherwise make *more*
 aggressive, and it drives the pass count directly. `feeds_speeds` derives `slot_stepdown`
-as a fixed multiple of diameter (1.27 × D in aluminium, 2.55 × D in plywood). That
-matches the preset exactly at the 4 mm reference tool and then diverges hard:
+as a fixed multiple of diameter (0.38 × D in aluminium since the 2026-08-24 derate,
+2.55 × D in plywood). That matches the preset exactly at the 4 mm reference tool and
+then diverges for other diameters:
 
 | 0.25" 6061, 3/8" 2-flute | preset | model |
 |---|---|---|
-| max depth of cut | 0.200" | 0.476" |
-| passes for a 0.258" profile | 2 | 1 |
+| max depth of cut | 0.060" | 0.143" |
+| passes for a 0.258" profile | 5 | 2 |
 
-One full-width 0.258"-deep pass at the (legitimately higher) feed for a 3/8" cutter is
-roughly 14 in³/min of aluminium — a stalled spindle or a snapped end mill on a hobby
-router. So the applied value is `min(model, preset)`: a smaller cutter is still scaled
-*down* below the preset, but nothing is ever scaled up on the strength of a chipload
-model. Taking an extra pass costs time; over-committing costs a cutter.
+A deeper full-width pass at the (legitimately higher) feed for a 3/8" cutter piles MRR
+onto a hobby router fast — a stalled spindle or a snapped end mill. So the applied value
+is `min(model, preset)`: a smaller cutter is still scaled *down* below the preset, but
+nothing is ever scaled up on the strength of a chipload model. Taking an extra pass
+costs time; over-committing costs a cutter. (Before the derate the aluminium numbers
+were 55 IPM and 1.27 × D — refuted in the field by broken 1/8" cutters; see
+MULTI_TOOL_STATUS item 10.)
+
+On top of the automatic clamps, the operator can set their own ceiling: `max_pass_depth`
+on the job (the wizard's "Max depth per pass" field, or `--max-pass-depth` on the CLI).
+It is applied after everything above and is likewise clamp-only — the way to baby a
+fragile or multi-flute cutter is more, shallower passes, never a deeper one.
+
+**Tab removal obeys the same limit.** It used to be the one cut that didn't: it slotted
+whatever was standing in a tab in a single move, at whatever height that was. In the
+usual flows the perimeter's intermediate passes thin the tab spans first (only the
+final pass lifts over them), which is the only reason this never bit — a single-pass
+profile on thin stock leaves tabs the full plate thickness, and the removal pass would
+slot all of it in one move. The contour generator now tells the removal pass how much
+material is actually standing in a tab, and removal steps down through it within
+`max_slotting_depth`, re-entering through the open kerf for each pass. `gcode_audit`
+carries an independent engagement checker that fails any program where a straight feed
+move bites materially more than the per-pass limit.
+
+**In metal, feed is anchored to the tested preset.** The chipload model's feed for a
+multi-flute cutter can exceed anything the machine has demonstrated — it quoted a 1/8"
+cutter 85.9 IPM against the 55 IPM the aluminum preset was tuned at, and that too broke
+a real bit. For materials with `feed_flutes_max` (the ones that seize), the derived feed
+is capped at `preset_feed × (D/D_ref)^0.7` — the same never-raise-above-tested rule the
+depth already follows. Wood and plastics keep the model's numbers; an explicit per-tool
+feed override still wins.
 
 ### …and clamped again by spindle power
 

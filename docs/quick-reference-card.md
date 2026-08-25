@@ -150,11 +150,34 @@ In PenguinCAM web interface:
 - Check your actual endmill
 - Common: 4mm (0.157"), 1/8" (0.125"), 1/4" (0.250")
 - Wrong diameter = wrong part size!
+- Feeds and depth-per-pass automatically scale DOWN for tools smaller than 4mm
+  (the presets are tuned for a 4mm bit; running a 1/8" bit at 4mm numbers snaps it).
+  The G-code header says when a program derated itself. Larger tools keep the
+  tested preset numbers.
 
 **Number of Tabs:**
 - Small parts: 3-4 tabs
 - Large parts: 6-8 tabs
 - More tabs = more secure but more cleanup
+
+**Max Depth Per Pass (optional):**
+- Blank = automatic (tested preset, scaled to your tool)
+- Enter a smaller depth (e.g. 0.05") to split profiles and pockets into more,
+  shallower passes - the way to baby fragile or multi-flute cutters
+- It only ever lowers the automatic value; the program header notes the limit
+- Works in single-tool and multi-tool jobs (`max_pass_depth` in a job file,
+  `--max-pass-depth` on the CLI)
+
+**Deburring / Chamfer Pass (2D mode, optional):**
+- Tick the box on the Setup step, then set your V-bit's diameter and included angle
+  and how wide an edge break you want (0.02" is a light deburr)
+- Pick which edges to break: outside profile, holes, pockets
+- The program cuts everything with your end mill first, then **pauses (M0)** for you to
+  swap in the V-bit and re-zero Z on the sacrifice board - do NOT touch X/Y zero
+- Tabs stay in until after the chamfer; if tab removal is enabled the program pauses
+  again to swap the end mill back
+- Depth is computed from the width and bit angle (a 90° bit cuts as deep as the break
+  is wide; a 60° bit goes deeper); jobs that can't work are refused with an explanation
 
 ---
 

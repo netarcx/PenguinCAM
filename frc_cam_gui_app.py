@@ -67,6 +67,7 @@ except ImportError:
 # Import postprocessor directly (for API calls instead of subprocess)
 from frc_cam_postprocessor import (
     FRCPostProcessor, PostProcessorResult, assemble_job_gcode, validate_job_layout,
+    parse_chamfer_spec,
 )
 
 # Import team config management
@@ -876,6 +877,38 @@ def process_file():
             # Standard mode parameters
             tab_spacing = float(request.form.get('tab_spacing', 6.0))
 
+        # Optional operator ceiling on the depth of one contour pass (inches). More,
+        # shallower passes for fragile or multi-flute cutters; only ever lowers the
+        # automatic value. Parsed here so a bad number is a 400 naming the field.
+        max_pass_depth = None
+        raw_pass_depth = request.form.get('max_pass_depth', '').strip()
+        if raw_pass_depth:
+            try:
+                max_pass_depth = float(raw_pass_depth)
+            except ValueError:
+                return jsonify({'error': f'Max depth per pass must be a number, '
+                                         f'got {raw_pass_depth!r}.'}), 400
+            if not math.isfinite(max_pass_depth) or max_pass_depth <= 0:
+                return jsonify({'error': 'Max depth per pass must be a positive '
+                                         'number of inches.'}), 400
+
+        # Optional deburr / chamfer pass (standard mode only). Parsed HERE so a bad
+        # number is a 400 naming the field, not a 500 from Z arithmetic downstream.
+        chamfer_spec = None
+        if request.form.get('chamfer') == '1':
+            if is_aluminum_tube:
+                return jsonify({'error': 'A deburr / chamfer pass is not supported in '
+                                         'tube mode.'}), 400
+            try:
+                chamfer_spec = parse_chamfer_spec({
+                    'width': request.form.get('chamfer_width'),
+                    'bit_diameter': request.form.get('chamfer_bit_diameter'),
+                    'bit_angle': request.form.get('chamfer_bit_angle', 90),
+                    'targets': request.form.get('chamfer_targets', 'perimeter,holes'),
+                })
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+
         # Save uploaded file. Not in pattern mode: the geometry is generated, so a DXF
         # posted alongside it is never read, and saving it only made the ignoring harder
         # to notice.
@@ -958,6 +991,7 @@ def process_file():
                     )
                     face_pp.tube_height = tube_height  # Store for Z-offset calculations
                     face_pp.apply_material_preset(material, machine_id)
+                    face_pp.scale_feeds_to_tool()   # same 4mm-reference presets, same physics
                     if user_name:
                         face_pp.user_name = user_name
                     face_pp.load_dxf(dxf_path)
@@ -986,6 +1020,9 @@ def process_file():
                     )
                     pp.tube_height = tube_height
                     pp.apply_material_preset(material, machine_id)
+                    # No-op for the drilled pattern (its 0.201" tool is above the 4 mm
+                    # reference); derates a custom design milled with a smaller cutter.
+                    pp.scale_feeds_to_tool()
                     if user_name:
                         pp.user_name = user_name
                     # Checked here, before load_tube_pattern, because generating and
@@ -1059,8 +1096,13 @@ def process_file():
                     config=team_config
                 )
 
-                # Apply material preset (for specific machine if selected)
+                # Apply material preset (for specific machine if selected), then scale
+                # it to the actual tool - the preset numbers are tuned for the 4 mm
+                # reference cutter, and running a smaller end mill at them snaps it.
                 pp.apply_material_preset(material, machine_id)
+                pp.scale_feeds_to_tool()
+                if max_pass_depth is not None:
+                    pp.apply_max_pass_depth(max_pass_depth)
 
                 # Add user name if authenticated
                 user_name = session.get('user_name')
@@ -1069,6 +1111,7 @@ def process_file():
 
                 # Standard mode specific parameters
                 pp.tab_spacing = tab_spacing
+                pp.chamfer_pass = chamfer_spec
 
                 # Load and process DXF
                 pp.load_dxf(input_path)
@@ -1139,6 +1182,10 @@ def process_file():
             parameters.update({
                 'tab_spacing': tab_spacing
             })
+            if chamfer_spec:
+                parameters['chamfer'] = chamfer_spec
+            if max_pass_depth is not None:
+                parameters['max_pass_depth'] = max_pass_depth
 
         response_data = {
             'success': True,
@@ -1250,6 +1297,27 @@ def process_job():
         machine_id = job.get('machine_id')
         timestamp_str = request.form.get('timestamp', '')
 
+        # Optional deburr / chamfer pass, shared by every part in the job (one V-bit
+        # change for the whole sheet). Parsed here so a bad number is a 400 that names
+        # the field.
+        chamfer_spec = None
+        if job.get('chamfer') is not None:
+            try:
+                chamfer_spec = parse_chamfer_spec(job['chamfer'])
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+
+        # Optional operator ceiling on contour depth per pass (inches, clamp-only).
+        max_pass_depth = None
+        if job.get('max_pass_depth') is not None:
+            try:
+                max_pass_depth = float(job['max_pass_depth'])
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Max depth per pass must be a number.'}), 400
+            if not math.isfinite(max_pass_depth) or max_pass_depth <= 0:
+                return jsonify({'error': 'Max depth per pass must be a positive '
+                                         'number of inches.'}), 400
+
         # Stock size (and G54 origin) are derived server-side from the placed parts'
         # combined bounding box; the client's stock field is advisory only. This avoids
         # a client/server bbox mismatch flagging a part as "outside" its own stock.
@@ -1297,9 +1365,13 @@ def process_job():
             pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool_diameter,
                                   units='inch', config=team_config)
             pp.apply_material_preset(material, machine_id)
+            pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
+            if max_pass_depth is not None:
+                pp.apply_max_pass_depth(max_pass_depth)
             if user_name:
                 pp.user_name = user_name
             pp.tab_spacing = tab_spacing
+            pp.chamfer_pass = chamfer_spec
             pp.load_dxf(saved_paths[fidx])
             pp.transform_coordinates('bottom-left', rotation,
                                      placement_offset=(place_x, place_y),
@@ -1342,6 +1414,7 @@ def process_job():
                 'name': item['name'], 'place_x': item['place_x'],
                 'place_y': item['place_y'], 'rotation': item['rotation'],
                 'interior': phases['interior'], 'perimeter': phases['perimeter'],
+                'chamfer': phases.get('chamfer', []),
                 'tab_removal': phases['tab_removal'],
             })
             minx, miny, maxx, maxy = item['bbox']
