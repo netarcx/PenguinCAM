@@ -347,6 +347,8 @@
                 <div class="panel-head">
                     <h2>Layout</h2>
                     <div id="layout-toolbar" class="panel-actions">
+                        <button type="button" class="btn small" id="btn-arrange">Auto-arrange</button>
+                        <button type="button" class="btn small" id="btn-fill" title="Add copies of the selected part until the sheet is full">Fill sheet</button>
                         <button type="button" class="btn small" id="btn-flip" disabled>Flip over</button>
                         <button type="button" class="btn small icon" id="btn-zoom-out" title="Zoom out"
                                 aria-label="Zoom out">&minus;</button>
@@ -354,6 +356,18 @@
                                 aria-label="Zoom in">+</button>
                     </div>
                 </div>
+                <div id="stock-row">
+                    <label class="field" id="stock-field">
+                        <span>Stock</span>
+                        <select id="f-stock" autocomplete="off"></select>
+                    </label>
+                    <button type="button" class="btn small" id="btn-save-stock"
+                            title="Save this sheet size to the team config">Save size</button>
+                    <button type="button" class="btn small" id="btn-save-remnant"
+                            title="Save what is left of this sheet as an offcut">Save offcut</button>
+                </div>
+                <div id="stock-note" class="hint"></div>
+
                 <div id="layout-info" class="dro-strip">
                     <div class="dro">
                         <span class="dro-k">Machine</span>
@@ -366,6 +380,10 @@
                     <div class="dro">
                         <span class="dro-k">Tool kerf</span>
                         <span class="dro-v" id="info-tool"></span>
+                    </div>
+                    <div class="dro" id="dro-usage" hidden>
+                        <span class="dro-k">Sheet used</span>
+                        <span class="dro-v" id="info-usage"></span>
                     </div>
                 </div>
                 <div class="canvas-wrap">
@@ -497,6 +515,8 @@
         localMode: {{ (local_mode if local_mode is defined else False)|tojson }},
         toolLibrary: {{ (tool_library if tool_library is defined else {})|tojson }},
         toolsWritable: {{ (tools_writable if tools_writable is defined else False)|tojson }},
+        savedStock: {{ (saved_stock if saved_stock is defined else [])|tojson }},
+        maxParts: {{ (max_parts_per_job if max_parts_per_job is defined else 60)|tojson }},
         tubeDesigner: {{ (tube_designer_cfg if tube_designer_cfg is defined else {})|tojson }},
       };
     </script>

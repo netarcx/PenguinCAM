@@ -550,6 +550,10 @@ def _app_template_context():
         # "Sacrifice board" selected, and the wizard then SENT board - the UI quietly
         # overriding the config it was supposed to be showing.
         'z_datum': team_config.z_datum,
+        'saved_stock': team_config.saved_stock,
+        # The client fills sheets by adding copies; it has to stop where the server
+        # stops, or "fill" hands back a job the next step refuses.
+        'max_parts_per_job': MAX_PARTS_PER_JOB,
         'default_material': team_config.default_material,
         # The shop's saved bits first, then the built-ins (tooling.merge_tool_library).
         'tool_library': tooling.merge_tool_library(team_config.saved_tools),
@@ -836,6 +840,123 @@ def delete_tool():
         return _saved_tools_response(detail, status=500)
     _ensure_local_team_config(force=True)
     return _saved_tools_response('Removed the bit from the team config.')
+
+
+def _stock_response(message=None, saved_id=None, status=200):
+    """Every stock route answers with the whole list, so the UI never merges anything."""
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    payload = {
+        'success': status == 200,
+        'stock': team_config.saved_stock,
+        'writable': local_mode.config_is_writable() if LOCAL_MODE else False,
+    }
+    if message:
+        payload['message' if status == 200 else 'error'] = message
+    if saved_id:
+        payload['saved_id'] = saved_id
+    return jsonify(payload), status
+
+
+def _stock_from_request(data):
+    """Validate one sheet off the wire. Returns (entry, error_message)."""
+    if not isinstance(data, dict):
+        return None, 'Expected a sheet to save.'
+    name = str(data.get('name') or '').strip()
+    if not name:
+        return None, 'Give the stock a name you will recognise in the rack.'
+    if len(name) > 60:
+        return None, 'That name is too long; keep it under 60 characters.'
+    if any(ch < ' ' or ch == '\x7f' for ch in name):
+        return None, 'A stock name cannot contain line breaks or control characters.'
+    sizes = {}
+    for field, label in (('width', 'Width'), ('height', 'Length')):
+        raw = data.get(field + '_text') or data.get(field)
+        value = parse_length(raw)
+        if not value or value <= 0:
+            return None, f'{label} is not a size. Try 24, 24" or 600mm.'
+        if value > 200:
+            return None, f'{label} of {value:.1f} in is larger than any sheet this cuts.'
+        sizes[field] = value
+        sizes[field + '_text'] = raw if isinstance(raw, str) else f'{value:g}"'
+    entry = {'name': name, 'remnant': bool(data.get('remnant')), **sizes}
+    raw_thickness = data.get('thickness_text') or data.get('thickness')
+    if raw_thickness not in (None, ''):
+        thickness = parse_length(raw_thickness)
+        if not thickness or thickness <= 0:
+            return None, f'{raw_thickness!r} is not a thickness. Try 0.25 or 6mm.'
+        entry['thickness'] = thickness
+        entry['thickness_text'] = (raw_thickness if isinstance(raw_thickness, str)
+                                   else f'{thickness:g}"')
+    material = str(data.get('material') or '').strip()
+    if material:
+        entry['material'] = material
+    return entry, None
+
+
+@app.route('/stock/save', methods=['POST'])
+@limiter.limit("30 per minute")
+def save_stock():
+    """Add or update one sheet (or offcut) in the team config file."""
+    if not LOCAL_MODE or not local_mode.config_is_writable():
+        return _stock_response(
+            'This copy of PenguinCAM cannot write the team config, so the stock was not '
+            'saved. Copy the YAML into your config file to share it with the team.',
+            status=409)
+    entry, error = _stock_from_request((request.get_json(silent=True) or {}).get('stock'))
+    if error:
+        return _stock_response(error, status=400)
+
+    sheets = local_mode.read_raw_stock()
+    for index, existing in enumerate(sheets):
+        if str(existing.get('name', '')).strip() == entry['name']:
+            merged = dict(existing)
+            merged.update({k: v for k, v in entry.items() if not k.endswith('_text')})
+            merged['width'] = entry['width_text']
+            merged['height'] = entry['height_text']
+            if 'thickness_text' in entry:
+                merged['thickness'] = entry['thickness_text']
+            sheets[index] = merged
+            break
+    else:
+        sheets.append({'name': entry['name'], 'width': entry['width_text'],
+                       'height': entry['height_text'], 'remnant': entry['remnant'],
+                       **({'thickness': entry['thickness_text']} if 'thickness_text' in entry else {}),
+                       **({'material': entry['material']} if 'material' in entry else {})})
+
+    ok, detail = local_mode.save_stock_to_config(sheets)
+    if not ok:
+        return _stock_response(detail, status=500)
+    _ensure_local_team_config(force=True)
+    return _stock_response(f'Saved "{entry["name"]}" to the team config.',
+                           slugify_tool_id(entry['name']))
+
+
+@app.route('/stock/delete', methods=['POST'])
+@limiter.limit("30 per minute")
+def delete_stock():
+    """Remove one sheet from the team config file."""
+    if not LOCAL_MODE or not local_mode.config_is_writable():
+        return _stock_response('This copy of PenguinCAM cannot write the team config.',
+                               status=409)
+    stock_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
+    if not stock_id:
+        return _stock_response('Which sheet?', status=400)
+
+    _ensure_local_team_config()
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    names = {sheet['id']: sheet['name'] for sheet in team_config.saved_stock}
+    target = names.get(stock_id)
+    sheets = local_mode.read_raw_stock()
+    remaining = [x for x in sheets
+                 if target is None or str(x.get('name', '')).strip() != target]
+    if len(remaining) == len(sheets):
+        return _stock_response('That sheet is not in the team config.', status=404)
+
+    ok, detail = local_mode.save_stock_to_config(remaining)
+    if not ok:
+        return _stock_response(detail, status=500)
+    _ensure_local_team_config(force=True)
+    return _stock_response('Removed the stock from the team config.')
 
 
 @app.route('/config/refresh')

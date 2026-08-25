@@ -54,6 +54,12 @@
     // Prove the setup before committing to a cut: the same program raised clear of the
     // work with the spindle off. Never sticky across a generate - see bindDryRun.
     dryRun: false,
+    // The sheet being cut from, chosen out of the team's stock list. null means the
+    // long-standing behaviour: the stock IS the parts' combined bounding box, and the
+    // G54 origin is its lower-left corner. With a sheet chosen, the sheet is the stock
+    // and the origin is the SHEET's corner, so a part keeps its place on the material
+    // between jobs.
+    stock: null,
     // Optional ceiling on the depth of one contour pass (inches; null = automatic).
     // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
     max_pass_depth: null,
@@ -361,6 +367,24 @@
                 state.machine.width.toFixed(2) + '" x ' + state.machine.height.toFixed(2) + '").');
     }
     var items = state.parts.map(function (p) { return { id: p.id, name: p.name, box: footprint(p), poly: placedPolygon(p) }; });
+    // A part hanging off the sheet is the mistake a stock list exists to prevent: the
+    // machine check above passes happily, and the cut runs off the material.
+    if (state.stock) {
+      var sheetW = state.stock.width, sheetH = state.stock.height;
+      if (sheetW > state.machine.width + 1e-6 || sheetH > state.machine.height + 1e-6) {
+        tooBig = true;
+        msgs.push('"' + state.stock.name + '" (' + sheetW.toFixed(2) + '" x '
+                  + sheetH.toFixed(2) + '") does not fit the machine.');
+      }
+      items.forEach(function (item) {
+        var b = item.box;
+        if (b.minX < -1e-6 || b.minY < -1e-6
+            || b.maxX > sheetW + 1e-6 || b.maxY > sheetH + 1e-6) {
+          bad[item.id] = true;
+          msgs.push(item.name + ' hangs off "' + state.stock.name + '".');
+        }
+      });
+    }
     for (var i = 0; i < items.length; i++) {
       for (var j = i + 1; j < items.length; j++) {
         var a = items[i].box, c = items[j].box;
@@ -1221,6 +1245,219 @@
     }
   }
 
+  /* ------------------------------------------------------- stock and nesting */
+
+  /* The sheets the shop has, as the server assembled them. Kept on CFG like the bit
+     library so one save refreshes every list that shows them. */
+  function stockList() { return CFG.savedStock || []; }
+  function setStockList(list) {
+    CFG.savedStock = list || [];
+    var chosen = state.stock && state.stock.id;
+    renderStockPicker();
+    if (chosen && !stockList().some(function (s) { return s.id === chosen; })) {
+      state.stock = null;          // the sheet we were using was deleted
+      applyStockUI();
+    }
+  }
+
+  function renderStockPicker() {
+    var sel = $('#f-stock');
+    if (!sel) return;
+    var sheets = stockList();
+    sel.innerHTML = '';
+    sel.appendChild(new Option('Just the parts (no defined sheet)', ''));
+    [[false, 'Sheets'], [true, 'Offcuts']].forEach(function (pair) {
+      var group = sheets.filter(function (s) { return !!s.remnant === pair[0]; });
+      if (!group.length) return;
+      var og = document.createElement('optgroup');
+      og.label = pair[1];
+      group.forEach(function (sheet) {
+        og.appendChild(new Option(
+          sheet.name + '  ·  ' + fmtSize(sheet.width) + ' x ' + fmtSize(sheet.height),
+          sheet.id));
+      });
+      sel.appendChild(og);
+    });
+    sel.value = (state.stock && state.stock.id) || '';
+  }
+
+  /* Save a sheet size to the team config, or save what is left of the current one as
+     an offcut. The second is the one that pays: an offcut nobody wrote down is an
+     offcut nobody uses, and it ends up in the bin while someone opens a fresh sheet. */
+  function postStock(entry, done) {
+    fetch('/stock/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stock: entry }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.j && res.j.stock) setStockList(res.j.stock);
+        if (!res.ok) alert(res.j.error || 'Could not save that stock.');
+        else if (done) done(res.j);
+      })
+      .catch(function (e) { alert('Could not reach the server to save that stock: ' + e); });
+  }
+
+  function saveCurrentSheet() {
+    var bb = combinedBBox();
+    var w = state.stock ? state.stock.width : (bb ? bb.w : 0);
+    var h = state.stock ? state.stock.height : (bb ? bb.h : 0);
+    if (!(w > 0 && h > 0)) { alert('Nothing to measure yet - add a part or pick a sheet.'); return; }
+    var name = prompt('Name this stock (it goes in the team config):',
+                      state.stock ? state.stock.name
+                                  : fmtSize(w) + ' x ' + fmtSize(h) + ' ' + state.material);
+    if (!name) return;
+    postStock({ name: name, width: w, height: h,
+                thickness: state.thickness_text, material: state.material });
+  }
+
+  /* The unused part of the sheet, as the largest rectangle left over to the right of
+     or above everything placed. Approximate on purpose: an offcut is a thing you put
+     back in the rack, and a number you can trust to be NO BIGGER than what is really
+     there is worth more than an exact irregular polygon. */
+  function saveRemnant() {
+    if (!state.stock) { alert('Pick the sheet you are cutting from first.'); return; }
+    var used = combinedBBox();
+    if (!used) { alert('Nothing has been cut from this sheet yet.'); return; }
+    var gap = jobKerf();
+    var right = { w: state.stock.width - used.maxX - gap, h: state.stock.height };
+    var above = { w: state.stock.width, h: state.stock.height - used.maxY - gap };
+    var pick = (right.w * right.h >= above.w * above.h) ? right : above;
+    if (!(pick.w > 0.5 && pick.h > 0.5)) {
+      alert('What is left of this sheet is too small to be worth racking.');
+      return;
+    }
+    var name = prompt('Name this offcut:',
+                      fmtSize(pick.w) + ' x ' + fmtSize(pick.h) + ' ' + state.material + ' offcut');
+    if (!name) return;
+    postStock({ name: name, width: pick.w, height: pick.h, remnant: true,
+                thickness: state.thickness_text, material: state.material });
+  }
+
+  function fmtSize(inches) {
+    return (Math.round(inches * 100) / 100) + '"';
+  }
+
+  /* What the sheet choice changes: the material and thickness follow it when the sheet
+     records them (a 1/4" plywood offcut is 1/4" plywood), the canvas reframes, and the
+     usage readout appears. */
+  function applyStockUI() {
+    var note = $('#stock-note'), usage = $('#dro-usage');
+    var sheet = state.stock;
+    if (usage) usage.hidden = !sheet;
+    if (note) {
+      note.textContent = sheet
+        ? ('Cutting from "' + sheet.name + '". The G54 origin is the sheet’s '
+           + 'lower-left corner, so a part keeps its place on the material.')
+        : '';
+    }
+    if (sheet) {
+      if (sheet.thickness && !state.thicknessTouched) {
+        state.thickness = sheet.thickness;
+        state.thickness_text = sheet.thickness_text || (sheet.thickness + '"');
+        var tf = $('#f-thickness'); if (tf) tf.value = state.thickness_text;
+      }
+      if (sheet.material) {
+        var msel = $('#f-material');
+        if (msel && Array.prototype.some.call(msel.options,
+              function (o) { return o.value === sheet.material; })) {
+          msel.value = sheet.material;
+          if (state.mode !== 'tubing') state.material = sheet.material;
+        }
+      }
+    }
+    updateUsage();
+    updateSummary();
+    refitView();
+    drawLayout();
+  }
+
+  /* How much of the sheet the parts occupy. Area, not bounding box: two parts nested
+     into each other's corners really do use less material, and that is the number a
+     shop cares about when deciding whether to open a new sheet. */
+  function updateUsage() {
+    var el = $('#info-usage');
+    if (!el || !state.stock) return;
+    var sheetArea = state.stock.width * state.stock.height;
+    var used = 0;
+    state.parts.forEach(function (p) {
+      var s = placedShape(p);
+      used += s.w * s.h;      // footprint: what the part denies to its neighbours
+    });
+    var pct = sheetArea > 0 ? Math.min(999, (used / sheetArea) * 100) : 0;
+    el.textContent = pct.toFixed(0) + '% of ' + fmtSize(state.stock.width)
+                     + ' x ' + fmtSize(state.stock.height);
+  }
+
+  /* Shelf-pack the parts onto the sheet, tallest first.
+   *
+   * Deliberately the simple algorithm: rows of parts, each row as tall as its tallest
+   * member, new row when the current one runs out of width. It is not optimal, but it
+   * is predictable, it never overlaps, and a person can see why it did what it did -
+   * which matters more than the last few percent when someone is standing at a machine
+   * deciding whether to trust it. Everything it produces is still draggable afterwards.
+   *
+   * Returns the number of parts it could not place. */
+  function autoArrange() {
+    var sheet = state.stock;
+    var gap = jobKerf();                      // one kerf between neighbours, plus a hair
+    var margin = gap;
+    var sheetW = sheet ? sheet.width : state.machine.width;
+    var sheetH = sheet ? sheet.height : state.machine.height;
+
+    var items = state.parts.map(function (p) {
+      var s = placedShape(p);
+      return { part: p, w: s.w, h: s.h };
+    }).sort(function (a, b) { return b.h - a.h || b.w - a.w; });
+
+    var x = margin, y = margin, rowHeight = 0, unplaced = 0;
+    items.forEach(function (item) {
+      if (x + item.w > sheetW - margin + 1e-6) {   // next shelf
+        x = margin;
+        y += rowHeight + gap;
+        rowHeight = 0;
+      }
+      if (y + item.h > sheetH - margin + 1e-6) {
+        unplaced++;                                // no room left on this sheet
+        return;
+      }
+      // placedShape gives the footprint; place() works from the part's centre.
+      item.part.cx = x + item.w / 2;
+      item.part.cy = y + item.h / 2;
+      x += item.w + gap;
+      rowHeight = Math.max(rowHeight, item.h);
+    });
+    return unplaced;
+  }
+
+  /* Add copies of the selected part (or the only part) until the sheet is full. The
+     question a shop actually asks is "how many of these fit on this?", and the honest
+     way to answer it is to place them. */
+  function fillSheet() {
+    var sheet = state.stock;
+    if (!sheet) return { added: 0, reason: 'Choose a sheet first - "fill" needs a size to fill.' };
+    var seed = state.parts.filter(function (p) { return isSelected(p.id); })[0]
+               || state.parts[0];
+    if (!seed) return { added: 0, reason: 'Add a part first.' };
+
+    // Stop where the SERVER stops. Filling past its limit would hand back a job the
+    // very next step refuses, which is a worse answer than "that is as many as I can
+    // cut in one go".
+    var cap = parseInt(CFG.maxParts, 10) || 60;
+    var added = 0, hitCap = false;
+    while (true) {
+      if (state.parts.length >= cap) { hitCap = true; break; }
+      var copy = duplicatePart(seed.id, { silent: true });
+      if (!copy) break;
+      if (autoArrange() > 0) {    // it did not fit: take it back off the sheet
+        state.parts = state.parts.filter(function (p) { return p.id !== copy.id; });
+        autoArrange();
+        break;
+      }
+      added++;
+    }
+    return { added: added, hitCap: hitCap, reason: '' };
+  }
+
   /* --------------------------------------------------------------- parts */
   function thumbnailSVG(part) {
     var W = 50, H = 50, pad = 5;
@@ -1336,16 +1573,17 @@
      survey results are not: the name is part of the survey key, so the editor re-reads
      the copy on its own. The name gets no parentheses on purpose - part names end up in
      G-code comments, where parens nest and break controllers. */
-  function duplicatePart(id) {
+  function duplicatePart(id, opts) {
+    opts = opts || {};
     var src = state.parts.filter(function (p) { return p.id === id; })[0];
-    if (!src) return;
+    if (!src) return null;
     if (state.mode === '2.5d') {
-      alert('2.5D machines one part per job, so a duplicate cannot be added. Switch to 2D mode to cut several.');
-      return;
+      if (!opts.silent) alert('2.5D machines one part per job, so a duplicate cannot be added. Switch to 2D mode to cut several.');
+      return null;
     }
     if (state.mode === 'tubing' && state.parts.length >= 2) {
-      alert('Tubing allows at most two faces (one per side). Remove a face first.');
-      return;
+      if (!opts.silent) alert('Tubing allows at most two faces (one per side). Remove a face first.');
+      return null;
     }
     var names = state.parts.map(function (p) { return p.name; });
     var base = src.name.replace(/ copy( \d+)?$/, '');
@@ -1368,9 +1606,12 @@
     p.cx = startX + s.w / 2;
     p.cy = s.h / 2;
     state.parts.push(p);
-    renderParts();
-    partListChanged();
-    dbg('part-duplicated', { from: src.name, name: name });
+    if (!opts.silent) {
+      renderParts();
+      partListChanged();
+      dbg('part-duplicated', { from: src.name, name: name });
+    }
+    return p;
   }
 
   function removePart(id) {
@@ -1471,7 +1712,10 @@
     if (!canvas) return;
     sizeLayoutCanvas();
     var bb = combinedBBox();
-    if (tubePatternOn() && tubePatternGeom) {
+    if (state.stock && state.mode !== 'tubing') {
+      bb = { minX: 0, minY: 0, maxX: state.stock.width, maxY: state.stock.height,
+             w: state.stock.width, h: state.stock.height };
+    } else if (tubePatternOn() && tubePatternGeom) {
       // No parts to bound, so fit the tube instead - otherwise the view falls back to a
       // fixed 10" square and the tube is drawn off the edge of it.
       bb = { minX: 0, minY: 0, maxX: tubePatternGeom.face_width,
@@ -1624,6 +1868,24 @@
     if (tubePatternOn() && tubePatternGeom) {
       drawTubePattern(ctx, col, tubePatternGeom);
       return;
+    }
+
+    // The chosen sheet, drawn as the material itself: a solid edge with the unused
+    // area left plain, so "will this fit" and "how much is left" are one glance.
+    if (state.stock && state.mode !== 'tubing') {
+      var s0 = worldToCanvas(0, 0);
+      var s1 = worldToCanvas(state.stock.width, state.stock.height);
+      ctx.save();
+      ctx.fillStyle = col.muted;
+      ctx.globalAlpha = 0.07;
+      ctx.fillRect(Math.min(s0[0], s1[0]), Math.min(s0[1], s1[1]),
+                   Math.abs(s1[0] - s0[0]), Math.abs(s1[1] - s0[1]));
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = col.muted;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(Math.min(s0[0], s1[0]), Math.min(s0[1], s1[1]),
+                     Math.abs(s1[0] - s0[0]), Math.abs(s1[1] - s0[1]));
+      ctx.restore();
     }
 
     // Stock = combined bounding box (dotted). Red if it exceeds the machine. The G54
@@ -1890,6 +2152,51 @@
       selectedParts().forEach(function (p) { p.flipped = !p.flipped; });
       drawLayout();
     });
+    var stockSel = $('#f-stock');
+    if (stockSel) {
+      stockSel.addEventListener('change', function () {
+        var sheet = stockList().filter(function (x) { return x.id === this.value; }, this)[0];
+        state.stock = sheet || null;
+        applyStockUI();
+        invalidatePreview();
+        dbg('stock', state.stock && state.stock.name);
+      });
+    }
+
+    var saveStockBtn = $('#btn-save-stock');
+    if (saveStockBtn) saveStockBtn.addEventListener('click', saveCurrentSheet);
+    var saveRemnantBtn = $('#btn-save-remnant');
+    if (saveRemnantBtn) saveRemnantBtn.addEventListener('click', saveRemnant);
+
+    var arrangeBtn = $('#btn-arrange');
+    if (arrangeBtn) {
+      arrangeBtn.addEventListener('click', function () {
+        if (!state.parts.length) { alert('Add a part first.'); return; }
+        var unplaced = autoArrange();
+        resetHandleDir(); refitView(); drawLayout(); updateUsage(); invalidatePreview();
+        $('#layout-errors').textContent = unplaced
+          ? (unplaced + ' part' + (unplaced === 1 ? '' : 's') + ' would not fit'
+             + (state.stock ? ' on "' + state.stock.name + '"' : ' on the machine')
+             + ' and stayed where they were.')
+          : '';
+      });
+    }
+
+    var fillBtn = $('#btn-fill');
+    if (fillBtn) {
+      fillBtn.addEventListener('click', function () {
+        var res = fillSheet();
+        if (res.reason) { alert(res.reason); return; }
+        renderParts(); partListChanged();
+        resetHandleDir(); refitView(); drawLayout(); updateUsage();
+        $('#layout-errors').textContent =
+          res.hitCap
+            ? ('Stopped at ' + state.parts.length + ' parts, the most one job can hold. '
+               + 'Cut this sheet, then fill another.')
+            : (res.added ? '' : 'No more copies fit on "' + state.stock.name + '".');
+      });
+    }
+
     $('#btn-zoom-in').addEventListener('click', function () { state.zoom = Math.min(5, state.zoom * 1.25); refitView(); drawLayout(); });
     $('#btn-zoom-out').addEventListener('click', function () { state.zoom = Math.max(0.2, state.zoom / 1.25); refitView(); drawLayout(); });
 
@@ -2070,11 +2377,19 @@
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     job.z_datum = state.zDatum;
     if (state.dryRun) job.dry_run = '1';
+    var sheet = state.stock;
+    if (sheet) {
+      // The sheet is the stock, so placements are absolute on it and the origin is
+      // its corner - not the bounding box of whatever happens to be placed today.
+      job.stock = { width: sheet.width, height: sheet.height, from_library: true,
+                    name: sheet.name };
+    }
     state.parts.forEach(function (p, i) {
       var pl = placement(p);
       job.parts.push({
         file_index: i, name: p.name,
-        place_x: pl.x - bb.minX, place_y: pl.y - bb.minY,
+        place_x: sheet ? pl.x : pl.x - bb.minX,
+        place_y: sheet ? pl.y : pl.y - bb.minY,
         rotation: p.rotation, mirror: !!p.flipped,
       });
       fd.append('file_' + i, p.file, p.name + '.dxf');
@@ -2456,6 +2771,8 @@
     applyModeUI();          // mode-dependent fields, labels, and the tube/multi-tool panels
     updateZDatumUI();
     renderBitPicker();
+    renderStockPicker();
+    applyStockUI();
     updatePartsModeNote();
     updateSummary();
     updateLayoutInfo();     // machine name, bed size and kerf in the Layout panel

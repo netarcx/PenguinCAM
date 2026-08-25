@@ -759,6 +759,16 @@ fieldset.field { border: 1px solid var(--line); border-radius: var(--r); padding
 #wizard.grid .canvas-wrap { flex: 1 1 auto; min-height: 150px; }
 #layout-hint { margin: 8px 0 0; }
 
+#stock-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+#stock-row .field { flex: 1 1 auto; margin: 0; min-width: 0; }
+#stock-note { margin: -4px 0 8px; }
+#stock-note:empty { display: none; }
+
 /* ---- Preview panel ----------------------------------------------------- */
 #gen-status {
   display: flex;

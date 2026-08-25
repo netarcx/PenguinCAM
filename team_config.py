@@ -34,6 +34,11 @@ _DECIMAL_RE = re.compile(r'^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(.*)$')
 DEFAULT_TOOL_DIAMETER_IN = 0.25   # 1/4" endmill: the cutter most jobs are run with
 
 
+#: Keys that live at the ROOT of a config, not inside a machine: things the shop owns
+#: rather than things a machine has. `team` is handled separately by _get.
+ROOT_LEVEL_KEYS = frozenset({'tools', 'stock', 'team'})
+
+
 def slugify_tool_id(name: str) -> str:
     """A stable, URL-safe id for a saved bit, derived from its name.
 
@@ -273,7 +278,13 @@ class TeamConfig:
         # unit-string length values (e.g. "4mm") to inch floats so all downstream readers
         # see plain numbers.
         self._data = copy.deepcopy(self._normalize_to_v2(config_data))
+        # The shop-owned lists are parsed by their own readers, which keep the text the
+        # user wrote ("600mm", '1/4"') alongside the inches so the UI can show it back
+        # verbatim. Normalising them here would turn 600mm into 23.622 before anyone
+        # saw it - the same reason `diameter` is deliberately absent from LENGTH_KEYS.
+        held = {key: self._data.pop(key) for key in ROOT_LEVEL_KEYS if key in self._data}
         _normalize_lengths(self._data)
+        self._data.update(held)
 
     def _normalize_to_v2(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -295,7 +306,7 @@ class TeamConfig:
             # Copy all keys except 'version' into the default machine
             machine_config = {}
             for key, value in data.items():
-                if key != 'version':
+                if key != 'version' and key not in ROOT_LEVEL_KEYS:
                     machine_config[key] = value
 
             # Ensure the wrapped machine has a display name. In a v1 config the
@@ -305,13 +316,20 @@ class TeamConfig:
                 nested_name = machine_config.get('machine', {}).get('name')
                 machine_config['name'] = nested_name or 'Default Machine'
 
-            return {
+            wrapped = {
                 'version': 2,
                 'default_machine': 'default',
                 'machines': {
                     'default': machine_config
                 }
             }
+            # Shop-wide lists belong to the team, not to the one machine a v1 config
+            # describes. Folding them into the machine block lost them entirely - a v1
+            # team's saved bits and stock simply disappeared, silently.
+            for key in ROOT_LEVEL_KEYS:
+                if key in data:
+                    wrapped[key] = data[key]
+            return wrapped
 
         elif version == 2:
             # Already v2, use as-is
@@ -698,6 +716,72 @@ class TeamConfig:
             except (TypeError, ValueError):
                 pass
         return tool
+
+    #: Stock lives at the root beside `tools:` for the same reason: a sheet in the rack
+    #: belongs to the shop, not to one machine.
+    SAVED_STOCK_KEY = 'stock'
+
+    @property
+    def saved_stock(self) -> List[Dict[str, Any]]:
+        """Sheets and offcuts the shop has, validated and in file order.
+
+        Same forgiving contract as saved_tools: one malformed entry costs that sheet,
+        not the list and not the app's startup.
+        """
+        raw = self._data.get(self.SAVED_STOCK_KEY)
+        if not isinstance(raw, list):
+            if raw is not None:
+                print(f"⚠️  config `{self.SAVED_STOCK_KEY}` should be a list of sheets; ignoring it")
+            return []
+        sheets, seen = [], set()
+        for index, entry in enumerate(raw, start=1):
+            sheet = self._normalize_stock(entry, index)
+            if sheet is None:
+                continue
+            if sheet['id'] in seen:
+                print(f"⚠️  stock {index} duplicates \"{sheet['name']}\"; keeping the first")
+                continue
+            seen.add(sheet['id'])
+            sheets.append(sheet)
+        return sheets
+
+    @staticmethod
+    def _normalize_stock(entry, index):
+        """One stock entry -> the shape the layout and the job spec both speak, or None."""
+        if not isinstance(entry, dict):
+            print(f"⚠️  stock {index} is not a mapping; ignoring it")
+            return None
+        name = str(entry.get('name') or '').strip()
+        width = parse_length(entry.get('width'))
+        height = parse_length(entry.get('height'))
+        if not name:
+            print(f"⚠️  stock {index} has no name; ignoring it")
+            return None
+        if not width or not height or width <= 0 or height <= 0:
+            print(f"⚠️  stock \"{name}\" has no usable size; ignoring it")
+            return None
+        sheet = {
+            'id': slugify_tool_id(name),
+            'name': name,
+            'width': width,
+            'height': height,
+            'width_text': entry.get('width') if isinstance(entry.get('width'), str) else f'{width:g}"',
+            'height_text': entry.get('height') if isinstance(entry.get('height'), str) else f'{height:g}"',
+            # A remnant is an offcut: same thing, but worth showing separately so the
+            # shop uses one up before opening a fresh sheet.
+            'remnant': bool(entry.get('remnant')),
+            'source': 'team',
+        }
+        thickness = parse_length(entry.get('thickness'))
+        if thickness and thickness > 0:
+            sheet['thickness'] = thickness
+            sheet['thickness_text'] = (entry.get('thickness')
+                                       if isinstance(entry.get('thickness'), str)
+                                       else f'{thickness:g}"')
+        material = str(entry.get('material') or '').strip()
+        if material:
+            sheet['material'] = material
+        return sheet
 
     def default_material_for(self, machine_id: Optional[str] = None) -> str:
         """Material id the UI opens on for this machine (machining.default_material).

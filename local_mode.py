@@ -149,8 +149,13 @@ def load_local_team_config():
 
 # --------------------------------------------------------------------------- saved bits
 
-#: The one comment line the saved-bits writer owns. Anything else above the block is
-#: the team's own documentation and is never touched.
+#: The one comment line each managed block owns. Anything else around a block is the
+#: team's own documentation and is never touched.
+def block_sentinel(key: str) -> str:
+    return f'# --- PenguinCAM {key}: written by the app, safe to edit by hand ---'
+
+
+#: Kept for the saved-bits block, whose sentinel predates the general form.
 TOOLS_BLOCK_SENTINEL = ('# --- PenguinCAM saved bits: written by the Tools panel, '
                         'safe to edit by hand ---')
 
@@ -202,37 +207,56 @@ def _yaml_scalar(value) -> str:
     return _yaml_quoted(value)
 
 
-def _render_tools_block(tools) -> str:
-    """The `tools:` block, written the way a person would write it.
+#: Field order per managed block. Keys not listed follow, alphabetically - anything the
+#: team wrote by hand that the app does not understand is kept, not dropped.
+BLOCK_FIELDS = {
+    'tools': ('name', 'diameter', 'flutes', 'type', 'included_angle'),
+    'stock': ('name', 'width', 'height', 'thickness', 'material', 'remnant', 'notes'),
+}
+#: Fields the app carries in memory but must never write back to the file.
+BLOCK_TRANSIENT = ('id', 'source', 'diameter_text', 'width_text', 'height_text',
+                   'thickness_text')
+
+
+def render_list_block(key: str, entries, sentinel: str = None) -> str:
+    """A top-level `key:` block of mappings, written the way a person would write it.
 
     Hand-rolled rather than yaml.safe_dump'd so the block reads like the rest of the
-    file (block sequences, quoted names, no !!python tags, keys in a fixed order) and so
-    a diff of the config after saving a bit is one readable hunk."""
-    lines = [TOOLS_BLOCK_SENTINEL, 'tools:']
-    if not tools:
+    file (block sequences, quoted strings, no !!python tags, a stable field order) and
+    so the diff after saving one entry is a single readable hunk.
+    """
+    lines = [sentinel or block_sentinel(key), f'{key}:']
+    if not entries:
         lines.append('  []')
         return '\n'.join(lines) + '\n'
-    known = ('name', 'diameter', 'flutes', 'type', 'included_angle')
-    for tool in tools:
-        diameter = tool.get('diameter_text') or tool.get('diameter')
-        lines.append(f'  - name: {_yaml_quoted(tool.get("name", ""))}')
-        lines.append(f'    diameter: {_yaml_quoted(diameter)}')
-        lines.append(f'    flutes: {_yaml_scalar(tool.get("flutes", 1))}')
-        lines.append(f'    type: {_yaml_quoted(tool.get("type", "endmill"))}')
-        angle = tool.get('included_angle')
-        if angle is not None:
-            lines.append(f'    included_angle: {_yaml_scalar(angle)}')
-        # Anything else the team wrote on this bit by hand - a vendor part number, a
-        # stickout someone measured, a note that it is chipped. The app does not use
-        # these, which is exactly why it must not eat them: rewriting the block from
-        # the fields we happen to understand silently deleted them.
-        for key in sorted(k for k in tool if k not in known and k not in
-                          ('id', 'source', 'diameter_text')):
-            lines.append(f'    {key}: {_yaml_scalar(tool[key])}')
+    known = BLOCK_FIELDS.get(key, ())
+    for entry in entries:
+        first = True
+        for field in known:
+            if field not in entry:
+                continue
+            # Prefer the text the user typed ("6mm", '1/4"') over a re-rendered decimal.
+            value = entry.get(field + '_text') or entry[field]
+            prefix = '  - ' if first else '    '
+            lines.append(f'{prefix}{field}: {_yaml_scalar_or_quoted(field, value)}')
+            first = False
+        for field in sorted(k for k in entry
+                            if k not in known and k not in BLOCK_TRANSIENT):
+            prefix = '  - ' if first else '    '
+            lines.append(f'{prefix}{field}: {_yaml_scalar(entry[field])}')
+            first = False
     return '\n'.join(lines) + '\n'
 
 
-def _tools_block_span(text: str):
+def _yaml_scalar_or_quoted(field: str, value):
+    """Numbers stay numbers where that reads better; names and measurements written as
+    text ('6mm') stay quoted so their units survive."""
+    if field in ('flutes', 'included_angle') or isinstance(value, bool):
+        return _yaml_scalar(value)
+    return _yaml_quoted(value)
+
+
+def _block_span(text: str, key: str, sentinel: str):
     """Where an existing top-level `tools:` block starts and ends, or None.
 
     The block is its `tools:` line, the sentinel comment directly above it if this
@@ -245,14 +269,15 @@ def _tools_block_span(text: str):
     lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if re.match(r'^(\ufeff)?["\']?tools["\']?\s*:', line):
+        if re.match(r'^(\ufeff)?["\']?' + re.escape(key) + r'["\']?\s*:', line):
             start = i
             break
     if start is None:
         return None
 
     head = start
-    if head > 0 and lines[head - 1].rstrip('\n') == TOOLS_BLOCK_SENTINEL:
+    if head > 0 and lines[head - 1].rstrip('\n') in (sentinel, block_sentinel(key),
+                                                      TOOLS_BLOCK_SENTINEL):
         head -= 1
 
     def belongs(line):
@@ -278,14 +303,14 @@ def _tools_block_span(text: str):
     return head, end, lines
 
 
-def _replace_tools_block(text: str, block: str) -> str:
+def _replace_block(text: str, key: str, block: str, sentinel: str) -> str:
     """Put `block` where the existing `tools:` block is, or append it if there is none.
 
     Replacing in place rather than stripping and appending keeps the block where the
     team put it - moving it to the end of the file is both a surprising diff and how
     the notes underneath it came to be deleted.
     """
-    span = _tools_block_span(text)
+    span = _block_span(text, key, sentinel)
     if span is None:
         body = text.rstrip('\n') + '\n' if text.strip() else ''
         return body + '\n' + block
@@ -293,7 +318,7 @@ def _replace_tools_block(text: str, block: str) -> str:
     return ''.join(lines[:head]) + block + ''.join(lines[end:])
 
 
-def read_raw_tools():
+def read_raw_block(key: str):
     """The `tools:` list exactly as the config file has it, entries and all.
 
     Callers edit THIS and hand it back, so an entry the app cannot parse - a typo'd
@@ -311,11 +336,11 @@ def read_raw_tools():
             data = yaml.safe_load(fh.read())
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return []
-    raw = (data or {}).get('tools') if isinstance(data, dict) else None
+    raw = (data or {}).get(key) if isinstance(data, dict) else None
     return [dict(e) for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
 
 
-def save_tools_to_config(tools):
+def save_block_to_config(key: str, entries, sentinel: str = None):
     """Write the saved-bit list into the local team config file.
 
     Everything except the `tools:` block is preserved character for character - the
@@ -350,15 +375,16 @@ def save_tools_to_config(tools):
     except yaml.YAMLError as exc:
         return False, f'{os.path.basename(path)} is not valid YAML, so it was left alone: {exc}'
 
-    updated = _replace_tools_block(original, _render_tools_block(tools))
+    updated = _replace_block(original, key,
+                             render_list_block(key, entries, sentinel), sentinel)
 
     try:
         after = yaml.safe_load(updated) or {}
     except yaml.YAMLError as exc:
         return False, f'Refused to save: the edit would not parse ({exc})'
 
-    before_rest = {k: v for k, v in before.items() if k != 'tools'}
-    after_rest = {k: v for k, v in after.items() if k != 'tools'}
+    before_rest = {k: v for k, v in before.items() if k != key}
+    after_rest = {k: v for k, v in after.items() if k != key}
     if before_rest != after_rest:
         return False, ('Refused to save: rewriting the bit list would have changed the '
                        'rest of the config. Add the bits by hand instead.')
@@ -391,3 +417,23 @@ def save_tools_to_config(tools):
             pass
         return False, f'Could not write {os.path.basename(path)}: {exc}'
     return True, path
+
+
+def read_raw_tools():
+    """The saved bits exactly as the config file has them."""
+    return read_raw_block('tools')
+
+
+def save_tools_to_config(tools):
+    """Write the saved-bit list, preserving everything else in the file."""
+    return save_block_to_config('tools', tools, TOOLS_BLOCK_SENTINEL)
+
+
+def read_raw_stock():
+    """The saved stock and remnants exactly as the config file has them."""
+    return read_raw_block('stock')
+
+
+def save_stock_to_config(entries):
+    """Write the stock list, preserving everything else in the file."""
+    return save_block_to_config('stock', entries)
