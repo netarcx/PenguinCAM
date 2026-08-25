@@ -25,9 +25,11 @@ banner, and the file is named `_DRYRUN`.
 2.5" block still fed a stationary cutter half an inch into it, under a banner promising
 the program does not cut anything.
 
-**Tubing dry-runs too.** The tube branch has its own Z anchors (`z_top`, `z_safe`,
-`tube_safe_z`), and they take the lift as well — otherwise the chip, the setup sheet and
-the UI all said "cuts air" while the program cut the tube.
+**Tubing dry-runs too, on both branches.** `/process` has two tube paths that each build
+their own post-processor — one for an uploaded face, one for a generated pattern — and
+each needs `set_dry_run` of its own. The tube Z anchors (`z_top`, `z_safe`,
+`tube_safe_z`) take the lift as well. Missing either one means the chip, the setup sheet
+and the UI all say "cuts air" while the program drills the tube at full depth.
 
 **`gcode_audit.py` audits three dry-run programs** and asserts the physical claim
 independently: parse the lift out of the banner, and nothing may reach the work below
@@ -116,7 +118,15 @@ letter.
 Engraving runs **before the profile**, while the sheet is still whole: afterwards the
 part hangs on tabs, and a light chattery label cut is exactly what breaks one. It lives
 in `generate_part_phases` as well as `generate_gcode`, because multi-part jobs build
-their phases directly and never call the latter.
+their phases directly and never call the latter — and in `tooling.py` as well, because
+multi-tool jobs call neither.
+
+**In a multi-tool job** the name rides the part's first body (`_engrave_lines`), which
+`order_operations` puts ahead of every perimeter. It builds its own post-processor rather
+than borrowing the operation's: an operation narrows `pp.holes`/`pp.pockets` to its own
+scope — a perimeter operation clears them entirely — and the engraver has to see all of
+them to keep the label out of a bore. The job carries `engrave` as a job-wide flag, like
+the Z datum.
 
 **Placement is proved, not assumed.** `_engrave_available_area()` is the outline eroded
 by a tool radius plus a hair, *minus every hole and pocket*; `_engrave_placement()` then

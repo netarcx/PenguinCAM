@@ -60,6 +60,10 @@
     // and the origin is the SHEET's corner, so a part keeps its place on the material
     // between jobs.
     stock: null,
+    //: A one-off message from Auto-arrange / Fill sheet, shown above the layout errors
+    //: and cleared as soon as the layout changes under it - a notice about a nest that
+    //: no longer exists is worse than no notice.
+    layoutNotice: '',
     // Cut each part's name into its own face. Off by default: it costs cycle time and
     // needs a fine cutter, so it should be a decision rather than a surprise.
     engrave: false,
@@ -1087,6 +1091,22 @@
     // Depth-per-pass ceiling applies anywhere contours are milled except tubing.
     var mp = $('#max-pass-field'); if (mp) mp.hidden = isTube;
     var mph = $('#max-pass-hint'); if (mph) mph.hidden = isTube;
+    // A tube is held in a jig, not nested on a sheet. Leaving these on in tubing let a
+    // sheet be chosen for a tube - and picking one rewrote the "thickness" field, which
+    // in tubing is the WALL thickness, from 0.0625" to the sheet's 0.25". Four times
+    // the wall, feeding depth per pass and pecking, plus a plywood material that
+    // survived the trip back to 2D.
+    var sr = $('#stock-row'); if (sr) sr.hidden = isTube;
+    var ab = $('#btn-arrange'); if (ab) ab.hidden = isTube;
+    var fb = $('#btn-fill'); if (fb) fb.hidden = isTube;
+    var et = $('#engrave-toggle'); if (et) et.hidden = isTube || is25;
+    if (isTube && state.stock) {
+      // Chosen in another mode and still selected: drop it rather than carry a sheet
+      // into a program that has no sheet.
+      state.stock = null;
+      var ss = $('#f-stock'); if (ss) ss.value = '';
+      applyStockUI();
+    }
     if (isTube) syncTubeHeightToSize();
     // The thickness field carries the sheet default (1/4") into tubing, where it means
     // WALL thickness. Real 1x1 and 2x1 is 1/16"-1/8", so every tube job quoted a cycle
@@ -1317,9 +1337,22 @@
 
   function saveCurrentSheet() {
     var bb = combinedBBox();
-    var w = state.stock ? state.stock.width : (bb ? bb.w : 0);
-    var h = state.stock ? state.stock.height : (bb ? bb.h : 0);
+    // The parts' exact bounding box is NOT a sheet they fit on: the profile pass rides
+    // half a kerf outside every outline, so a sheet measured flush is rejected the
+    // instant it is selected, with no way out but choosing another one. One kerf of
+    // margin all round - the same allowance auto-arrange leaves - and the nest is moved
+    // into that margin, because a sheet saved for these parts should be one they sit on.
+    var pad = state.stock ? 0 : jobKerf();
+    var w = state.stock ? state.stock.width : (bb ? bb.w + 2 * pad : 0);
+    var h = state.stock ? state.stock.height : (bb ? bb.h + 2 * pad : 0);
     if (!(w > 0 && h > 0)) { alert('Nothing to measure yet - add a part or pick a sheet.'); return; }
+    if (!state.stock && bb) {
+      var dx = pad - bb.minX, dy = pad - bb.minY;
+      if (Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9) {
+        state.parts.forEach(function (part) { part.cx += dx; part.cy += dy; });
+        refitView(); drawLayout(); invalidatePreview();
+      }
+    }
     var name = prompt('Name this stock (it goes in the team config):',
                       state.stock ? state.stock.name
                                   : fmtSize(w) + ' x ' + fmtSize(h) + ' ' + state.material);
@@ -1592,6 +1625,7 @@
      has no operations" error - and Download still handed over the program from before it
      existed. */
   function partListChanged() {
+    state.layoutNotice = '';      // it described the nest as it was a moment ago
     if (multiToolOn() && window.PCMultiTool) {
       window.PCMultiTool.render();
       window.PCMultiTool.refreshFeatures();
@@ -1896,7 +1930,20 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     var v = validateLayout();
-    $('#layout-errors').textContent = v.msgs.join('\n');
+    // One line per part is unreadable at 60 parts - it pushes the canvas to a sliver,
+    // and the sixtieth copy of the same sentence tells nobody anything the first did
+    // not. Cap it and say how many were folded away.
+    var MAX_MSGS = 6;
+    var shown = v.msgs.slice(0, MAX_MSGS);
+    if (v.msgs.length > MAX_MSGS) {
+      shown.push('...and ' + (v.msgs.length - MAX_MSGS) + ' more like these.');
+    }
+    // The notice from Auto-arrange / Fill sheet is redrawn with the errors rather than
+    // written over them afterwards: this function runs again on the very next frame
+    // (the ResizeObserver refit), so anything merely appended to the element vanished
+    // about 50 ms after it appeared.
+    if (state.layoutNotice) shown.unshift(state.layoutNotice);
+    $('#layout-errors').textContent = shown.join('\n');
     // Flip is hidden in 2.5D (a mirror isn't recoverable when features live at specific
     // depths on one face) and in tubing (the opposite wall is handled server-side by
     // mirroring the pattern, not by a user flip).
@@ -2266,17 +2313,12 @@
       arrangeBtn.addEventListener('click', function () {
         if (!state.parts.length) { alert('Add a part first.'); return; }
         var unplaced = autoArrange();
+        state.layoutNotice = unplaced
+          ? (unplaced + ' part' + (unplaced === 1 ? '' : 's') + ' would not fit'
+             + (state.stock ? ' on "' + state.stock.name + '"' : ' on the machine')
+             + ' and stayed where they were.')
+          : '';
         resetHandleDir(); refitView(); drawLayout(); updateUsage(); invalidatePreview();
-        // Prepended, never assigned: drawLayout has just written the real validation
-        // messages here, and overwriting them showed a clean layout that was not one
-        // until the operator tried to leave the step.
-        if (unplaced) {
-          var el = $('#layout-errors');
-          el.textContent = (unplaced + ' part' + (unplaced === 1 ? '' : 's')
-            + ' would not fit' + (state.stock ? ' on "' + state.stock.name + '"' : ' on the machine')
-            + ' and stayed where they were.')
-            + (el.textContent ? ' ' + el.textContent : '');
-        }
       });
     }
 
@@ -2287,14 +2329,12 @@
         if (res.reason) { alert(res.reason); return; }
         renderParts(); partListChanged();
         resetHandleDir(); refitView(); drawLayout(); updateUsage();
-        var note = res.hitCap
+        state.layoutNotice = res.hitCap
           ? ('Stopped at ' + state.parts.length + ' parts, the most one job can hold. '
              + 'Cut this sheet, then fill another.')
-          : (res.added ? '' : 'No more copies fit on "' + state.stock.name + '".');
-        if (note) {
-          var fe = $('#layout-errors');
-          fe.textContent = note + (fe.textContent ? ' ' + fe.textContent : '');
-        }
+          : (res.added ? ('Added ' + res.added + '.') : 'No more copies fit on "'
+             + state.stock.name + '".');
+        drawLayout();
       });
     }
 
@@ -2473,6 +2513,7 @@
 
   function applySavedJob(job) {
     var setup = job || {};
+    var missingStock = '';
     // Setup first, so every part is measured against the right material and tool.
     if (setup.mode) {
       var modeRadio = document.querySelector('input[name="mode"][value="' + setup.mode + '"]');
@@ -2500,12 +2541,43 @@
     }
     state.engrave = !!setup.engrave;
     var eb = $('#f-engrave'); if (eb) eb.checked = state.engrave;
+    // The note is only toggled by the change handler, so setting .checked alone left
+    // the UI and the state disagreeing about what the box means.
+    var en = $('#engrave-note'); if (en) en.style.display = state.engrave ? '' : 'none';
     if (setup.max_pass_depth) state.max_pass_depth = setup.max_pass_depth;
+    if (setup.tab_spacing) state.tab_spacing = setup.tab_spacing;
+
+    // Multi-tool, its tool table and the chamfer, restored BEFORE the parts load: they
+    // decide which steps exist and which cutter each operation means. Restoring the
+    // per-part ops without them reopened a multi-tool job as a single-tool one that cut
+    // the whole part with whatever bit happened to be in the tool box - twice the saved
+    // diameter, and no warning.
+    state.chamfer = setup.chamfer
+      ? { on: true, width: setup.chamfer.width, bit: setup.chamfer.bit,
+          angle: setup.chamfer.angle, perimeter: !!setup.chamfer.perimeter,
+          holes: !!setup.chamfer.holes, pockets: !!setup.chamfer.pockets }
+      : { on: false, width: state.chamfer.width, bit: state.chamfer.bit,
+          angle: state.chamfer.angle, perimeter: true, holes: false, pockets: false };
+    var wantMulti = !!setup.multitool && window.PCMultiTool;
+    state.multitool = wantMulti;
+    state.tools = wantMulti && setup.tools && setup.tools.length ? setup.tools : null;
+    var mtBox = $('#f-multitool');
+    if (mtBox && !mtBox.disabled) mtBox.checked = wantMulti;
     state.stock = null;
     if (setup.stock && setup.stock.id) {
-      state.stock = stockList().filter(function (x) { return x.id === setup.stock.id; })[0]
-                    || setup.stock;
-      var ssel = $('#f-stock'); if (ssel) ssel.value = state.stock.id || '';
+      var known = stockList().filter(function (x) { return x.id === setup.stock.id; })[0];
+      if (known) {
+        state.stock = known;
+        var ssel = $('#f-stock'); if (ssel) ssel.value = known.id || '';
+      } else {
+        // The sheet has been deleted from the team config since the job was saved.
+        // Falling back to the saved snapshot left the picker reading "Just the parts"
+        // while the validator, the note and the setup sheet all enforced a sheet that
+        // no longer exists - and re-picking the already-shown option fires no change
+        // event, so the only way out was a reload.
+        missingStock = setup.stock.name || 'the saved sheet';
+        var s0 = $('#f-stock'); if (s0) s0.value = '';
+      }
     }
 
     // Then the parts, through the ordinary upload path.
@@ -2523,15 +2595,24 @@
       partListChanged();
       applyModeUI();
       applyStockUI();
+      // After the parts exist, so the operations editor can bind each part's restored
+      // ops to the restored tool table.
+      if (state.multitool && window.PCMultiTool) window.PCMultiTool.render();
       updateSummary();
       refitView();
       drawLayout();
       gotoStep('layout');
+      var trouble = [];
       if (failed.length) {
-        alert('Opened without ' + failed.join(', ')
-              + (failed.length === 1 ? ': its' : ': their')
-              + ' drawing could not be read. Check the nest before cutting.');
+        trouble.push('Opened without ' + failed.join(', ')
+                     + (failed.length === 1 ? ': its' : ': their')
+                     + ' drawing could not be read.');
       }
+      if (missingStock) {
+        trouble.push('"' + missingStock + '" is no longer in the stock list, so this '
+                     + 'opened with no sheet. Pick one before cutting.');
+      }
+      if (trouble.length) alert(trouble.join('\n\n') + '\n\nCheck the nest before cutting.');
     }
     queue.forEach(function (saved) {
       var file = dxfFileFromBase64(saved.dxf_base64, saved.name + '.dxf');
@@ -2700,6 +2781,9 @@
       + '<title>Setup sheet - ' + esc(filename) + '</title><style>'
       + 'body{font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;'
       + 'color:#111;margin:24px;max-width:760px}'
+      // A CAD part name can be long and unbroken; without this it runs off the right
+      // edge of the printed page, taking the file name with it.
+      + 'h1,.sub,td{overflow-wrap:anywhere}'
       + 'h1{font-size:19px;margin:0 0 2px}'
       + '.sub{color:#555;margin:0 0 16px;font-size:12px}'
       + 'table{border-collapse:collapse;width:100%;margin-bottom:16px}'

@@ -47,6 +47,8 @@ from shapely.geometry import Polygon
 import drill_sizes
 import feeds_speeds
 from frc_cam_postprocessor import (
+    ENGRAVE_DEPTH_IN,
+    ENGRAVE_HEIGHT_IN,
     FRCPostProcessor,
     PostProcessorResult,
     build_output_filename,
@@ -449,6 +451,9 @@ class MultiToolJob:
     #: Raise the whole program clear of the work and leave the spindle off, for proving
     #: a setup before committing to a cut. Inches; 0 is a real cutting program.
     dry_run_lift: float = 0.0
+    #: Cut each part's name into its own face, before anything frees it. Job-wide, like
+    #: the Z datum: it is a property of the nest, not of one operation.
+    engrave: bool = False
     #: Operator ceiling on the depth of one contour pass, inches. Applied to every
     #: milling tool AFTER the model/preset/power clamps, and only ever downward - it
     #: buys more, shallower passes for fragile or multi-flute cutters.
@@ -1653,6 +1658,25 @@ def _validate_profile_order(job: MultiToolJob) -> List[str]:
     return errors
 
 
+def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
+    """The part's name, cut with the tool that is already in the spindle.
+
+    Built on its OWN post-processor rather than the operation's: an operation narrows
+    `pp.holes` and `pp.pockets` to its own scope (a perimeter operation clears them
+    entirely), and the engraving has to see every one of them to keep the label out of
+    a bore that gets machined away later.
+    """
+    pp = build_part_postprocessor(job, part, tool_diameter)
+    pp.classify_holes()
+    pp.engrave = {'text': part.name, 'height': ENGRAVE_HEIGHT_IN,
+                  'depth': ENGRAVE_DEPTH_IN}
+    try:
+        lines = pp._engrave_body()
+    except Exception as exc:            # a label is never worth failing a job over
+        return [], [f'{part.name}: the name could not be engraved ({exc}).']
+    return lines, list(pp.warnings)
+
+
 def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
                            suggested_filename: Optional[str] = None) -> PostProcessorResult:
     """Full pipeline: survey every part, run every operation, order and stitch them.
@@ -1698,6 +1722,7 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
 
     bodies = []
     deferred = []
+    engraved = set()
     sequence = order_operations(job.parts,
                                 split_before_perimeter=job.config.pause_before_perimeter)
     for part_index, op_index in sequence:
@@ -1707,6 +1732,16 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
                                   surveys[part_index], defer_tabs=defer_tabs)
         if body['errors']:
             errors.extend(f"{part.name} / {body['op'].label}: {e}" for e in body['errors'])
+        # The name goes on before anything frees the part, so it rides the FIRST body
+        # this part produces - `order_operations` puts interior work ahead of perimeters,
+        # so that is the earliest point the part is still solid stock. Multi-tool jobs
+        # used to drop the engraving on the floor entirely while the summary said
+        # "names engraved".
+        if job.engrave and part_index not in engraved:
+            engraved.add(part_index)
+            lines, warnings = _engrave_lines(job, part, body['tool'].diameter)
+            body['lines'] = lines + body['lines']
+            body['warnings'] = list(body['warnings']) + warnings
         bodies.append(body)
         if body.get('deferred'):
             deferred.append(body['deferred'])
@@ -1822,6 +1857,7 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         z_datum=_expect_z_datum(spec.get('z_datum')),
         dry_run_lift=(_expect_positive(spec['dry_run_lift'], 'dry_run_lift')
                       if spec.get('dry_run_lift') else 0.0),
+        engrave=bool(spec.get('engrave')),
         max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
                         if spec.get('max_pass_depth') is not None else None),
         config=config,

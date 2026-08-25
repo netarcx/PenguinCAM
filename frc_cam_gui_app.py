@@ -66,6 +66,7 @@ except ImportError:
 
 # Import postprocessor directly (for API calls instead of subprocess)
 from frc_cam_postprocessor import (
+    ENGRAVE_DEPTH_IN, ENGRAVE_HEIGHT_IN,
     FRCPostProcessor, PostProcessorResult, assemble_job_gcode, validate_job_layout,
     parse_chamfer_spec, normalize_z_datum,
 )
@@ -448,8 +449,6 @@ DRY_RUN_LIFT_IN = 2.0
 
 #: Engraved part names: cap height and depth. Shallow on purpose - a label is read, not
 #: structural, and every thousandth costs cycle time on a light chattery cut.
-ENGRAVE_HEIGHT_IN = 0.18
-ENGRAVE_DEPTH_IN = 0.01
 
 
 def _wants_dry_run(value) -> bool:
@@ -1452,6 +1451,12 @@ def process_file():
                         config=team_config
                     )
                     pp.tube_height = tube_height
+                    # The generated-pattern branch builds its own post-processor, so it
+                    # needs the dry run applied here too. Without it a tube holes /
+                    # truss / custom-design job drilled at full depth under a setup
+                    # sheet that read "This program cuts AIR."
+                    if dry_run:
+                        pp.set_dry_run(DRY_RUN_LIFT_IN)
                     pp.apply_material_preset(material, machine_id)
                     # No-op for the drilled pattern (its 0.201" tool is above the 4 mm
                     # reference); derates a custom design milled with a smaller cutter.
@@ -1629,6 +1634,11 @@ def process_file():
         response_data = {
             'success': True,
             'filename': output_token,  # Return secure token (not actual filename)
+            # The name the operator will actually see on the downloaded file. The setup
+            # sheet printed this field and no route set it, so it always fell back to a
+            # guess - dropping the _DRYRUN marker the row above it was about, and
+            # sending someone hunting for a file that does not exist.
+            'filename_display': result.filename,
             'gcode': result.gcode,
             'console': console_output,
             'parameters': parameters
@@ -1959,6 +1969,7 @@ def process_job():
         return jsonify({
             'success': True,
             'filename': output_token,
+            'filename_display': result.filename,
             'gcode': result.gcode,
             'cycle_time': result.stats.get('cycle_time_display'),
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),
@@ -2398,6 +2409,7 @@ def process_multitool():
         return jsonify({
             'success': True,
             'filename': output_token,
+            'filename_display': result.filename,
             'gcode': result.gcode,
             'cycle_time': result.stats.get('cycle_time_display'),
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),

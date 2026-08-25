@@ -299,6 +299,76 @@ class DryRunReachesTheRoutesTest(unittest.TestCase):
         self.assertIsNotNone(re.search(r'^S\d+ M3', body['gcode'], re.M))
 
 
+class DryRunReachesTubeJobsTest(unittest.TestCase):
+    """Tubing has two branches in `/process` that each build their own post-processor:
+    one for an uploaded face, one for a generated pattern. The pattern branch was missed,
+    so a tube holes / truss / custom-design job drilled at full depth while the chip said
+    "cuts air" and the setup sheet said "This program cuts AIR."
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp(prefix='drytube_')
+        cls.face = os.path.join(cls.dir, 'face.dxf')
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (12, 0), (12, 2), (0, 2)], close=True)
+        doc.saveas(cls.face)
+        import frc_cam_gui_app as gui
+        cls.gui = gui
+        cls.client = gui.app.test_client()
+        cls._limiter = gui.limiter.enabled
+        gui.limiter.enabled = False
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.gui.limiter.enabled = cls._limiter
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def _tube(self, pattern, dry, **extra):
+        with open(self.face, 'rb') as fh:
+            data = {'file': (io.BytesIO(fh.read()), 'face.dxf'),
+                    'material': 'aluminum_tube', 'tool_diameter': '0.25',
+                    'thickness': '0.0625', 'rotation': '0', 'tube_height': '1',
+                    'square_end': '0', 'cut_to_length': '0', 'tube_size': '2x1-flat',
+                    'tube_pattern': pattern}
+        data.update(extra)
+        if dry:
+            data['dry_run'] = '1'
+        response = self.client.post('/process', data=data,
+                                    content_type='multipart/form-data')
+        return response.get_json() or {}
+
+    def _depths(self, gcode):
+        return [float(m) for m in Z_WORD.findall(gcode)]
+
+    def test_an_uploaded_face_honours_the_dry_run(self):
+        wet = self._tube('none', False)
+        dry = self._tube('none', True)
+        self.assertTrue(wet.get('success'), msg=wet)
+        self.assertTrue(dry.get('success'), msg=dry)
+        self.assertIn('DRY RUN', dry['gcode'])
+        self.assertNotIn('DRY RUN', wet['gcode'])
+        self.assertIsNone(re.search(r'^S\d+ M3', dry['gcode'], re.M))
+        self.assertGreater(min(self._depths(dry['gcode'])),
+                           min(self._depths(wet['gcode'])),
+                           'the dry run was not raised')
+
+    def test_a_generated_pattern_honours_the_dry_run(self):
+        """The branch that was missed. It builds its own post-processor, so it needs
+        the lift applied there too - nothing about the face path covers it."""
+        wet = self._tube('holes', False, tube_pattern_length='12')
+        dry = self._tube('holes', True, tube_pattern_length='12')
+        self.assertTrue(wet.get('success'), msg=wet)
+        self.assertTrue(dry.get('success'), msg=dry)
+        self.assertIn('DRY RUN', dry['gcode'])
+        self.assertIsNone(re.search(r'^S\d+ M3', dry['gcode'], re.M),
+                          'the spindle started on a dry tube pattern')
+        self.assertGreater(min(self._depths(dry['gcode'])),
+                           min(self._depths(wet['gcode'])),
+                           'the tube pattern drilled at full depth on a dry run')
+
+
 class DryRunKeepsEverythingElseOffTest(unittest.TestCase):
     def test_coolant_stays_off_when_nothing_is_being_cut(self):
         """Flood coolant over a part nobody is cutting, on the one run the operator is

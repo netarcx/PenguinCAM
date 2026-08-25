@@ -183,6 +183,13 @@ def build_output_filename(suggested_filename: str, timestamp: str, fallback: str
 # face of the stock, so cutting is negative all the way down - the convention Fusion and
 # most textbooks use, and the one to pick when the stock is held in a vise or the board
 # is not a reliable reference.
+#: Default label size. A cap height that reads across a workbench, and a cut deep enough
+#: to survive handling without weakening the part. Both callers - the single-part route
+#: and the multi-tool assembler - use these, so they live with the engraver rather than
+#: with whichever route happened to need them first.
+ENGRAVE_HEIGHT_IN = 0.18
+ENGRAVE_DEPTH_IN = 0.01
+
 Z_DATUM_BOARD = 'board'
 Z_DATUM_STOCK_TOP = 'stock_top'
 _Z_DATUM_ALIASES = {

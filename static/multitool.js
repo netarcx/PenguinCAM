@@ -1064,6 +1064,9 @@
     // Job-wide, not per operation: every tool change re-zeros Z to the same surface.
     job.z_datum = ctx.state.zDatum || 'board';
     if (ctx.state.dryRun) job.dry_run_lift = 2.0;
+    // Job-wide like the Z datum. Without this the summary said "names engraved" and
+    // the multi-tool program carried no engraving at all.
+    if (ctx.state.engrave) job.engrave = true;
     // The sheet the placements are absolute on, so the server checks the parts against
     // the real stock rather than against their own bounding box.
     if (stock) job.stock = stock;

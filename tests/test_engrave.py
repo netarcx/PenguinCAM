@@ -207,3 +207,72 @@ class EngraveToolpathTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MultiToolEngraveTest(unittest.TestCase):
+    """Multi-tool jobs never called `generate_gcode`, so an engraving hooked only into
+    the single-part routes was silently dropped - while the summary said "names
+    engraved". Silence is the failure mode this whole feature has to avoid."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='mtengrave_')
+        self.dxf = os.path.join(self.tmp, 'p.dxf')
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (5, 0), (5, 4), (0, 4)], close=True)
+        msp.add_circle((2.5, 2.0), 0.75)     # a bore the label must keep out of
+        doc.saveas(self.dxf)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, engrave):
+        import tooling
+        job = tooling.MultiToolJob(
+            material='plywood', thickness=0.25, engrave=engrave,
+            tools=[tooling.Tool(1, '1/8 endmill', 0.125, 2)],
+            parts=[tooling.PartOps(dxf_path=self.dxf, name='GEARBOX-L', operations=[
+                tooling.Operation('holes', 1), tooling.Operation('perimeter', 1)])],
+            config=TeamConfig())
+        with redirect_stdout(io.StringIO()):
+            return tooling.generate_multitool_job(job, timestamp='2026-01-01 00:00:00')
+
+    def test_the_name_is_cut_when_the_job_asks_for_it(self):
+        off = self._run(False)
+        on = self._run(True)
+        self.assertTrue(on.success, msg=str(on.errors))
+        self.assertNotIn('ENGRAVE PART NAME', off.gcode)
+        self.assertIn('ENGRAVE PART NAME', on.gcode)
+        self.assertIn('(Text: GEARBOX-L)', on.gcode)
+
+    def test_it_is_cut_before_the_part_is_freed(self):
+        gcode = self._run(True).gcode
+        self.assertLess(gcode.index('ENGRAVE PART NAME'), gcode.index('PERIMETER'),
+                        'the name was cut after the profile, on a part hanging on tabs')
+
+    def test_it_sees_the_whole_part_not_one_operation_s_scope(self):
+        """An operation narrows `pp.holes`/`pp.pockets` to its own scope - a perimeter
+        operation clears them entirely. Built on that view, the label would be placed
+        over a bore and machined away with the slug."""
+        from shapely.geometry import Point, Polygon
+        lines = self._run(True).gcode.splitlines()
+        start = next(i for i, l in enumerate(lines) if 'ENGRAVE PART NAME' in l)
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('(====='))
+        pts, x, y = [], None, None
+        for line in lines[start:end]:
+            mx = re.search(r'X(-?[\d.]+)', line)
+            my = re.search(r'Y(-?[\d.]+)', line)
+            if mx:
+                x = float(mx.group(1))
+            if my:
+                y = float(my.group(1))
+            if mx and x is not None and y is not None:
+                pts.append((x, y))
+        self.assertGreater(len(pts), 20, 'suspiciously few engraved moves')
+        radius = 0.0625
+        bore = Point(2.5, 2.0).buffer(0.75 / 2 + radius)
+        plate = Polygon([(0, 0), (5, 0), (5, 4), (0, 4)]).buffer(-radius)
+        for p in pts:
+            self.assertFalse(bore.intersects(Point(p)), f'{p} is over the bore')
+            self.assertTrue(plate.contains(Point(p)), f'{p} is off the part')
