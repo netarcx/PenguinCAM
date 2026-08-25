@@ -1839,6 +1839,10 @@
     ctx.restore();
   }
 
+  /* Set while rendering the nest for the setup sheet: ink on white, whatever theme
+     the screen is in. */
+  var printPalette = null;
+
   function drawLayout() {
     var canvas = $('#layout-canvas');
     if (!canvas) return;
@@ -1853,8 +1857,9 @@
     var flipBtn = $('#btn-flip');
     if (flipBtn) { flipBtn.hidden = (state.mode === '2.5d' || state.mode === 'tubing'); flipBtn.disabled = state.selectedIds.length === 0; }
 
-    // Theme-aware colors (read the CSS variables so the canvas matches light/dark).
-    var col = {
+    // Theme-aware colors (read the CSS variables so the canvas matches light/dark),
+    // unless we are drawing for paper.
+    var col = printPalette || {
       ink: cssVar('--ink') || '#e9e7e2',
       muted: cssVar('--muted') || '#8d8e8a',
       danger: cssVar('--danger') || '#e4564a',
@@ -2163,6 +2168,9 @@
       });
     }
 
+    var sheetBtn = $('#btn-setup-sheet');
+    if (sheetBtn) sheetBtn.addEventListener('click', openSetupSheet);
+
     var saveStockBtn = $('#btn-save-stock');
     if (saveStockBtn) saveStockBtn.addEventListener('click', saveCurrentSheet);
     var saveRemnantBtn = $('#btn-save-remnant');
@@ -2259,6 +2267,170 @@
         'drag to move, drag the round handle to rotate (snaps to 45°). The dotted box is the stock; ' +
         'its lower-left is the G54 origin.';
     }
+  }
+
+  /* ------------------------------------------------------------- setup sheet */
+
+  /* A page to take to the machine.
+   *
+   * Everything on it already exists somewhere in the app - the nest is the Layout
+   * canvas, the tools are the tool table, the zero surface is the Z datum - but it is
+   * spread across four panels on a laptop that is not next to the machine. An operator
+   * standing at the controller has a phone or a piece of paper, and the one question
+   * they need answered is "what do I load, where do I zero, and what should I see".
+   *
+   * Opened in its own window and printed from there, so nothing about the wizard's
+   * layout has to survive a print stylesheet. */
+  function openSetupSheet() {
+    var win = window.open('', 'penguincam-setup-sheet');
+    if (!win) {
+      alert('Your browser blocked the setup sheet window. Allow pop-ups for this page.');
+      return;
+    }
+    var doc = win.document;
+    doc.open();
+    doc.write(setupSheetHTML());
+    doc.close();
+    win.focus();
+  }
+
+  function setupSheetRows() {
+    var resp = state.lastResponse || {};
+    var rows = [];
+    var bb = combinedBBox();
+    rows.push(['Machine', state.machine.name]);
+    rows.push(['Material', materialLabel() + ', ' + state.thickness_text + ' thick']);
+    if (state.stock) {
+      rows.push(['Stock', state.stock.name + '  (' + fmtSize(state.stock.width) + ' x '
+                 + fmtSize(state.stock.height) + ')']);
+    } else if (bb) {
+      rows.push(['Stock', fmtSize(bb.w) + ' x ' + fmtSize(bb.h) + ' (the parts)']);
+    }
+    // The single most important line on the page.
+    rows.push(['ZERO Z ON', state.mode === 'tubing' ? 'The tube in its jig'
+               : (state.zDatum === 'stock_top' ? 'The TOP FACE of the stock'
+                                               : 'The SACRIFICE BOARD, through the stock')]);
+    rows.push(['Zero X and Y on', 'The lower-left corner of the '
+               + (state.stock ? 'sheet' : 'stock')]);
+    if (resp.cycle_time) rows.push(['Estimated cycle', resp.cycle_time]);
+    if (resp.tool_changes) {
+      rows.push(['Tool changes', resp.tool_changes + ' - the program pauses at each one']);
+    }
+    if (state.dryRun) rows.push(['DRY RUN', 'This program cuts AIR. It proves the setup only.']);
+    return rows;
+  }
+
+  /* What this job IS, in the words someone would use out loud: "4 x bracket", or
+     "3 parts" once there are several different ones. The generated filename goes
+     underneath, because that is what they will look for on the machine. */
+  function setupSheetTitle(counts) {
+    var names = Object.keys(counts);
+    if (!names.length) return 'Setup sheet';
+    if (names.length === 1) {
+      return (counts[names[0]] > 1 ? counts[names[0]] + ' x ' : '') + names[0];
+    }
+    var total = names.reduce(function (sum, n) { return sum + counts[n]; }, 0);
+    return total + ' parts, ' + names.length + ' different';
+  }
+
+  function materialLabel() {
+    var sel = $('#f-material');
+    var opt = sel && sel.options[sel.selectedIndex];
+    return opt ? opt.text : state.material;
+  }
+
+  function setupSheetTools() {
+    var resp = state.lastResponse || {};
+    if (resp.tools && resp.tools.length) return resp.tools.slice();
+    if (multiToolOn() && window.PCMultiTool) {
+      return (state.tools || []).map(function (t) {
+        return 'T' + t.slot + '  ' + t.name + '  ' + (t.diameter_text || t.diameter);
+      });
+    }
+    return [state.tool_diameter_text + ' end mill'];
+  }
+
+  function setupSheetHTML() {
+    var canvas = $('#layout-canvas');
+    var nest = '';
+    try {
+      if (canvas) {
+        printPalette = { ink: '#111111', muted: '#666666', danger: '#b00020',
+                         accent: '#b26a00', ok: '#1a7f37' };
+        var ctx = canvas.getContext('2d');
+        drawLayout();
+        // Paint white UNDER what was drawn, so the PNG is ink on paper rather than
+        // ink on nothing (a transparent PNG prints as whatever the browser assumes).
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        nest = canvas.toDataURL('image/png');
+      }
+    } catch (e) {
+      nest = '';        // tainted canvas: the sheet is still worth printing without it
+    } finally {
+      printPalette = null;
+      drawLayout();     // put the screen back the way it was
+    }
+    var partCounts = {};
+    state.parts.forEach(function (p) {
+      var base = p.name.replace(/ copy( \d+)?$/, '');
+      partCounts[base] = (partCounts[base] || 0) + 1;
+    });
+
+    function esc(text) {
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                         .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    var rows = setupSheetRows().map(function (r) {
+      var key = (r[0] === 'ZERO Z ON' || r[0] === 'DRY RUN') ? ' class="key"' : '';
+      return '<tr' + key + '><th>' + esc(r[0]) + '</th><td>' + esc(r[1]) + '</td></tr>';
+    }).join('');
+    var tools = setupSheetTools().map(function (t) {
+      return '<li>' + esc(t) + '</li>';
+    }).join('');
+    var parts = Object.keys(partCounts).map(function (name) {
+      return '<li>' + esc(name) + (partCounts[name] > 1
+             ? ' <b>x' + partCounts[name] + '</b>' : '') + '</li>';
+    }).join('');
+    var filename = (state.lastResponse && state.lastResponse.filename_display)
+                   || jobFilename();
+
+    return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+      + '<title>Setup sheet - ' + esc(filename) + '</title><style>'
+      + 'body{font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;'
+      + 'color:#111;margin:24px;max-width:760px}'
+      + 'h1{font-size:19px;margin:0 0 2px}'
+      + '.sub{color:#555;margin:0 0 16px;font-size:12px}'
+      + 'table{border-collapse:collapse;width:100%;margin-bottom:16px}'
+      + 'th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}'
+      + 'th{width:150px;color:#444;font-weight:600}'
+      + 'tr.key th,tr.key td{background:#fff6df;font-weight:700}'
+      + 'h2{font-size:13px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:.06em;color:#444}'
+      + 'ul{margin:0;padding-left:20px}'
+      + 'img{max-width:100%;border:1px solid #ccc;margin-top:6px}'
+      + '.check{margin-top:18px;border-top:2px solid #111;padding-top:10px}'
+      + '.check li{margin-bottom:4px}'
+      + '@media print{body{margin:0}.noprint{display:none}}'
+      + '</style></head><body>'
+      + '<h1>' + esc(setupSheetTitle(partCounts)) + '</h1>'
+      + '<p class="sub">' + esc(filename) + '.nc &middot; PenguinCAM setup sheet &middot; '
+      + esc(new Date().toLocaleString()) + '</p>'
+      + '<table>' + rows + '</table>'
+      + '<h2>Tools, in the order the program asks for them</h2><ul>' + tools + '</ul>'
+      + '<h2>Parts on this sheet</h2><ul>' + parts + '</ul>'
+      + (nest ? '<h2>Nest</h2><img src="' + nest + '" alt="Part layout">' : '')
+      + '<div class="check"><h2>Before you press cycle start</h2><ul>'
+      + '<li>Stock clamped, and no clamp in the toolpath</li>'
+      + '<li>The right tool is in the spindle</li>'
+      + '<li>Z zeroed on the surface named above &mdash; not the other one</li>'
+      + '<li>X and Y zeroed at the lower-left corner</li>'
+      + '<li>Dust shoe and eye protection</li>'
+      + '</ul></div>'
+      + '<p class="noprint"><button onclick="window.print()">Print this</button></p>'
+      + '</body></html>';
   }
 
   /* ------------------------------------------------------------- preview */
