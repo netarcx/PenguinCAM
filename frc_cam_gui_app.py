@@ -442,6 +442,16 @@ def _maybe_refresh_team_config():
         session['team_config_fetched_at'] = time.time()
 
 
+#: How far a dry run lifts the whole program above the work.
+DRY_RUN_LIFT_IN = 2.0
+
+
+def _wants_dry_run(value) -> bool:
+    """Did this request ask for a dry run? Anything but an explicit yes is a real cut,
+    because defaulting the other way would silently hand back a program that cuts air."""
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _finite_placement(value, what: str) -> float:
     """A placement coordinate that is a real number. Rejects NaN/Infinity, which JSON
     permits and every downstream comparison silently passes."""
@@ -1152,6 +1162,7 @@ def process_file():
                                         default=team_config.z_datum)
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
+        dry_run = _wants_dry_run(request.form.get('dry_run'))
         log(f"🔍 DEBUG: TeamConfig internals: team={team_config.team_number}, name={team_config.team_name}")
 
         # Call post-processor API based on mode
@@ -1275,6 +1286,8 @@ def process_file():
                     config=team_config,
                     z_datum=z_datum
                 )
+                if dry_run:
+                    pp.set_dry_run(DRY_RUN_LIFT_IN)
 
                 # Apply material preset (for specific machine if selected), then scale
                 # it to the actual tool - the preset numbers are tuned for the 4 mm
@@ -1552,6 +1565,7 @@ def process_job():
             z_datum = normalize_z_datum(job.get('z_datum'), default=team_config.z_datum)
         except ValueError as exc:
             return jsonify({'error': str(exc)}), 400
+        dry_run = _wants_dry_run(job.get('dry_run'))
 
         log(f"[JOB] {len(parts_spec)} parts, tool {tool_diameter}, material {material}, thickness {thickness}")
 
@@ -1581,6 +1595,8 @@ def process_job():
 
             pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool_diameter,
                                   units='inch', config=team_config, z_datum=z_datum)
+            if dry_run:
+                pp.set_dry_run(DRY_RUN_LIFT_IN)
             pp.apply_material_preset(material, machine_id)
             pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
             if max_pass_depth is not None:

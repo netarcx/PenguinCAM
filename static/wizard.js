@@ -51,6 +51,9 @@
     // the program, never the motion - but zeroing on the wrong one puts every cut a
     // material thickness out, so it is stated on the setup panel and in the summary.
     zDatum: 'board',
+    // Prove the setup before committing to a cut: the same program raised clear of the
+    // work with the spindle off. Never sticky across a generate - see bindDryRun.
+    dryRun: false,
     // Optional ceiling on the depth of one contour pass (inches; null = automatic).
     // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
     max_pass_depth: null,
@@ -424,6 +427,7 @@
     }
     // Always shown, both ways round: this is the number the operator has to match on
     // the machine, so it should never be something you have to remember choosing.
+    if (state.dryRun) chips.push('DRY RUN - cuts air');
     chips.push(state.mode === 'tubing' ? 'Z0 = tube origin'
                : (state.zDatum === 'stock_top' ? 'Z0 = stock top' : 'Z0 = spoilboard'));
     if (state.mode === 'tubing') {
@@ -642,6 +646,16 @@
       bitSel.addEventListener('change', function () {
         if (this.value) applyBit(this.value);
         this.value = '';           // a picker, not a setting: the field is the truth
+      });
+    }
+
+    var dryBox = $('#f-dry-run');
+    if (dryBox) {
+      dryBox.addEventListener('change', function () {
+        state.dryRun = this.checked;
+        updateSummary();
+        invalidatePreview();
+        if (state.step === 'preview') gotoStep('preview');   // regenerate immediately
       });
     }
 
@@ -2055,6 +2069,7 @@
     }
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     job.z_datum = state.zDatum;
+    if (state.dryRun) job.dry_run = '1';
     state.parts.forEach(function (p, i) {
       var pl = placement(p);
       job.parts.push({
@@ -2121,6 +2136,7 @@
     fd.append('tab_spacing', state.tab_spacing);
     if (state.max_pass_depth) fd.append('max_pass_depth', state.max_pass_depth);
     fd.append('z_datum', state.zDatum);
+    if (state.dryRun) fd.append('dry_run', '1');
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'process');

@@ -419,6 +419,15 @@
                     </div>
                     <p class="hint" id="viewer-origin-note">Origin (0,0,0) is the lower-left of the stock, on top of the sacrifice board. Drag to orbit, scroll to zoom.</p>
                 </div>
+                <label class="field inline" id="dry-run-toggle">
+                    <input type="checkbox" id="f-dry-run" autocomplete="off">
+                    <span>Dry run &mdash; cut air first, spindle off</span>
+                </label>
+                <p class="hint" id="dry-run-note">
+                    Runs the same program raised 2&quot; above the work with the spindle
+                    stopped, so a wrong zero, an oversized nest or a clamp in the way shows
+                    up while nothing is at stake. The file is named _DRYRUN; untick to cut.
+                </p>
                 <div id="preview-errors" class="errors" aria-live="polite"></div>
                 <!-- Replaced by the result above as soon as there is a program. -->
                 <div class="panel-empty">

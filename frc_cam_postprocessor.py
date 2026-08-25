@@ -155,7 +155,8 @@ def sanitize_comment(text: str, fallback: str = '') -> str:
     return out if out else fallback
 
 
-def build_output_filename(suggested_filename: str, timestamp: str, fallback: str = "output") -> str:
+def build_output_filename(suggested_filename: str, timestamp: str, fallback: str = "output",
+                          dry_run: bool = False) -> str:
     """Build the '<name>_<timestamp>.nc' output filename, sanitizing BOTH halves so the
     result is safe to write to disk and serve. Single chokepoint shared by every generator
     and the multi-part job assembler.
@@ -170,7 +171,7 @@ def build_output_filename(suggested_filename: str, timestamp: str, fallback: str
                      .replace(':', ''))
     if not stamped.strip('_'):
         stamped = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{base_name}_{stamped}.nc"
+    return f"{base_name}{'_DRYRUN' if dry_run else ''}_{stamped}.nc"
 
 
 # Where the operator sets Z zero. 'board' (the default, and what every program this
@@ -282,6 +283,12 @@ class FRCPostProcessor:
         # that do know: the drilled tube pattern below, and tooling.py's drill path,
         # which calls _generate_drill_gcode directly.
         self.tool_has_drill_point = False
+
+        # Dry run: the same program, lifted clear of the work with the spindle off, for
+        # proving a setup before committing to a cut. Zero means a real cutting program.
+        # The lift is applied in _apply_z_frame, so it moves the three Z anchors and
+        # every toolpath follows - the dry run is provably the same motion, raised.
+        self.dry_run_lift = 0.0
         self._apply_z_frame()   # sets material_top, retract_height, cut_depth
 
         # True when the tool is parked at safe height (above the clearance plane) and the
@@ -624,11 +631,10 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === RESTART AFTER PAUSE === )')
         gcode.append('G90  ; Ensure absolute positioning mode')
-        gcode.append(f'S{self.spindle_speed} M3  ; Spindle on')
-        coolant_on = self._coolant_on_gcode()
+        gcode.extend(self._spindle_start_gcode())
+        coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
         if coolant_on:
             gcode.append(coolant_on)
-        gcode.append('G4 P3.0  ; 3 second spindle spin-up')
         # Lift before the next feature moves in XY. The pre-pause retract left Z safe,
         # but the operator has just had their hands in the envelope to flip or fixture the
         # work and jogging Z is the normal thing to do while there. Resuming into a
@@ -1966,7 +1972,7 @@ class FRCPostProcessor:
         self._insert_cycle_time_comment(gcode, time_estimate)
 
         # Generate filename with timestamp (name sanitized for safe disk write + download)
-        filename = build_output_filename(suggested_filename, timestamp, "output")
+        filename = build_output_filename(suggested_filename, timestamp, "output", dry_run=self.is_dry_run)
 
         # Return result
         return PostProcessorResult(
@@ -2068,6 +2074,7 @@ class FRCPostProcessor:
         stock thickness. Called from __init__ and again whenever the thickness or the
         sacrifice depth changes (2.5D derives thickness from the CAD layers)."""
         top = 0.0 if self.z_datum == Z_DATUM_STOCK_TOP else self.material_thickness
+        top += self.dry_run_lift          # 0 for a real program
         self.material_top = top                                  # top face of the stock
         self.retract_height = top + self.clearance_height        # rapid height over it
         self.cut_depth = top - self.material_thickness - self.sacrifice_board_depth
@@ -2088,6 +2095,32 @@ class FRCPostProcessor:
         on the stock-top datum every cut is negative and this read as "always through",
         which would have left partial-depth pockets contoured but never cleared."""
         return (self.cut_depth if z is None else z) <= self.stock_bottom + 1e-9
+
+    def set_dry_run(self, lift: float = 2.0):
+        """Raise the whole program clear of the work and stop the spindle turning.
+
+        For proving a program before it touches material: the tool traces the exact same
+        path in the air above the part, so a wrong origin, an oversized nest or a
+        forgotten clamp shows up while nothing is at stake. Everything is derived from
+        the three Z anchors, so lifting those lifts every move - the dry run and the real
+        program differ by exactly this number and nothing else.
+        """
+        if not math.isfinite(lift) or lift < 0:
+            raise ValueError(f'Dry-run lift must be a positive number of inches, got {lift!r}')
+        self.dry_run_lift = float(lift)
+        self._apply_z_frame()
+
+    @property
+    def is_dry_run(self) -> bool:
+        return self.dry_run_lift > 0
+
+    def _spindle_start_gcode(self, detail: str = '') -> List[str]:
+        """Spindle-on lines, or the dry run's refusal to turn it."""
+        if self.is_dry_run:
+            return ['M5  ; DRY RUN - spindle stays off',
+                    'G4 P1  ; brief pause so the operator can confirm it is not turning']
+        return [f'S{self.spindle_speed} M3  ; Spindle on{detail}',
+                'G4 P2  ; Wait 2 seconds for spindle to reach speed']
 
     def set_z_datum(self, datum):
         """Switch which surface Z0 sits on, re-placing the Z frame around it."""
@@ -2114,6 +2147,8 @@ class FRCPostProcessor:
         so it is shifted with the datum - both datums then retract to the same physical
         height, not to the same number."""
         floor = self.retract_height  # material_thickness + clearance (or max_depth + clearance in 2.5D)
+        # z_shift already carries the dry-run lift (it is measured from material_top),
+        # so adding the lift again here charged it twice.
         ceiling = (self.safe_clearance_height or 0.0) + self.z_shift
         return max(floor, ceiling)
 
@@ -2333,6 +2368,15 @@ class FRCPostProcessor:
             gcode.append(f"(ZMIN: {self.cut_depth:.4f}\")")
             gcode.append(f"(Retract Z: {self.retract_height:.4f}\")")
             gcode.append("")
+        if self.is_dry_run:
+            gcode.append("(*************************************************)")
+            gcode.append("(* DRY RUN - THIS PROGRAM DOES NOT CUT ANYTHING   *)")
+            gcode.append(f"(* Every move is raised {self.dry_run_lift:.2f} in above the work *)")
+            gcode.append("(* and the spindle is never started.              *)")
+            gcode.append("(* Regenerate with dry run OFF to cut for real.   *)")
+            gcode.append("(*************************************************)")
+            gcode.append("")
+
         gcode.append("(Z-AXIS REFERENCE:)")
         gcode.append("(  Z=0 is at " + ("TOP OF STOCK" if self.z_datum == Z_DATUM_STOCK_TOP
                                         else "SACRIFICE BOARD surface") + ")")
@@ -2358,11 +2402,11 @@ class FRCPostProcessor:
         gcode.append("")
 
         # Spindle on
-        gcode.append(f"S{self.spindle_speed} M3  ; Spindle on" + ("" if is_multilayer else f" at {self.spindle_speed} RPM"))
-        coolant_on = self._coolant_on_gcode()
+        gcode.extend(self._spindle_start_gcode(
+            '' if is_multilayer else f' at {self.spindle_speed} RPM'))
+        coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
         if coolant_on:
             gcode.append(coolant_on)
-        gcode.append("G4 P2  ; Wait" + (" for spindle" if is_multilayer else " 2 seconds for spindle to reach speed"))
         gcode.append("")
 
         # Set work coordinate system
@@ -3145,7 +3189,7 @@ class FRCPostProcessor:
             )
 
         # Generate filename (name sanitized for safe disk write + download)
-        filename = build_output_filename(suggested_filename, timestamp, "output")
+        filename = build_output_filename(suggested_filename, timestamp, "output", dry_run=self.is_dry_run)
 
         return PostProcessorResult(
             success=True,
@@ -5713,11 +5757,10 @@ class FRCPostProcessor:
         gcode.append('G90  ; Absolute positioning mode')
         gcode.append('')
         gcode.append('( Spindle )')
-        gcode.append(f'S{self.spindle_speed} M3')
-        tube_coolant_on = self._coolant_on_gcode()
+        gcode.extend(self._spindle_start_gcode())
+        tube_coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
         if tube_coolant_on:
             gcode.append(tube_coolant_on)
-        gcode.append('G4 P3.0')
         gcode.append('')
         gcode.append(self._tube_wcs_activate_gcode())
         gcode.append('')
@@ -5783,7 +5826,7 @@ class FRCPostProcessor:
         time_estimate = self._estimate_cycle_time(gcode)
 
         # Generate filename with timestamp (name sanitized for safe disk write + download)
-        filename = build_output_filename(suggested_filename, timestamp, "tube_facing")
+        filename = build_output_filename(suggested_filename, timestamp, "tube_facing", dry_run=self.is_dry_run)
 
         # Return result
         return PostProcessorResult(
@@ -5974,11 +6017,10 @@ class FRCPostProcessor:
         gcode.append('G90  ; Absolute positioning mode')
         gcode.append('')
         gcode.append('( Spindle )')
-        gcode.append(f'S{self.spindle_speed} M3')
-        pattern_coolant_on = self._coolant_on_gcode()
+        gcode.extend(self._spindle_start_gcode())
+        pattern_coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
         if pattern_coolant_on:
             gcode.append(pattern_coolant_on)
-        gcode.append('G4 P3.0')
         gcode.append('')
         gcode.append(self._tube_wcs_activate_gcode())
         gcode.append('')
@@ -6161,7 +6203,7 @@ class FRCPostProcessor:
         num_pockets = face1_pockets + face2_pockets
 
         # Generate filename with timestamp (name sanitized for safe disk write + download)
-        filename = build_output_filename(suggested_filename, timestamp, "tube_pattern")
+        filename = build_output_filename(suggested_filename, timestamp, "tube_pattern", dry_run=self.is_dry_run)
 
         # Build operation notes based on configuration
         phase2_note = ('Phase 2: Machine distinct pattern on opposite face'
@@ -6764,7 +6806,8 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
     time_estimate = header_pp._estimate_cycle_time(gcode)
     header_pp._insert_cycle_time_comment(gcode, time_estimate, offset=1)
 
-    filename = build_output_filename(suggested_filename, timestamp, "job")
+    filename = build_output_filename(suggested_filename, timestamp, "job",
+                                     dry_run=header_pp.is_dry_run)
 
     return PostProcessorResult(
         success=True,

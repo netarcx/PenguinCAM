@@ -1063,6 +1063,7 @@
     if (ctx.state.max_pass_depth) job.max_pass_depth = ctx.state.max_pass_depth;
     // Job-wide, not per operation: every tool change re-zeros Z to the same surface.
     job.z_datum = ctx.state.zDatum || 'board';
+    if (ctx.state.dryRun) job.dry_run_lift = 2.0;
     ctx.state.parts.forEach(function (part, i) {
       var place = placements[i] || { x: 0, y: 0 };
       job.parts.push({

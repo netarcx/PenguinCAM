@@ -446,6 +446,9 @@ class MultiToolJob:
     #: None takes the team config's default. It has to be job-wide rather than per
     #: operation: every tool change in the program re-zeros Z to the same surface.
     z_datum: Optional[str] = None
+    #: Raise the whole program clear of the work and leave the spindle off, for proving
+    #: a setup before committing to a cut. Inches; 0 is a real cutting program.
+    dry_run_lift: float = 0.0
     #: Operator ceiling on the depth of one contour pass, inches. Applied to every
     #: milling tool AFTER the model/preset/power clamps, and only ever downward - it
     #: buys more, shallower passes for fragile or multi-flute cutters.
@@ -766,6 +769,8 @@ def build_part_postprocessor(job: MultiToolJob, part: PartOps, tool_diameter: fl
     cutter is the one that will drill it."""
     pp = FRCPostProcessor(material_thickness=job.thickness, tool_diameter=tool_diameter,
                           units=job.units, config=job.config, z_datum=job.z_datum)
+    if job.dry_run_lift:
+        pp.set_dry_run(job.dry_run_lift)
     pp.apply_material_preset(job.material, job.machine_id)
     if job.user_name:
         pp.user_name = job.user_name
@@ -1533,7 +1538,8 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     return PostProcessorResult(
         success=True,
         gcode='\n'.join(gcode),
-        filename=build_output_filename(suggested_filename or job.name, timestamp, 'job'),
+        filename=build_output_filename(suggested_filename or job.name, timestamp, 'job',
+                                       dry_run=bool(job.dry_run_lift)),
         # Deduped: a feeds warning about one tool repeats for every part and every
         # operation that tool touches, and ten copies of one sentence reads as noise.
         warnings=list(dict.fromkeys(all_warnings)),
@@ -1814,6 +1820,8 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         sacrifice_depth=(_expect_positive(spec['sacrifice_depth'], 'sacrifice_depth')
                          if spec.get('sacrifice_depth') is not None else None),
         z_datum=_expect_z_datum(spec.get('z_datum')),
+        dry_run_lift=(_expect_positive(spec['dry_run_lift'], 'dry_run_lift')
+                      if spec.get('dry_run_lift') else 0.0),
         max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
                         if spec.get('max_pass_depth') is not None else None),
         config=config,
