@@ -153,3 +153,44 @@ class StockRouteTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MachineTravelTest(unittest.TestCase):
+    """A job is checked against ITS machine, not the config's default one."""
+
+    def test_travel_follows_the_machine_id(self):
+        from team_config import TeamConfig
+        config = TeamConfig({
+            'version': 2,
+            'default_machine': 'big',
+            'machines': {
+                'big': {'machine': {'dimensions': {'x_max': '48in', 'y_max': '48in'}}},
+                'small': {'machine': {'dimensions': {'x_max': '12in', 'y_max': '8in'}}},
+            },
+        })
+        self.assertEqual(config.machine_travel('big'), (48.0, 48.0))
+        self.assertEqual(config.machine_travel('small'), (12.0, 8.0))
+        # No machine named: the default, which is what the properties always returned.
+        self.assertEqual(config.machine_travel(), (48.0, 48.0))
+        self.assertEqual(config.machine_travel(None), (48.0, 48.0))
+
+    def test_an_unknown_machine_falls_back_rather_than_crashing(self):
+        """A stale machine_id in an old session must not take a job's envelope to zero,
+        which would reject every layout with no way to tell why."""
+        from team_config import TeamConfig
+        config = TeamConfig({
+            'version': 2, 'default_machine': 'big',
+            'machines': {'big': {'machine': {'dimensions': {'x_max': '48in',
+                                                            'y_max': '48in'}}}},
+        })
+        self.assertEqual(config.machine_travel('gone'), (48.0, 48.0))
+
+    def test_a_machine_missing_its_dimensions_falls_back(self):
+        from team_config import TeamConfig
+        config = TeamConfig({
+            'version': 2, 'default_machine': 'big',
+            'machines': {'big': {'machine': {'dimensions': {'x_max': '48in',
+                                                            'y_max': '48in'}}},
+                         'vague': {'machine': {}}},
+        })
+        self.assertEqual(config.machine_travel('vague'), (48.0, 48.0))

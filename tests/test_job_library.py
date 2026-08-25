@@ -274,3 +274,59 @@ class JobRouteTest(unittest.TestCase):
 
     def test_a_job_needs_a_name_and_a_part(self):
         self.assertEqual(self.client.post('/jobs/save', json={'name': '', 'parts': []}).status_code, 400)
+
+
+class JobStagingTest(unittest.TestCase):
+    """The half-written states a save passes through must never look like a job."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='jobstage_')
+        self.config = os.path.join(self.dir, 'PenguinCAM-config.yaml')
+        io.open(self.config, 'w', encoding='utf-8').write('version: 2\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_save_in_flight_is_not_listed_or_openable(self):
+        job_id, path = job_library.save_job(self.config, 'Nest', {}, [_part('P')])
+        root = os.path.dirname(path)
+        # Whatever a crashed save leaves behind holds a complete job.json, so it would
+        # otherwise be listed as a job and opened as one.
+        for leftover in (path + '.saving-abc123', path + '.previous'):
+            shutil.copytree(path, leftover)
+        names = [j['id'] for j in job_library.list_jobs(self.config)]
+        self.assertEqual(names, [job_id])
+
+    def test_two_saves_of_the_same_name_do_not_share_a_staging_directory(self):
+        """A shared `<job>.saving` meant the loser's cleanup deleted the winner's files
+        out from under it."""
+        first = job_library.save_job(self.config, 'Nest', {}, [_part('A')])[1]
+        second = job_library.save_job(self.config, 'Nest', {}, [_part('B')])[1]
+        self.assertEqual(first, second)      # same name, same slug, same directory
+        loaded = job_library.load_job(self.config, os.path.basename(second))
+        self.assertEqual([p['name'] for p in loaded['parts']], ['B'])
+        # And nothing was left lying around.
+        root = os.path.dirname(second)
+        self.assertEqual([e for e in os.listdir(root) if '.saving' in e or
+                          e.endswith('.previous')], [])
+
+    def test_a_failed_swap_leaves_the_previous_job_in_place(self):
+        """Not an empty name with the only copy stranded in `.previous`."""
+        job_library.save_job(self.config, 'Nest', {}, [_part('GOOD')])
+        real_rename = os.rename
+        calls = {'n': 0}
+
+        def flaky(src, dst):
+            calls['n'] += 1
+            if calls['n'] == 2:              # the staging -> path swap
+                raise OSError('disk full')
+            return real_rename(src, dst)
+
+        os.rename = flaky
+        try:
+            with self.assertRaises(OSError):
+                job_library.save_job(self.config, 'Nest', {}, [_part('NEW')])
+        finally:
+            os.rename = real_rename
+        loaded = job_library.load_job(self.config, 'nest')
+        self.assertEqual([p['name'] for p in loaded['parts']], ['GOOD'])

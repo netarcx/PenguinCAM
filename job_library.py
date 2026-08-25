@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 
 #: Directory name, created next to the team config the first time a job is saved.
 JOBS_DIRNAME = 'penguincam-jobs'
@@ -93,6 +94,10 @@ def list_jobs(config_path: str):
         return []
     jobs = []
     for entry in sorted(os.listdir(root)):
+        # A save in flight, or a backup a crashed save left behind, is not a job. It can
+        # hold a complete job.json, so it would otherwise be listed and openable.
+        if entry.endswith('.previous') or '.saving' in entry:
+            continue
         meta_path = os.path.join(root, entry, 'job.json')
         if not os.path.isfile(meta_path):
             continue
@@ -133,9 +138,10 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
 
     job_id = _slug(name)
     path = _job_path(root, job_id)
-    staging = path + '.saving'
-    shutil.rmtree(staging, ignore_errors=True)
-    os.makedirs(staging, exist_ok=True)
+    # A staging directory of its own per save. A shared `path + '.saving'` meant two
+    # saves of the same name racing each other wrote into one directory and the loser's
+    # rmtree took the winner's files with it.
+    staging = tempfile.mkdtemp(prefix=os.path.basename(path) + '.saving-', dir=root)
 
     try:
         meta_parts = []
@@ -183,9 +189,17 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
         # loads with half its parts missing.
         backup = path + '.previous'
         shutil.rmtree(backup, ignore_errors=True)
-        if os.path.isdir(path):
+        had_previous = os.path.isdir(path)
+        if had_previous:
             os.rename(path, backup)
-        os.rename(staging, path)
+        try:
+            os.rename(staging, path)
+        except OSError:
+            # The new job did not land. Put the old one back rather than leaving the
+            # name with nothing under it and the only copy sitting in `.previous`.
+            if had_previous and not os.path.isdir(path):
+                os.rename(backup, path)
+            raise
         shutil.rmtree(backup, ignore_errors=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

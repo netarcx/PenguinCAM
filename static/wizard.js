@@ -2512,10 +2512,30 @@
     state.parts = [];
     state.selectedIds = [];
     var queue = (job.parts || []).slice();
-    var loaded = 0;
+    var loaded = 0, failed = [];
+    // Every part settles the count, including the ones that do not load. Returning
+    // early on a bad DXF meant `loaded` could never reach the queue length, so the
+    // wizard sat on the Parts step forever with no error and no way to tell why.
+    function settle(name, ok) {
+      if (!ok) failed.push(name);
+      if (++loaded < queue.length) return;
+      renderParts();
+      partListChanged();
+      applyModeUI();
+      applyStockUI();
+      updateSummary();
+      refitView();
+      drawLayout();
+      gotoStep('layout');
+      if (failed.length) {
+        alert('Opened without ' + failed.join(', ')
+              + (failed.length === 1 ? ': its' : ': their')
+              + ' drawing could not be read. Check the nest before cutting.');
+      }
+    }
     queue.forEach(function (saved) {
       var file = dxfFileFromBase64(saved.dxf_base64, saved.name + '.dxf');
-      if (!file) return;
+      if (!file) { settle(saved.name || 'a part', false); return; }
       uploadDxf(file, function (part) {
         if (part) {
           part.name = saved.name || part.name;
@@ -2532,16 +2552,7 @@
           }
           if (saved.ops) part.ops = saved.ops;
         }
-        if (++loaded === queue.length) {
-          renderParts();
-          partListChanged();
-          applyModeUI();
-          applyStockUI();
-          updateSummary();
-          refitView();
-          drawLayout();
-          gotoStep('layout');
-        }
+        settle(saved.name || 'a part', !!part);
       });
     });
   }

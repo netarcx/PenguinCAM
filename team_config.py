@@ -524,13 +524,29 @@ class TeamConfig:
 
     @property
     def machine_x_max(self) -> float:
-        """Machine maximum X travel (inches)"""
+        """Machine maximum X travel (inches), for the DEFAULT machine."""
         return self._get('machine', 'dimensions', 'x_max')
 
     @property
     def machine_y_max(self) -> float:
-        """Machine maximum Y travel (inches)"""
+        """Machine maximum Y travel (inches), for the DEFAULT machine."""
         return self._get('machine', 'dimensions', 'y_max')
+
+    def machine_travel(self, machine_id: Optional[str] = None):
+        """(x_max, y_max) travel in inches for one machine, not just the default one.
+
+        The `machine_x_max` / `machine_y_max` properties resolve through `_get`, which
+        always reads the default machine. A shop with two machines that posts a job for
+        the smaller one therefore had its layout checked against the bigger one's
+        envelope - a program accepted here runs into the limits there.
+        """
+        if machine_id is None:
+            return self.machine_x_max, self.machine_y_max
+        dims = (self.get_machine_config(machine_id) or {}).get('machine', {}) \
+                   .get('dimensions', {}) or {}
+        x = parse_length(dims.get('x_max'))
+        y = parse_length(dims.get('y_max'))
+        return (x if x else self.machine_x_max), (y if y else self.machine_y_max)
 
     @property
     def machine_z_max(self) -> float:

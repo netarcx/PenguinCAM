@@ -972,9 +972,14 @@ def delete_stock():
 
 def _jobs_response(message=None, status=200, extra=None):
     """Every job route answers with the whole list, so the UI never merges anything."""
+    # Saved jobs are a local-install feature: they live beside the team config on the
+    # machine in the shop. The hosted deployment lists nothing rather than relying on
+    # "there is no local config to find" to produce an empty list by accident.
+    writable = _jobs_writable()
     payload = {'success': status == 200,
-               'jobs': job_library.list_jobs(local_mode.find_local_config_path()),
-               'writable': _jobs_writable()}
+               'jobs': (job_library.list_jobs(local_mode.find_local_config_path())
+                        if writable else []),
+               'writable': writable}
     if message:
         payload['message' if status == 200 else 'error'] = message
     payload.update(extra or {})
@@ -1042,6 +1047,9 @@ def save_saved_job():
 @limiter.limit("30 per minute")
 def open_saved_job():
     """One saved job, with its DXFs, ready for the wizard to rebuild."""
+    if not _jobs_writable():
+        return _jobs_response('Saved jobs need a local install of PenguinCAM.',
+                              status=404)
     job_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
     if not job_id:
         return _jobs_response('Which job?', status=400)
@@ -1809,8 +1817,10 @@ def process_job():
         _ensure_local_team_config()
         team_config = TeamConfig.from_dict(session.get('team_config_data', {}))
         user_name = session.get('user_name')
-        machine_x = team_config.machine_x_max
-        machine_y = team_config.machine_y_max
+        # The job's OWN machine, not the config's default one. A shop with two machines
+        # had every job's layout checked against the default machine's envelope, so a
+        # nest posted for the smaller one was accepted here and ran into its limits.
+        machine_x, machine_y = team_config.machine_travel(machine_id)
 
         # Which surface the operator will zero Z on. Refused rather than defaulted if it
         # is not one of the two: a guess here puts every cut a stock thickness out.
@@ -2345,9 +2355,10 @@ def process_multitool():
                 return jsonify({'error': 'The stock size must be a positive number of '
                                          'inches.'}), 400
             sheet = (sheet_w, sheet_h)
-        layout_errors = validate_job_layout(placed, job.config.machine_x_max,
-                                            job.config.machine_y_max, min_gap=kerf,
-                                            stock=sheet)
+        # The job's own machine, not the config's default one - see /process-job.
+        mt_machine_x, mt_machine_y = job.config.machine_travel(job.machine_id)
+        layout_errors = validate_job_layout(placed, mt_machine_x, mt_machine_y,
+                                            min_gap=kerf, stock=sheet)
         if layout_errors:
             log(f"[MULTITOOL] layout invalid: {layout_errors}")
             return jsonify({'success': False, 'part_errors': layout_errors}), 400
