@@ -59,3 +59,7 @@ test_output_*.nc
 # under tests/ was committable (and got committed once).
 tests/__pycache__/
 tests/**/__pycache__/
+
+# Saved jobs (job_library.py): a team's own nests, with the DXFs stored alongside
+# them. Local data next to the local config, not something to commit.
+penguincam-jobs/

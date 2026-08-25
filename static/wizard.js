@@ -1558,6 +1558,7 @@
     renderParts();
     partListChanged();
     dbg('part-added', { name: p.name, w: p.width, h: p.height });
+    return p;      // so a caller restoring a saved job can put it back where it was
   }
 
   /* The part list feeds the operation plan and the generated program, and in grid mode
@@ -1635,7 +1636,7 @@
     partListChanged();
   }
 
-  function uploadDxf(file) {
+  function uploadDxf(file, onAdded) {
     if (!file || !/\.dxf$/i.test(file.name)) { alert('Please choose a .dxf file.'); return; }
     var fd = new FormData();
     fd.append('file', file);
@@ -1643,9 +1644,15 @@
     fetch('/part-outline', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
-        if (!res.ok || !res.j.success) { dbg('part-outline:err', res.j.error); alert('Could not read DXF: ' + (res.j.error || 'unknown error')); return; }
+        if (!res.ok || !res.j.success) {
+          dbg('part-outline:err', res.j.error);
+          alert('Could not read DXF: ' + (res.j.error || 'unknown error'));
+          if (onAdded) onAdded(null);
+          return;
+        }
         dbg('part-outline:ok', { name: res.j.name, w: res.j.width, h: res.j.height });
-        addPartFromOutline(res.j, file);
+        var added = addPartFromOutline(res.j, file);
+        if (onAdded) onAdded(added);
       })
       .catch(function (e) { dbg('part-outline:fail', String(e)); alert('Upload failed: ' + e); });
   }
@@ -2182,6 +2189,31 @@
       });
     }
 
+    var saveJobBtn = $('#btn-save-job');
+    if (saveJobBtn) saveJobBtn.addEventListener('click', saveCurrentJob);
+    var openJobBtn = $('#btn-open-job');
+    if (openJobBtn) {
+      openJobBtn.addEventListener('click', function () {
+        var sel = $('#f-job');
+        if (sel && sel.value) openSavedJob(sel.value);
+      });
+    }
+    var deleteJobBtn = $('#btn-delete-job');
+    if (deleteJobBtn) {
+      deleteJobBtn.addEventListener('click', function () {
+        var sel = $('#f-job');
+        if (!sel || !sel.value) return;
+        var label = sel.options[sel.selectedIndex].textContent;
+        if (!confirm('Delete the saved job "' + label + '"? The DXFs saved with it go too.')) return;
+        fetch('/jobs/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sel.value }),
+        }).then(function (r) { return r.json(); })
+          .then(function (j) { if (j.jobs) setSavedJobs(j.jobs); })
+          .catch(function (e) { alert('Could not delete that job: ' + e); });
+      });
+    }
+
     var sheetBtn = $('#btn-setup-sheet');
     if (sheetBtn) sheetBtn.addEventListener('click', openSetupSheet);
 
@@ -2280,6 +2312,188 @@
       el.textContent = 'Click to select (Shift-click for multiple), ' +
         'drag to move, drag the round handle to rotate (snaps to 45°). The dotted box is the stock; ' +
         'its lower-left is the G54 origin.';
+    }
+  }
+
+  /* -------------------------------------------------------------- saved jobs */
+
+  /* "Make six more of last week's gearbox plates" was a from-scratch rebuild every
+     time: re-upload every DXF, re-enter the material and thickness, re-nest the sheet -
+     and the nest was never quite the same twice. A saved job brings all of it back. */
+  function savedJobs() { return CFG.savedJobs || []; }
+
+  function renderJobPicker() {
+    var wrap = $('#saved-jobs'), sel = $('#f-job');
+    if (!wrap || !sel) return;
+    var jobs = savedJobs();
+    wrap.hidden = !jobs.length;
+    sel.innerHTML = '';
+    jobs.forEach(function (job) {
+      var bits = [];
+      if (job.part_count) bits.push(job.part_count + ' part' + (job.part_count === 1 ? '' : 's'));
+      if (job.material) bits.push(job.material);
+      if (job.thickness_text) bits.push(job.thickness_text);
+      sel.appendChild(new Option(job.name + (bits.length ? '  ·  ' + bits.join(', ') : ''),
+                                 job.id));
+    });
+  }
+
+  function setSavedJobs(jobs) {
+    CFG.savedJobs = jobs || [];
+    renderJobPicker();
+  }
+
+  /* Everything needed to cut this again. The DXFs travel with it - a job that depended
+     on files still being in someone's Downloads folder would not be saved at all. */
+  function saveCurrentJob() {
+    if (!state.parts.length) { alert('Add a part before saving a job.'); return; }
+    var name = prompt('Name this job (you will pick it from a list next time):',
+                      jobFilename().replace(/_/g, ' '));
+    if (!name) return;
+
+    var pending = state.parts.length;
+    var parts = new Array(state.parts.length);
+    state.parts.forEach(function (p, i) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var bytes = new Uint8Array(reader.result), binary = '';
+        for (var b = 0; b < bytes.length; b++) binary += String.fromCharCode(bytes[b]);
+        var pl = placement(p);
+        parts[i] = {
+          name: p.name, dxf_base64: btoa(binary),
+          place_x: pl.x, place_y: pl.y, rotation: p.rotation, mirror: !!p.flipped,
+          ops: p.ops || null,
+        };
+        if (--pending === 0) postJob(name, parts);
+      };
+      reader.onerror = function () {
+        pending = -1;
+        alert('Could not read ' + p.name + '’s DXF, so the job was not saved.');
+      };
+      reader.readAsArrayBuffer(p.file);
+    });
+  }
+
+  function currentJobSetup() {
+    return {
+      material: state.material,
+      thickness: state.thickness, thickness_text: state.thickness_text,
+      tool_diameter: state.tool_diameter, tool_diameter_text: state.tool_diameter_text,
+      mode: state.mode, z_datum: state.zDatum,
+      tab_spacing: state.tab_spacing,
+      max_pass_depth: state.max_pass_depth,
+      engrave: state.engrave,
+      chamfer: state.chamfer.on ? state.chamfer : null,
+      multitool: multiToolOn(),
+      tools: multiToolOn() ? (state.tools || null) : null,
+      stock: state.stock ? { id: state.stock.id, name: state.stock.name,
+                             width: state.stock.width, height: state.stock.height } : null,
+    };
+  }
+
+  function postJob(name, parts) {
+    fetch('/jobs/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, setup: currentJobSetup(), parts: parts }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.j && res.j.jobs) setSavedJobs(res.j.jobs);
+        alert(res.ok ? (res.j.message || 'Saved.')
+                     : (res.j.error || 'Could not save that job.'));
+      })
+      .catch(function (e) { alert('Could not reach the server to save the job: ' + e); });
+  }
+
+  /* Rebuild the wizard from a saved job. The DXFs come back as base64 and are turned
+     into real File objects, so every part goes through exactly the same path as a fresh
+     upload - one code path for "loaded" and "just dropped in" means a saved job cannot
+     drift into behaving differently from the job it was saved from. */
+  function openSavedJob(jobId) {
+    fetch('/jobs/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: jobId }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) { alert(res.j.error || 'Could not open that job.'); return; }
+        applySavedJob(res.j.job);
+      })
+      .catch(function (e) { alert('Could not reach the server to open the job: ' + e); });
+  }
+
+  function applySavedJob(job) {
+    var setup = job || {};
+    // Setup first, so every part is measured against the right material and tool.
+    if (setup.mode) {
+      var modeRadio = document.querySelector('input[name="mode"][value="' + setup.mode + '"]');
+      if (modeRadio && !modeRadio.disabled) { modeRadio.checked = true; state.mode = setup.mode; }
+    }
+    if (setup.material) {
+      var msel = $('#f-material');
+      if (msel) { msel.value = setup.material; state.material = setup.material; }
+    }
+    if (setup.thickness) {
+      state.thickness = setup.thickness;
+      state.thickness_text = setup.thickness_text || (setup.thickness + '"');
+      var tf = $('#f-thickness'); if (tf) tf.value = state.thickness_text;
+      state.thicknessTouched = true;
+    }
+    if (setup.tool_diameter) {
+      state.tool_diameter = setup.tool_diameter;
+      state.tool_diameter_text = setup.tool_diameter_text || (setup.tool_diameter + '"');
+      var tl = $('#f-tool'); if (tl) tl.value = state.tool_diameter_text;
+    }
+    if (setup.z_datum) {
+      state.zDatum = setup.z_datum;
+      var zr = document.querySelector('input[name="z_datum"][value="' + setup.z_datum + '"]');
+      if (zr) zr.checked = true;
+    }
+    state.engrave = !!setup.engrave;
+    var eb = $('#f-engrave'); if (eb) eb.checked = state.engrave;
+    if (setup.max_pass_depth) state.max_pass_depth = setup.max_pass_depth;
+    state.stock = null;
+    if (setup.stock && setup.stock.id) {
+      state.stock = stockList().filter(function (x) { return x.id === setup.stock.id; })[0]
+                    || setup.stock;
+      var ssel = $('#f-stock'); if (ssel) ssel.value = state.stock.id || '';
+    }
+
+    // Then the parts, through the ordinary upload path.
+    state.parts = [];
+    state.selectedIds = [];
+    var queue = (job.parts || []).slice();
+    var loaded = 0;
+    queue.forEach(function (saved) {
+      var file = dxfFileFromBase64(saved.dxf_base64, saved.name + '.dxf');
+      if (!file) return;
+      uploadDxf(file, function (part) {
+        if (part) {
+          part.name = saved.name || part.name;
+          part.rotation = saved.rotation || 0;
+          part.flipped = !!saved.mirror;
+          part.cx = saved.place_x; part.cy = saved.place_y;
+          if (saved.ops) part.ops = saved.ops;
+        }
+        if (++loaded === queue.length) {
+          renderParts();
+          partListChanged();
+          applyModeUI();
+          applyStockUI();
+          updateSummary();
+          refitView();
+          drawLayout();
+          gotoStep('layout');
+        }
+      });
+    });
+  }
+
+  function dxfFileFromBase64(b64, filename) {
+    try {
+      var binary = atob(b64 || ''), bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new File([bytes], filename, { type: 'application/dxf' });
+    } catch (e) {
+      return null;
     }
   }
 
@@ -2960,6 +3174,7 @@
     updateZDatumUI();
     renderBitPicker();
     renderStockPicker();
+    renderJobPicker();
     applyStockUI();
     updatePartsModeNote();
     updateSummary();

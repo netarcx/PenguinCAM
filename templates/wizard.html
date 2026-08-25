@@ -271,6 +271,22 @@
             <!-- ===== PARTS ===== -->
             <section class="step" data-step="parts" hidden>
                 <div class="panel-head"><h2>Parts</h2></div>
+                <div id="saved-jobs" hidden>
+                    <div class="jobs-row">
+                        <label class="field">
+                            <span>Saved jobs</span>
+                            <select id="f-job" autocomplete="off"></select>
+                        </label>
+                        <button type="button" class="btn small" id="btn-open-job">Open</button>
+                        <button type="button" class="btn small" id="btn-delete-job"
+                                title="Remove this saved job">&times;</button>
+                    </div>
+                    <p class="hint" id="job-note">
+                        A saved job brings back the whole nest: every part and its DXF,
+                        where it sits on the sheet, the material and the tool.
+                    </p>
+                </div>
+
                 <div id="upload-source">
                     <div id="dropzone" role="button" tabindex="0" aria-controls="f-dxf"
                          aria-label="Add a DXF file: drop one here, or activate to browse">
@@ -442,6 +458,8 @@
                         <button type="button" class="btn small" id="reset-view">Reset view</button>
                         <button type="button" class="btn small" id="btn-setup-sheet"
                                 title="A page to take to the machine">Setup sheet</button>
+                        <button type="button" class="btn small" id="btn-save-job"
+                                title="Save this nest to open and cut again">Save job</button>
                         <!-- The clearing toolpath fills a pocket completely, so on a tube
                              it hides the part it is cutting. Turning it off leaves the
                              model on its own. -->
@@ -530,6 +548,8 @@
         toolsWritable: {{ (tools_writable if tools_writable is defined else False)|tojson }},
         savedStock: {{ (saved_stock if saved_stock is defined else [])|tojson }},
         maxParts: {{ (max_parts_per_job if max_parts_per_job is defined else 60)|tojson }},
+        savedJobs: {{ (saved_jobs if saved_jobs is defined else [])|tojson }},
+        jobsWritable: {{ (jobs_writable if jobs_writable is defined else False)|tojson }},
         tubeDesigner: {{ (tube_designer_cfg if tube_designer_cfg is defined else {})|tojson }},
       };
     </script>

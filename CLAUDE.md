@@ -151,6 +151,7 @@ Detailed documentation lives in the `docs/` directory. **Read these before modif
 | `INTEGRATIONS_GUIDE.md` | Changing Onshape API calls or Google Drive upload logic |
 | `ONSHAPE_SETUP.md` | Updating the Onshape browser extension or import URL format |
 | `quick-reference-card.md` | Changing UI workflows or default settings that affect end users |
+| `PRODUCTION_FEATURES.md` | Changing the dry run, stock library, nesting, engraving, setup sheet or saved jobs (`stroke_font.py`, `job_library.py`, the `stock:` config block, `/jobs/*`, `/stock/*`) |
 
 ## Testing
 

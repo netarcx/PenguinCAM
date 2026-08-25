@@ -47,13 +47,10 @@ PenguinCAM is ready for real-world use:
 
 ## 🚀 Future Enhancements (in no particular order)
 
-### #1: Support multiple parts in a single job
+### ~~#1: Support multiple parts in a single job~~ — DONE
 
-**Priority:** Medium  
-**Effort:** Medium-High
-
-#### **Layout multiple instances of the same part on a single piece of stock**
-#### **Allow for multiple parts to be cut on one piece of stock in the same job**
+Multi-part nesting shipped, and now has auto-arrange (shelf packing), "fill sheet"
+(how many of these fit on this?), and a stock library to nest into.
 
 ### #2: Per-team branding
 
@@ -105,6 +102,23 @@ PenguinCAM is ready for real-world use:
 
 ---
 
+## ✅ Shipped since this list was written
+
+- **Dry run** — the same program raised clear of the work with the spindle off, for
+  proving a setup before committing to a cut. Given how much of this codebase has
+  never been cut on real stock (see #3.4), this is the one to use first.
+- **Stock library and offcuts** — named sheets to nest into, and "save offcut" so a
+  remnant gets written down instead of binned.
+- **Auto-arrange and fill sheet** — shelf packing, and an honest answer to "how many
+  fit?" by placing them.
+- **Engraved part names** — a single-stroke font cuts each part's name into its own
+  face, so a nest of twelve similar brackets is not a puzzle afterwards.
+- **Setup sheet** — a printable page for the machine: stock, tools in order, the
+  surface to zero on, the nest, and a pre-flight checklist.
+- **Saved jobs** — the whole nest, DXFs included, saved by name and opened again.
+- **Z datum choice** — zero on the sacrifice board or the top of the stock.
+- **Saved bits** — the cutters the shop owns, in the team config.
+
 ## 💡 Ideas for Consideration
 
 *(Not committed to roadmap yet, but worth exploring)*
@@ -114,6 +128,8 @@ PenguinCAM is ready for real-world use:
 - Export simulation as video/animated GIF
 - Integration with other CAD platforms (Fusion 360, Inventor)
 - Library of CNC machines
+- Multi-sheet jobs: when a nest does not fit one sheet, split it across several
+- Onshape assembly import: several parts in one go rather than face by face
 
 ---
 
@@ -130,5 +146,5 @@ Questions? Contact: Josh Sirota <penguincam@popcornpenguins.com>
 
 ---
 
-**Last Updated:** January 2026
+**Last Updated:** August 2026
 **Maintained by:** FRC Team 6238 Popcorn Penguins

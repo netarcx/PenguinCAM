@@ -82,6 +82,7 @@ from tooling import ToolingError
 # Local (offline, no-Onshape) mode. Reading the flag once at import keeps every gate
 # consistent for the life of the process.
 import local_mode
+import job_library
 LOCAL_MODE = local_mode.is_local_mode()
 if LOCAL_MODE:
     log("🐧 PenguinCAM running in LOCAL mode - Onshape sign-in is not required")
@@ -559,6 +560,8 @@ def _app_template_context():
         # The client fills sheets by adding copies; it has to stop where the server
         # stops, or "fill" hands back a job the next step refuses.
         'max_parts_per_job': MAX_PARTS_PER_JOB,
+        'jobs_writable': _jobs_writable(),
+        'saved_jobs': job_library.list_jobs(local_mode.find_local_config_path()),
         'default_material': team_config.default_material,
         # The shop's saved bits first, then the built-ins (tooling.merge_tool_library).
         'tool_library': tooling.merge_tool_library(team_config.saved_tools),
@@ -962,6 +965,105 @@ def delete_stock():
         return _stock_response(detail, status=500)
     _ensure_local_team_config(force=True)
     return _stock_response('Removed the stock from the team config.')
+
+
+def _jobs_response(message=None, status=200, extra=None):
+    """Every job route answers with the whole list, so the UI never merges anything."""
+    payload = {'success': status == 200,
+               'jobs': job_library.list_jobs(local_mode.find_local_config_path()),
+               'writable': _jobs_writable()}
+    if message:
+        payload['message' if status == 200 else 'error'] = message
+    payload.update(extra or {})
+    return jsonify(payload), status
+
+
+def _jobs_writable() -> bool:
+    """Saved jobs live beside the team config, so they need the same thing the config
+    needs: a local install with somewhere on disk to write."""
+    if not LOCAL_MODE:
+        return False
+    path = local_mode.find_local_config_path()
+    return bool(path) and os.access(os.path.dirname(os.path.abspath(path)), os.W_OK)
+
+
+@app.route('/jobs', methods=['GET'])
+@limiter.limit("60 per minute")
+def list_saved_jobs():
+    """Saved jobs, newest first, without their geometry."""
+    return _jobs_response()
+
+
+@app.route('/jobs/save', methods=['POST'])
+@limiter.limit("20 per minute")
+def save_saved_job():
+    """Save the current nest - setup, placements and every part's DXF - under a name.
+
+    The DXFs are stored WITH the job: one that depended on files still being in
+    someone's Downloads folder would not be saved at all.
+    """
+    if not _jobs_writable():
+        return _jobs_response('This copy of PenguinCAM has nowhere to save jobs.',
+                              status=409)
+    spec = request.get_json(silent=True) or {}
+    name = str(spec.get('name') or '').strip()
+    parts_in = spec.get('parts')
+    if not isinstance(parts_in, list) or not parts_in:
+        return _jobs_response('A job needs at least one part.', status=400)
+
+    parts = []
+    for part in parts_in:
+        if not isinstance(part, dict):
+            return _jobs_response('Each part must be an object.', status=400)
+        try:
+            blob = base64.b64decode(str(part.get('dxf_base64') or ''), validate=True)
+        except (ValueError, TypeError):
+            return _jobs_response(f'{part.get("name") or "A part"} did not arrive intact.',
+                                  status=400)
+        parts.append({'name': part.get('name'), 'dxf_bytes': blob,
+                      'place_x': part.get('place_x'), 'place_y': part.get('place_y'),
+                      'rotation': part.get('rotation'), 'mirror': part.get('mirror'),
+                      'ops': part.get('ops')})
+    try:
+        job_id, _ = job_library.save_job(local_mode.find_local_config_path(), name,
+                                         spec.get('setup') or {}, parts)
+    except job_library.JobLibraryError as exc:
+        return _jobs_response(str(exc), status=400)
+    except OSError as exc:
+        return _jobs_response(f'Could not write the job: {exc}', status=500)
+    return _jobs_response(f'Saved "{name}".', extra={'saved_id': job_id})
+
+
+@app.route('/jobs/open', methods=['POST'])
+@limiter.limit("30 per minute")
+def open_saved_job():
+    """One saved job, with its DXFs, ready for the wizard to rebuild."""
+    job_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
+    if not job_id:
+        return _jobs_response('Which job?', status=400)
+    try:
+        job = job_library.load_job(local_mode.find_local_config_path(), job_id)
+    except job_library.JobLibraryError as exc:
+        return _jobs_response(str(exc), status=404)
+    except (OSError, ValueError) as exc:
+        return _jobs_response(f'That job could not be read: {exc}', status=500)
+    return _jobs_response(extra={'job': job})
+
+
+@app.route('/jobs/delete', methods=['POST'])
+@limiter.limit("20 per minute")
+def delete_saved_job():
+    if not _jobs_writable():
+        return _jobs_response('This copy of PenguinCAM has nowhere to save jobs.',
+                              status=409)
+    job_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
+    try:
+        removed = job_library.delete_job(local_mode.find_local_config_path(), job_id)
+    except job_library.JobLibraryError as exc:
+        return _jobs_response(str(exc), status=400)
+    if not removed:
+        return _jobs_response('That job is not saved on this machine.', status=404)
+    return _jobs_response('Deleted the job.')
 
 
 @app.route('/config/refresh')
