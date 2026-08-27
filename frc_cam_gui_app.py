@@ -1420,10 +1420,11 @@ def process_file():
             # The generator cross-checks the two and warns when they disagree.
             tube_width, size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
             _detected_width, tube_length = _detect_tube_dims(input_path, rotation)
+            # Built outside the f-string: a backslash escape inside an f-string
+            # expression is Python 3.12+ syntax, and the deployment image runs 3.11.
+            span = 'unknown' if _detected_width is None else f'{_detected_width:.3f}"'
             log(f"📏 Tube face width {tube_width:.3f}\" from the declared {tube_size}; "
-                f"drawing spans "
-                f"{'unknown' if _detected_width is None else f'{_detected_width:.3f}\"'} "
-                f"in X")
+                f"drawing spans {span} in X")
             if tube_length is not None:
                 log(f"📏 Detected tube length (after {rotation}° rotation): "
                     f"{tube_length:.3f}\"")
