@@ -1325,7 +1325,10 @@ def process_file():
             # 23 holes down the centre of a 2" face instead of 69 in three rows, with no
             # error anywhere. It also reached the output filename, where a long value was
             # an unhandled ENAMETOOLONG 500.
-            if use_tube_pattern and tube_size not in VALID_TUBE_SIZES:
+            # Checked for a DRAWN face too, not only a pre-designed pattern: face 2 is
+            # mirrored about the declared width, so an unrecognised size would silently
+            # become _parse_tube_size's 1x1 answer and mirror a 2" face about 1".
+            if tube_size not in VALID_TUBE_SIZES:
                 return jsonify({'error': f'Unknown tube size {tube_size!r}. Expected one '
                                          f'of: {", ".join(sorted(VALID_TUBE_SIZES))}'}), 400
             # Finite and physical. These reach Z arithmetic directly: a negative height
@@ -1410,9 +1413,20 @@ def process_file():
             log(f"\U0001f4d0 Pre-designed {tube_size} pattern on a {tube_length:.3f}\" tube "
                 f"(face {tube_width:.3f}\")")
         elif is_aluminum_tube:
-            tube_width, tube_length = _detect_tube_dims(input_path, rotation)
-            if tube_width is not None:
-                log(f"📏 Detected tube dimensions (after {rotation}° rotation): {tube_width:.3f}\" x {tube_length:.3f}\"")
+            # The WIDTH comes from the tube size the operator selected, never from the
+            # drawing's bounding box: face 2 is mirrored about it, and a face whose
+            # features sit inboard (any ordinary hole pattern) measures narrower than
+            # the tube it goes on. The LENGTH is genuinely drawn, so that is measured.
+            # The generator cross-checks the two and warns when they disagree.
+            tube_width, size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
+            _detected_width, tube_length = _detect_tube_dims(input_path, rotation)
+            log(f"📏 Tube face width {tube_width:.3f}\" from the declared {tube_size}; "
+                f"drawing spans "
+                f"{'unknown' if _detected_width is None else f'{_detected_width:.3f}\"'} "
+                f"in X")
+            if tube_length is not None:
+                log(f"📏 Detected tube length (after {rotation}° rotation): "
+                    f"{tube_length:.3f}\"")
 
         # Generate suggested filename base (without extension or timestamp)
         if suggested_filename:
@@ -1724,16 +1738,19 @@ def process_file():
         # the summary chip and the program header disagree about what to load.
         if is_aluminum_tube and use_tube_pattern and pattern_mode == 'holes':
             parameters['tool_diameter'] = pattern_tool
-        if is_aluminum_tube and use_tube_pattern:
+        if is_aluminum_tube:
             parameters['tube_size'] = tube_size
-            parameters['tube_pattern'] = pattern_mode
+            parameters['tube_width'] = tube_width
             parameters['tube_length'] = tube_length
+        if is_aluminum_tube and use_tube_pattern:
+            parameters['tube_pattern'] = pattern_mode
 
         # Pattern warnings are advice, not failures - a pocket dropped because the tool
         # will not fit still leaves a machinable program, but the operator has to be told
         # that the lightening they asked for is not in the file.
-        if is_aluminum_tube and pattern_warnings:
-            response_data['warnings'] = list(pattern_warnings)
+        if is_aluminum_tube and (pattern_warnings or result.warnings):
+            response_data['warnings'] = list(pattern_warnings) + [
+                w for w in (result.warnings or []) if w not in pattern_warnings]
         if ignored_upload:
             # Discarding a file the user deliberately attached, silently, meant they
             # downloaded a program named after their part that contained none of it.

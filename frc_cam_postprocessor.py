@@ -7172,35 +7172,49 @@ class FRCPostProcessor:
         gcode.append(f'G0 Z{tube_safe_z:.4f}  ; Retract to safe height before any XY move')
         gcode.append('')
 
-        # Determine tube width for facing operations
-        if tube_width is None:
-            # Measured from the geometry, ALWAYS - not only when squaring. Face 2 is
-            # mirrored with X_new = tube_width - X_old, so a guessed width does not make
-            # the mirror approximate, it puts every face-2 feature at the wrong X. With
-            # the old default of 1.0 a 2" tube machined face 2 up to 1" off the near
-            # edge - into the jig.
-            tube_width = None
-            if True:
-                all_x_coords = []
-                if hasattr(self, 'holes'):
-                    for hole in self.holes:
-                        all_x_coords.append(hole['center'][0])
-                if hasattr(self, 'pockets'):
-                    for pocket in self.pockets:
-                        all_x_coords.extend([p[0] for p in pocket])
-                if hasattr(self, 'perimeter') and self.perimeter:
-                    all_x_coords.extend([p[0] for p in self.perimeter])
+        # Face 2 is mirrored with X_new = tube_width - X_old, so this number is not a
+        # nicety: get it wrong and every face-2 feature lands at the wrong X. The
+        # DECLARED width - the whitelisted tube size the operator picked - is the
+        # authority. The drawing's extents are only a cross-check, because a face whose
+        # features sit inboard (any ordinary hole pattern) measures narrower than the
+        # tube it goes on.
+        tube_warnings: List[str] = []
+        all_x_coords = []
+        if hasattr(self, 'holes'):
+            for hole in self.holes:
+                radius = hole.get('radius', hole.get('diameter', 0.0) / 2.0)
+                all_x_coords.extend([hole['center'][0] - radius,
+                                     hole['center'][0] + radius])
+        if hasattr(self, 'pockets'):
+            for pocket in self.pockets:
+                all_x_coords.extend([p[0] for p in pocket])
+        if hasattr(self, 'perimeter') and self.perimeter:
+            all_x_coords.extend([p[0] for p in self.perimeter])
+        measured_width = (max(all_x_coords) - min(all_x_coords)
+                          if len(all_x_coords) >= 2 else None)
+        if measured_width is not None and measured_width <= 0.1:
+            measured_width = None
 
-                if all_x_coords:
-                    calculated_width = max(all_x_coords) - min(all_x_coords)
-                    if calculated_width > 0.1:  # Only use if reasonable
-                        tube_width = calculated_width
-            if tube_width is None:
+        if tube_width is None:
+            if measured_width is None:
                 return PostProcessorResult(success=False, errors=[
                     'Could not measure the tube width from the drawing, and face 2 is '
                     'machined by mirroring about it. Pass the tube width explicitly '
                     '(--tube-width) rather than have every face-2 feature land at the '
                     'wrong X.'])
+            tube_width = measured_width
+            tube_warnings.append(
+                f'No tube width was given, so it was measured from the drawing as '
+                f'{tube_width:.3f}". Face 2 is mirrored about that number: if the '
+                f'drawing has no face outline the measurement is only as wide as the '
+                f'features, and every face-2 feature will be off by the difference.')
+        elif measured_width is not None and abs(measured_width - tube_width) > 0.05:
+            tube_warnings.append(
+                f'The drawing spans {measured_width:.3f}" in X but the declared tube '
+                f'width is {tube_width:.3f}". Face 2 is mirrored about the DECLARED '
+                f'width, which is right when the drawing simply has no face outline - '
+                f'but if the tube is really {measured_width:.3f}" wide, every face-2 '
+                f'feature will be off by {abs(measured_width - tube_width):.3f}".')
 
         # === PHASE 1: FIRST FACE (SQUARE + MACHINE PATTERN) ===
         gcode.append('( === PHASE 1: FIRST FACE === )')
@@ -7369,7 +7383,7 @@ class FRCPostProcessor:
             success=True,
             gcode='\n'.join(gcode),
             filename=filename,
-            warnings=[],
+            warnings=tube_warnings,
             stats={
                 'operation': 'tube_pattern',
                 'tube_height': tube_height,
