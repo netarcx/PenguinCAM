@@ -17,6 +17,9 @@ test:
 	@echo "Running system tests..."
 	@uv run python gcode_test.py --quiet
 	@echo ""
+	@echo "Checking the feeds model against the tuned presets..."
+	@uv run python validate_feeds_speeds.py
+	@echo ""
 	@echo "Auditing generated G-code (independent of the unit tests)..."
 	@uv run python gcode_audit.py
 	@echo ""
