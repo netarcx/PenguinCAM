@@ -288,14 +288,27 @@ class Tool:
         """Short operator-facing identity, safe for a G-code comment."""
         return sanitize_comment(f"T{self.slot} {self.name}", f"T{self.slot}")
 
+    #: What each tool type IS, in the words an operator (and the audit) reads. A tool
+    #: name is free text - "#7 drill", "1/8 EM", "spot" - so the program has to state
+    #: the kind separately, or nothing downstream can tell a twist drill from a cutter.
+    KIND_NAMES = {'endmill': 'end mill', 'drill': 'twist drill', 'vbit': 'V-bit'}
+
+    @property
+    def kind(self) -> str:
+        """This tool's type as a phrase, e.g. 'twist drill' or '90 deg V-bit'."""
+        name = self.KIND_NAMES.get(self.type, self.type)
+        if self.type == 'vbit':
+            return f"{self.included_angle:.0f} deg {name}"
+        return name
+
     def description(self) -> str:
         """The line this tool gets in the header's tool table."""
-        bits = [f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
-                f"{self.diameter:.4f} in diameter",
-                f"{self.flutes} flute" + ('s' if self.flutes != 1 else '')]
-        if self.type == 'vbit':
-            bits.append(f"{self.included_angle:.0f} deg V")
-        return ', '.join(bits)
+        return ', '.join([
+            f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
+            f"{self.diameter:.4f} in diameter",
+            f"{self.flutes} flute" + ('s' if self.flutes != 1 else ''),
+            self.kind,
+        ])
 
 
 @dataclass
@@ -1682,7 +1695,7 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
     """
     instructions = [f"Remove {previous.label}" ] if previous else []
     instructions += [
-        f"Install {nxt.label}, {nxt.diameter:.4f} in diameter",
+        f"Install {nxt.label}, {nxt.diameter:.4f} in diameter, {nxt.kind}",
         f"Re-zero G54 Z to {pp.z_zero_surface()} with the new tool, not with G92",
         "Do NOT change the X or Y zero",
     ]
@@ -1708,7 +1721,8 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
 
 def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                  timestamp: Optional[str] = None,
-                 suggested_filename: Optional[str] = None) -> PostProcessorResult:
+                 suggested_filename: Optional[str] = None,
+                 extra_warnings: Optional[Sequence[str]] = None) -> PostProcessorResult:
     """Stitch the ordered operation bodies into one program with manual tool changes."""
     import datetime
 
@@ -1719,6 +1733,7 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     # are kept: "this operation matched no features" is exactly what the person who
     # mistyped a size range needs to hear, and dropping the body would silence it.
     all_warnings = [w for b in bodies for w in b['warnings']]
+    all_warnings.extend(extra_warnings or [])
     bodies = [b for b in bodies if b['lines']]
     if not bodies:
         return PostProcessorResult(success=False,
@@ -1794,7 +1809,8 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                 gcode.extend(pp._generate_pause_and_park_gcode(
                     'PAUSE FOR FIXTURING', fixturing_here))
             if needs_change:   # very first tool: nothing to swap out, just say what to load
-                gcode.append(f"(Load {tool.label} before starting this program)")
+                gcode.append(f"(Load {tool.label}, {tool.kind}, before starting "
+                             f"this program)")
                 gcode.append("")
         current_tool = tool
 
@@ -2017,7 +2033,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         # so that is the earliest point the part is still solid stock. Multi-tool jobs
         # used to drop the engraving on the floor entirely while the summary said
         # "names engraved".
-        if job.engrave and part_index not in engraved:
+        # ...and on a body whose tool can actually WRITE. A twist drill has no
+        # peripheral cutting edge and no radial rigidity, and drilled holes are ordered
+        # first, so attaching to the literal first body loaded a drill, promised "axial
+        # plunge only", then fed it sideways at 75 IPM to draw the part name.
+        if job.engrave and part_index not in engraved and body['tool'].type != 'drill':
             engraved.add(part_index)
             lines, warnings = _engrave_lines(job, part, body['tool'].diameter)
             body['lines'] = lines + body['lines']
@@ -2029,6 +2049,17 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     if errors:
         return PostProcessorResult(success=False, errors=errors)
 
+    # A part machined entirely with drills has no tool that can write. Say so - a name
+    # that never got cut is exactly the kind of silence this feature exists to avoid.
+    job_warnings: List[str] = []
+    if job.engrave:
+        for index, part in enumerate(job.parts):
+            if index not in engraved:
+                job_warnings.append(
+                    f"{part.name}: the name was not engraved. Every operation on this "
+                    f"part uses a twist drill, which cannot cut sideways. Add an end "
+                    f"mill operation to engrave it.")
+
     # Order the held-back tab removals so the tool already in the spindle goes first; the
     # rest group by tool, so the run costs at most one change per perimeter tool.
     if deferred:
@@ -2037,7 +2068,8 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         bodies.extend(deferred)
 
     return assemble_job(job, bodies, timestamp=timestamp,
-                        suggested_filename=suggested_filename)
+                        suggested_filename=suggested_filename,
+                        extra_warnings=job_warnings)
 
 
 # --------------------------------------------------------------------------- job specs

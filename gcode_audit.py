@@ -72,9 +72,20 @@ def simulate(gcode):
                 'unsafe_after_m0': []}
     material_top = None
     z_known = False          # has the program actually said where Z is yet?
-    in_drill = False
     pending_g80 = 0
     just_resumed = False
+
+    # What is in the spindle, not what the section banner is called. Deriving "a drill
+    # is loaded" from the banner missed the engraving block entirely: it has a banner of
+    # its own, so a program that loaded a twist drill and then wrote the part name with
+    # it read as perfectly clean. The header's tool table says which slots are drills;
+    # the Load / Install lines and the section banners say which slot is in the spindle.
+    drill_slots = set()
+    for slot, kind in re.findall(r'\(\s*(T\d+) - .*?, ([a-z0-9 ]+)\)', gcode):
+        if 'twist drill' in kind:
+            drill_slots.add(slot)
+    loaded_slot = None
+    banner_drill = False
 
     for raw in gcode.splitlines():
         line = raw.split(';')[0]
@@ -83,8 +94,17 @@ def simulate(gcode):
             m = re.search(r'Z=(-?[\d.]+)', raw)
             if m:
                 material_top = float(m.group(1))
+        loading = re.search(r'\(\s*(?:Load|Install)\s+(T\d+)\b', raw)
+        if loading:
+            loaded_slot = loading.group(1)
         if raw.startswith('(===== '):
-            in_drill = 'DRILLING' in raw
+            banner_drill = 'DRILLING' in raw
+            # "(===== PERIMETER - plate - T2 1/8 endmill =====)": the tool is last.
+            in_section = re.findall(r'-\s*(T\d+)\b', raw)
+            if in_section:
+                loaded_slot = in_section[-1]
+        # A single-tool program has no tool table; its DRILLING banner is all there is.
+        in_drill = banner_drill if not drill_slots else loaded_slot in drill_slots
         if not code:
             continue
         words = dict((w[0], float(w[1])) for w in NUM.findall(code))
@@ -842,6 +862,20 @@ def main():
 
     for label in ('GEARBOX-L', 'Bracket (left) [v2]', 'ARM_2129#3'):
         audit(f'engrave/{label[:12]}', engraved_run(label))
+
+    # Engraving in a job whose FIRST operation is drilled. The name has to be cut by a
+    # milling tool, and the audit follows the tool that is actually in the spindle
+    # rather than the section banner - the engrave block has a banner of its own, which
+    # is precisely how a twist drill being fed sideways at 75 IPM read as clean.
+    audit('engrave/after-drilling', MultiToolJob(
+        material='plywood', thickness=0.25, engrave=True, machine_id='omio_x8',
+        tools=[Tool(1, '#7 drill', 0.201, 2, type='drill'),
+               Tool(2, '1/8 in endmill', 0.125, 2)],
+        parts=[PartOps(dxf_path=plate(holes=[(1.0, 1.0, 0.201), (5.0, 1.0, 0.201)]),
+                       name='GEARBOX-L', operations=[
+                           Operation('holes', 1, 'Drill'),
+                           Operation('perimeter', 2)])]),
+          expect_drill=True)
 
     # Dry runs. Nothing in the corpus audited one, so the audit had no independent
     # opinion on the feature whose entire job is to be trustworthy: 13 separate
