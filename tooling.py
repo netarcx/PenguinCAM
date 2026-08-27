@@ -1887,13 +1887,22 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     )
 
 
-def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[str]:
-    """Every machinable feature must be cut by exactly one operation.
+def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]
+                               ) -> Tuple[List[str], List[str]]:
+    """Every machinable feature must be CUT by exactly one operation.
+
+    Returns (errors, warnings).
 
     A feature no operation claims is silently absent from the program, and the operator
     discovers it with the part already off the machine - so this is an error, not a
     warning. A feature TWO operations claim gets cut twice, which at best wastes time and
     at worst bores an oversized hole.
+
+    A SPOT operation is not a cutting operation. It marks where a hole goes and leaves
+    the hole to be made elsewhere, so it neither satisfies coverage nor conflicts with
+    the op that does. Counting it did both harms at once: a plan of just
+    [spot, perimeter] passed in silence and shipped a plate of dimples, while
+    spot-then-drill - the documented workflow - was rejected as "would be cut twice".
 
     Both holes and pockets are checked, and neither check is conditional on the part
     happening to have an operation of that kind. Gating the hole check on "does this part
@@ -1901,7 +1910,8 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
     on a 5-hole plate passed silently and drilled nothing - the exact failure the check
     exists to prevent.
     """
-    errors = []
+    errors: List[str] = []
+    warnings: List[str] = []
 
     for kind, listed, select, describe in (
         ('hole', features['holes'], selected_hole_keys,
@@ -1913,11 +1923,14 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
             continue
         relevant = ('holes', 'interior') if kind == 'hole' else ('pockets', 'interior')
         by_key = {f['key']: f for f in listed}
-        claimed, double_claimed = set(), set()
+        claimed, double_claimed, spotted = set(), set(), set()
         for op in part.operations:
             if op.op_type not in relevant:
                 continue
             selected = select(features, op.scope)
+            if op.drill_purpose == drill_sizes.PURPOSE_SPOT:
+                spotted |= selected
+                continue
             double_claimed |= (selected & claimed)
             claimed |= selected
 
@@ -1927,14 +1940,23 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
                           f"operation and would be cut twice. Narrow one operation's scope.")
 
         unclaimed = [f for f in listed if f['key'] not in claimed]
-        if unclaimed:
-            what = ', '.join(sorted({describe(f) for f in unclaimed}))
+        spot_only = [f for f in unclaimed if f['key'] in spotted]
+        if spot_only:
+            what = ', '.join(sorted({describe(f) for f in spot_only}))
+            warnings.append(
+                f"{part.name}: {len(spot_only)} {kind}(s) are spotted but never drilled "
+                f"in this job ({what}). They will come off the machine as dimples - a "
+                f"drill press is assumed.")
+
+        missing = [f for f in unclaimed if f['key'] not in spotted]
+        if missing:
+            what = ', '.join(sorted({describe(f) for f in missing}))
             errors.append(
-                f"{part.name}: {len(unclaimed)} {kind}(s) are not cut by any operation "
+                f"{part.name}: {len(missing)} {kind}(s) are not cut by any operation "
                 f"({what}). Add a {'holes' if kind == 'hole' else 'pockets'} operation for "
                 f"them, or widen an existing operation's scope.")
 
-    return errors
+    return errors, warnings
 
 
 def _validate_profile_order(job: MultiToolJob) -> List[str]:
@@ -2028,8 +2050,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         surveys.append(features)
         errors.extend(f"{part.name}: {e}" for e in features['errors'])
 
+    coverage_warnings: List[str] = []
     for part, features in zip(job.parts, surveys):
-        errors.extend(_validate_feature_coverage(part, features))
+        part_errors, part_warnings = _validate_feature_coverage(part, features)
+        errors.extend(part_errors)
+        coverage_warnings.extend(part_warnings)
 
     # A profile is the cut that frees the part, and multi-tool is the first mode that can
     # schedule work AFTER one - so before generating anything, refuse any plan where a
@@ -2081,7 +2106,7 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
 
     # A part machined entirely with drills has no tool that can write. Say so - a name
     # that never got cut is exactly the kind of silence this feature exists to avoid.
-    job_warnings: List[str] = []
+    job_warnings: List[str] = list(coverage_warnings)
     if job.engrave:
         for index, part in enumerate(job.parts):
             if index not in engraved:

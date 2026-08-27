@@ -1690,7 +1690,7 @@ class TestWholePlanSuggestion(unittest.TestCase):
         dxf = make_mixed_dxf()
         features = self._survey(dxf)
         plan = tooling.suggest_tooling(features, mill_diameter=0.25)
-        errors = tooling._validate_feature_coverage(
+        errors, _ = tooling._validate_feature_coverage(
             PartOps(dxf_path=dxf, name='p', operations=plan['operations']), features)
         self.assertEqual(errors, [])
 
@@ -2418,4 +2418,71 @@ class TestTapDrillTolerance(unittest.TestCase):
         job = drill_job(0.1960, 0.1935, purpose='clearance', size_tolerance=0.010)
         with redirect_stdout(io.StringIO()):
             result = tooling.generate_multitool_job(job, timestamp='2026-08-20 12:00:00')
+        self.assertTrue(result.success, result.errors)
+
+
+class TestSpotDrillCoverage(unittest.TestCase):
+    """A spot drill does not make the hole - it marks where the hole goes.
+
+    Coverage counted a spot op as having "cut" a hole, so a plan of just
+    [spot, perimeter] passed in silence and shipped a plate of dimples. And because it
+    counted, spot + drill on the same holes - the documented workflow - was rejected as a
+    double claim that "would be cut twice".
+    """
+
+    HOLE = 0.1935
+
+    def _job(self, ops, tools=None):
+        return build_job(
+            tools=tools or [Tool(1, 'centre drill', 0.125, 2, type='drill'),
+                            Tool(2, '#10 drill', self.HOLE, 2, type='drill'),
+                            Tool(3, '1/4 endmill', 0.25, 2)],
+            parts=[PartOps(dxf_path=make_hole_dxf(self.HOLE, 2), name='plate',
+                           operations=ops)])
+
+    def test_spot_then_drill_is_legal(self):
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('holes', 2, 'Drill'),
+            Operation('perimeter', 3)]))
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('CENTRE DRILLING', result.gcode)
+        self.assertIn('DRILLING', result.gcode)
+
+    def test_spot_alone_warns_that_nothing_drilled_them(self):
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('perimeter', 3)]))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('spot', joined)
+        self.assertIn('drill press', joined, result.warnings)
+
+    def test_a_hole_no_operation_touches_is_still_an_error(self):
+        """Two holes; both ops take only the first. Nothing claims the second at
+        all, spot included, so it is missing rather than merely undrilled."""
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot',
+                      scope={'purpose': 'spot', 'indices': [0]}),
+            Operation('holes', 2, 'Drill', scope={'indices': [0]}),
+            Operation('perimeter', 3)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('not cut by any operation' in e for e in result.errors),
+                        result.errors)
+
+    def test_two_real_drill_ops_on_one_hole_is_still_an_error(self):
+        result = generate(self._job([
+            Operation('holes', 2, 'Drill'),
+            Operation('holes', 2, 'Drill again'),
+            Operation('perimeter', 3)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('more than one' in e for e in result.errors), result.errors)
+
+    def test_two_spot_ops_on_one_hole_is_not_a_double_claim(self):
+        """Spotting twice is pointless but harmless; it is not "cut twice"."""
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('holes', 1, 'Spot again', scope={'purpose': 'spot'}),
+            Operation('holes', 2, 'Drill'),
+            Operation('perimeter', 3)]))
         self.assertTrue(result.success, result.errors)
