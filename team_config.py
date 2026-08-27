@@ -937,7 +937,14 @@ class TeamConfig:
             machine_id: Machine ID, or None for default machine
 
         Returns:
-            Dictionary of material parameters (always complete, uses plywood fallback)
+            A complete dictionary of material parameters, or an EMPTY dict when nothing
+            - neither this team's config nor the built-in defaults - knows the material.
+
+            The empty dict matters. This used to hand back a full plywood preset
+            relabelled with whatever string was asked for, so `--material al6061`
+            produced a program that said "Al6061" and ran 75 IPM at 18000 RPM with none
+            of the aluminum protections. Refusing is the only safe answer for a
+            material nobody has quoted; the caller turns it into an error.
         """
         import feeds_speeds
 
@@ -954,16 +961,29 @@ class TeamConfig:
         # Get Team 6238 default for this material
         default_preset = TEAM_6238_DEFAULTS['materials'].get(material_key, {})
 
-        # If no default found, use plywood as universal fallback
         if not default_preset:
+            if not machine_material:
+                return {}
+            # The team explicitly configured this material, so their numbers are the
+            # authority; plywood only fills in the fields they left out.
             default_preset = TEAM_6238_DEFAULTS['materials']['plywood'].copy()
-            # Use custom name if provided, otherwise capitalize the material ID
             if 'name' not in machine_material:
                 machine_material = {**machine_material,
                                     'name': str(material).replace('_', ' ').title()}
 
         # Merge: defaults → machine overrides
         return {**default_preset, **machine_material}
+
+    def known_material_ids(self, machine_id: Optional[str] = None) -> List[str]:
+        """Every material id this config can produce a preset for, sorted.
+
+        Used to make a refusal actionable: telling someone their material is unknown is
+        only half the message, the other half is what they could have typed.
+        """
+        machine_config = self.get_machine_config(machine_id)
+        ids = set(TEAM_6238_DEFAULTS['materials'])
+        ids.update(machine_config.get('materials', {}))
+        return sorted(ids)
 
     # ========================================================================
     # Integration Settings

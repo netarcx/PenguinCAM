@@ -84,8 +84,75 @@ def sample_spline(spline, distance=CHORD_TOLERANCE):
         return []
 
 
+def _polyline_bulges(entity):
+    """Every vertex's bulge, or an empty list if the entity has none to give."""
+    try:
+        if entity.dxftype() == 'LWPOLYLINE':
+            return [float(p[2]) for p in entity.get_points('xyb')]
+        return [float(getattr(v.dxf, 'bulge', 0.0) or 0.0) for v in entity.vertices]
+    except Exception:
+        return []
+
+
+def _polyline_vertices(entity):
+    """The raw vertices, ignoring bulges."""
+    if entity.dxftype() == 'LWPOLYLINE':
+        return [(p[0], p[1]) for p in entity.get_points('xy')]
+    return [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+
+
+def polyline_points(entity, distance=CHORD_TOLERANCE):
+    """Points along an LWPOLYLINE / 2D POLYLINE, with any bulge arcs flattened.
+
+    A polyline vertex carries a `bulge`: the tangent of a quarter of the included angle
+    of a circular arc running to the NEXT vertex. Reading only x and y throws that away,
+    so a slot with semicircular ends loads as a plain rectangle and gets machined as one
+    - silently, with no warning and no visible difference in the program.
+
+    Onshape exports LINE and ARC entities and never showed this; Fusion 360,
+    SolidWorks, QCAD and LibreCAD all use bulges. Flattening uses the same chord
+    tolerance as every other curve here, so a bulged arc and a drawn ARC come out at
+    identical fidelity. Bulge-free polylines keep their exact vertices.
+    """
+    if not any(abs(b) > 1e-12 for b in _polyline_bulges(entity)):
+        return _polyline_vertices(entity)
+    try:
+        import ezdxf.path
+        points = [(p.x, p.y) for p in ezdxf.path.make_path(entity).flattening(distance)]
+    except Exception:
+        return _polyline_vertices(entity)
+    if len(points) > 1 and math.isclose(points[0][0], points[-1][0], abs_tol=1e-9) \
+            and math.isclose(points[0][1], points[-1][1], abs_tol=1e-9):
+        points = points[:-1]          # callers close the loop themselves
+    return points if len(points) >= 2 else _polyline_vertices(entity)
+
+
+def hatch_path_points(path, distance=CHORD_TOLERANCE):
+    """Points along one HATCH boundary path, with any bulge arcs flattened.
+
+    A HATCH polyline path stores (x, y, bulge) per vertex, the same as an LWPOLYLINE.
+    2.5D DXFs built from solid HATCH regions were read as x/y only, so a rounded
+    boundary came through as a polygon of its corner points.
+    """
+    vertices = list(getattr(path, 'vertices', ()) or ())
+    plain = [(v[0], v[1]) for v in vertices]
+    if not any(len(v) > 2 and abs(float(v[2])) > 1e-12 for v in vertices):
+        return plain
+    try:
+        import ezdxf.path
+        points = [(p.x, p.y) for p in
+                  ezdxf.path.from_hatch_boundary_path(path).flattening(distance)]
+    except Exception:
+        return plain
+    if len(points) > 1 and math.isclose(points[0][0], points[-1][0], abs_tol=1e-9) \
+            and math.isclose(points[0][1], points[-1][1], abs_tol=1e-9):
+        points = points[:-1]
+    return points if len(points) >= 3 else plain
+
+
 def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylines=(),
-                             snap=0.001, close_tolerance=0.1, on_open_loop=None):
+                             snap=0.001, close_tolerance=0.1, on_open_loop=None,
+                             on_welded_gap=None):
     """Sample and stitch open DXF entities into closed boundary paths.
 
     Shared endpoints in a CAD export land sub-micron apart, so exact-match stitching
@@ -101,6 +168,9 @@ def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylin
         on_open_loop: optional callback(coords, gap) invoked for a merged chain that did
             NOT close - lets callers warn about a dropped boundary loop (e.g. a lost
             perimeter) instead of silently discarding it.
+        on_welded_gap: optional callback(coords, gap) invoked for a chain that DID close,
+            but only because the gap was bridged. Closing a real gap moves an edge; the
+            caller decides how big a bridge is worth mentioning.
 
     Returns:
         List of closed paths, each a list of (x, y) points (no duplicated closing point).
@@ -125,7 +195,7 @@ def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylin
         if len(pts) >= 2:
             segments.append(LineString(pts))
     for polyline in polylines:
-        pts = [snap_point(p[0], p[1]) for p in polyline.get_points('xy')]
+        pts = [snap_point(x, y) for x, y in polyline_points(polyline)]
         if len(pts) >= 2:
             segments.append(LineString(pts))
 
@@ -145,6 +215,8 @@ def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylin
             if coords[0] == coords[-1]:
                 coords = coords[:-1]
             closed_paths.append(coords)
+            if gap > 0 and on_welded_gap is not None:
+                on_welded_gap(coords, gap)
         elif on_open_loop is not None:
             on_open_loop(coords, gap)
     return closed_paths

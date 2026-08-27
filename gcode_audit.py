@@ -72,9 +72,20 @@ def simulate(gcode):
                 'unsafe_after_m0': []}
     material_top = None
     z_known = False          # has the program actually said where Z is yet?
-    in_drill = False
     pending_g80 = 0
     just_resumed = False
+
+    # What is in the spindle, not what the section banner is called. Deriving "a drill
+    # is loaded" from the banner missed the engraving block entirely: it has a banner of
+    # its own, so a program that loaded a twist drill and then wrote the part name with
+    # it read as perfectly clean. The header's tool table says which slots are drills;
+    # the Load / Install lines and the section banners say which slot is in the spindle.
+    drill_slots = set()
+    for slot, kind in re.findall(r'\(\s*(T\d+) - .*?, ([a-z0-9 ]+)\)', gcode):
+        if 'twist drill' in kind:
+            drill_slots.add(slot)
+    loaded_slot = None
+    banner_drill = False
 
     for raw in gcode.splitlines():
         line = raw.split(';')[0]
@@ -83,8 +94,17 @@ def simulate(gcode):
             m = re.search(r'Z=(-?[\d.]+)', raw)
             if m:
                 material_top = float(m.group(1))
+        loading = re.search(r'\(\s*(?:Load|Install)\s+(T\d+)\b', raw)
+        if loading:
+            loaded_slot = loading.group(1)
         if raw.startswith('(===== '):
-            in_drill = 'DRILLING' in raw
+            banner_drill = 'DRILLING' in raw
+            # "(===== PERIMETER - plate - T2 1/8 endmill =====)": the tool is last.
+            in_section = re.findall(r'-\s*(T\d+)\b', raw)
+            if in_section:
+                loaded_slot = in_section[-1]
+        # A single-tool program has no tool table; its DRILLING banner is all there is.
+        in_drill = banner_drill if not drill_slots else loaded_slot in drill_slots
         if not code:
             continue
         words = dict((w[0], float(w[1])) for w in NUM.findall(code))
@@ -188,6 +208,129 @@ def check_offset_reset_before_motion(name, lines):
 
 
 
+#: Where a facing / cut-to-length block starts, and what ends it.
+TUBE_BLOCK_START = re.compile(r'^\(\s*(?:Tube facing:|Cut to length at Y=)')
+TUBE_BLOCK_END = re.compile(
+    r'^\(\s*(?:Machine pattern|=== PHASE|=== CUT TUBE|Square tube end)|^M[0-9]')
+
+
+def check_tube_wall_rapids(name, lines, tube_width, tube_height, wall, tool_diameter):
+    """Simulate the tube cross-section and flag rapids that enter standing material.
+
+    This is the audit gap that let the walls-only rapid-plunge bug ship. The generator
+    used to treat every pass after the first as "the middle is hollow" - but the TOP
+    WALL of box tube spans the full width, and with a small cutter the first pass does
+    not necessarily reach past it. The rapid then went through solid 6061 at mid-span.
+
+    The model is a slice through the tube at the cutting plane:
+
+      * columns outside 0..tube_width are air;
+      * the two side-wall columns are solid all the way down;
+      * every other column carries the top wall, solid from the top of the tube down
+        to `tube_height - wall`, and nothing below that.
+
+    Cutting moves lower the floor of each column they sweep (tool radius included).
+    A rapid may not put the tool tip below a column's floor while material still
+    stands there.
+
+    The program's own claim is checked too: a pass labelled "walls only" is asserting
+    that the middle is open, and that assertion has to be earned by a previous pass
+    having reached past the wall.
+    """
+    radius = tool_diameter / 2.0
+    step = 0.005
+    eps = 1e-6
+
+    for kind, count, depth in re.findall(
+            r'\( (Roughing|Finishing): (\d+) passes of ([\d.]+)" each', '\n'.join(lines)):
+        depth = float(depth)
+        for raw in lines:
+            m = re.search(rf'\( {kind} pass (\d+)/{count} .*- walls only \)', raw)
+            if not m:
+                continue
+            cleared = (int(m.group(1)) - 1) * depth
+            if cleared < wall + eps:
+                fail(name,
+                     f'{kind.lower()} pass {m.group(1)} claims walls only after '
+                     f'{cleared:.4f}" of depth, but the top wall is {wall:.4f}" thick')
+
+    blocks = []
+    current = None
+    for raw in lines:
+        text = raw.strip()
+        if TUBE_BLOCK_START.match(text):
+            current = []
+            blocks.append(current)
+            continue
+        if current is not None and TUBE_BLOCK_END.match(text):
+            current = None
+            continue
+        if current is not None:
+            current.append(raw)
+
+    for block in blocks:
+        moves = []
+        x = z = None
+        max_z = -1e9
+        for raw in block:
+            code = re.sub(r'\(.*?\)', '', raw).split(';')[0].strip()
+            if not code:
+                continue
+            head = code.split()[0]
+            if head not in ('G0', 'G1', 'G2', 'G3'):
+                continue
+            words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+            nx = words.get('X', x if x is not None else 0.0)
+            nz = words.get('Z', z if z is not None else 0.0)
+            max_z = max(max_z, nz)
+            moves.append((head, nx, nz, code))
+            x, z = nx, nz
+        if not moves:
+            continue
+
+        # z_safe is the block's own retract height, 0.25" above the tube. Deriving the
+        # tube top from the program keeps this honest for dry runs, where the whole
+        # tube frame is lifted.
+        z_top = max_z - 0.25
+        wall_bottom = z_top - wall
+
+        def columns(a, b):
+            lo, hi = min(a, b) - radius, max(a, b) + radius
+            lo = max(lo, 0.0)
+            hi = min(hi, tube_width)
+            if hi < lo:
+                return []
+            n = int((hi - lo) / step) + 1
+            return [lo + i * step for i in range(n)]
+
+        floors = {}
+
+        def floor_of(c):
+            return floors.get(round(c / step), z_top)
+
+        def set_floor(c, value):
+            key = round(c / step)
+            floors[key] = min(floors.get(key, z_top), value)
+
+        x, z = moves[0][1], max_z
+        for head, nx, nz, code in moves:
+            tip = min(z, nz)
+            if head == 'G0':
+                for c in columns(x, nx):
+                    f = floor_of(c)
+                    side_wall = c <= wall + eps or c >= tube_width - wall - eps
+                    standing = f > wall_bottom + eps
+                    if tip < f - eps and (side_wall or standing):
+                        fail(name,
+                             f'rapid to Z{nz:.4f} at X{nx:.4f} enters standing tube '
+                             f'material, that column is only cleared to Z{f:.4f}: {code}')
+                        break
+            else:
+                for c in columns(x, nx):
+                    set_floor(c, tip)
+            x, z = nx, nz
+
+
 def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
                cut_to_length=False, mode='holes', tool=None, wall=0.0625):
     """Audit a pre-designed tube pattern program.
@@ -219,10 +362,11 @@ def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
     if not result.success:
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
-    _check_tube_program(name, result)
+    _check_tube_program(name, result, face_width, tube_height, wall, tool)
 
 
-def _check_tube_program(name, result):
+def _check_tube_program(name, result, tube_width=None, tube_height=None, wall=None,
+                        tool_diameter=None):
     """The frame-independent checks every tube program must pass, whichever path built
     it. Shared by the fixed patterns and by custom designs so neither can drift into
     being audited less than the other."""
@@ -231,6 +375,9 @@ def _check_tube_program(name, result):
 
     check_text_rules(name, lines)
     check_offset_reset_before_motion(name, lines)
+    if None not in (tube_width, tube_height, wall, tool_diameter):
+        check_tube_wall_rapids(name, lines, tube_width, tube_height, wall,
+                               tool_diameter)
     if 'REQUIRED ALUMINUM PREFLIGHT' not in g:
         fail(name, 'tube aluminum program has no mandatory preflight')
     if 'continuous manual air blast' not in g and 'flow is aimed and chips can escape' not in g:
@@ -302,7 +449,7 @@ def audit_tube_design(name, design, face_width, tube_length, tube_height,
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
 
-    _check_tube_program(name, result)
+    _check_tube_program(name, result, face_width, tube_height, wall, tool)
 
     g = result.gcode
     if 'twist drill' in g:
@@ -313,6 +460,175 @@ def audit_tube_design(name, design, face_width, tube_length, tube_height,
     # with a 0.157 end mill into 1.125 of bore is the bug this path exists to avoid.
     if any(abs(h['diameter'] - 1.125) < 1e-6 for h in pp.holes) and 'Helical entry' not in g:
         fail(name, 'a 1.125" bearing bore was cut without a helical entry')
+
+
+def _point_to_segment(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def check_standing_tabs(name, gcode):
+    """Do the tabs really stand as tall as the program says they do?
+
+    A tab is the only thing holding a profiled part while the machine keeps cutting, and
+    the program states its own claim out loud: every `; Tab N start` lifts the cutter to
+    the top of the standing tab. The claim is checkable - nothing before the removal
+    pass may cut BELOW that Z at a tab.
+
+    It did not hold. Only the final pass lifted, so on 5-pass 1/4" aluminum the four
+    intermediate passes milled straight through the tab zones and the tabs ended up one
+    pass-depth tall - 0.054" of a designed 0.15". This audits the emitted program rather
+    than the generator, which is how it can disagree with the code that wrote it.
+    """
+    lines = gcode.splitlines()
+    removal = next((i for i, l in enumerate(lines) if 'TAB REMOVAL PASS' in l), None)
+    if removal is None:
+        return
+
+    # Where each tab is, from the removal pass's own moves.
+    paths, current = [], None
+    for raw in lines[removal:]:
+        mx = re.search(r'X(-?[\d.]+)', raw)
+        my = re.search(r'Y(-?[\d.]+)', raw)
+        if 'tab start (in kerf)' in raw and mx and my:
+            if current and len(current) > 1:
+                paths.append(current)
+            current = [(float(mx.group(1)), float(my.group(1)))]
+        elif 'Cut through tab' in raw and current is not None and mx and my:
+            point = (float(mx.group(1)), float(my.group(1)))
+            if point != current[-1]:
+                current.append(point)
+    if current and len(current) > 1:
+        paths.append(current)
+    unique = {}
+    for path in paths:
+        unique.setdefault(path[0], path)
+    paths = list(unique.values())
+    if not paths:
+        return
+
+    centres = []
+    for path in paths:
+        spans = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(path, path[1:])]
+        half = sum(spans) / 2.0
+        walked = 0.0
+        for (a, b), span in zip(zip(path, path[1:]), spans):
+            if span and walked + span >= half:
+                t = (half - walked) / span
+                centres.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+                break
+            walked += span
+        else:
+            centres.append(path[len(path) // 2])
+
+    # The tab top the program itself announces.
+    tops = [float(re.search(r'Z(-?[\d.]+)', l).group(1)) for l in lines[:removal]
+            if re.search(r';\s*Tab (?:\d+ start|lift during ramp)', l)
+            and re.search(r'Z(-?[\d.]+)', l)]
+    if not tops:
+        fail(name, 'a tab-removal pass exists but no pass ever lifted over a tab')
+        return
+    declared_top = min(tops)
+
+    floors = {c: 1e9 for c in centres}
+    radius = 0.0
+    in_chamfer = False
+    x = y = z = None
+    previous = None
+    for raw in lines[:removal]:
+        found = (re.search(r'\(Tool: ([\d.]+)"', raw)
+                 or re.search(r'\(Tool ([\d.]+) in diameter', raw))
+        if found:
+            radius = float(found.group(1)) / 2.0
+        if raw.startswith('(===== '):
+            # A chamfer deliberately breaks the top edge all the way round, tabs
+            # included. It is a few thou deep by design and says nothing about whether
+            # the tab still holds the part.
+            in_chamfer = 'CHAMFER' in raw.upper() or 'DEBURR' in raw.upper()
+        if in_chamfer:
+            previous = None
+            continue
+        code = re.sub(r'\(.*?\)', '', raw.split(';')[0]).strip()
+        m = re.match(r'^(G0|G1|G2|G3)\b', code)
+        if not m:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        x, y, z = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        if None not in (x, y, z) and previous is not None and None not in previous:
+            if m.group(1) != 'G0':
+                for centre in centres:
+                    # Strictly inside the cutter's sweep. A tool tangent at the tab
+                    # centre is the boundary case that says the tab is exactly as wide
+                    # as the cutter, which is a tab-width question, not a height one.
+                    if _point_to_segment(centre[0], centre[1], previous[0], previous[1],
+                                         x, y) < radius - 1e-4:
+                        floors[centre] = min(floors[centre], previous[2], z)
+        previous = (x, y, z)
+
+    for centre, floor in floors.items():
+        if floor < 1e8 and floor < declared_top - 1e-4:
+            fail(name,
+                 f'the tab at ({centre[0]:.3f}, {centre[1]:.3f}) is cut to Z{floor:.4f} '
+                 f'but the program lifts to Z{declared_top:.4f} over it - it stands '
+                 f'{declared_top - floor:.4f}" less than the program claims')
+            return
+
+
+def audit_island_pocket(name, outer, island, tool=0.25, thickness=0.25):
+    """Audit the island-aware pocket path: does anything cut through the island?
+
+    The pocket generator that handles islands linked its contour rings with a bare feed
+    move at full depth. Only CIRCULAR islands were diverted to the spiral clearer, so a
+    rectangular one was fed straight across. This drives the generator directly with a
+    known island and checks every cutting move against it - the audit cannot infer where
+    an island is from the G-code, so the geometry has to be supplied here.
+    """
+    from shapely.geometry import LineString, Polygon
+
+    global checked
+    checked += 1
+    with redirect_stdout(io.StringIO()):
+        pp = FRCPostProcessor(thickness, tool)
+        pp.apply_material_preset('plywood')
+        pp.material_top = thickness
+        pp.cut_depth = -0.008
+        lines = pp._generate_pocket_gcode_from_polygon(Polygon(outer, [island]))
+    if not lines:
+        fail(name, 'the island-aware pocket produced no toolpath')
+        return
+    check_text_rules(name, lines)
+
+    keep = Polygon(island).buffer(pp.tool_radius - 1e-3)
+    x = y = None
+    z = thickness + 1.0
+    previous = None
+    crossings = 0
+    first = ''
+    for raw in lines:
+        code = re.sub(r'\(.*?\)', '', raw.split(';')[0]).strip()
+        m = re.match(r'^(G0|G1|G2|G3)\b', code)
+        if not m:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        x, y, z = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        if (m.group(1) != 'G0' and previous is not None and None not in previous
+                and None not in (x, y) and min(previous[2], z) < pp.material_top - 1e-9
+                and keep.intersects(LineString([(previous[0], previous[1]), (x, y)]))):
+            crossings += 1
+            first = first or code
+        previous = (x, y, z)
+    if crossings:
+        fail(name, f'{crossings} cutting move(s) cross the island: {first[:60]}')
+
+    # ...and it still has to CLEAR the pocket, or "no gouges" is trivially satisfied.
+    xs = [float(v) for raw in lines
+          for v in re.findall(r'\bX(-?[\d.]+)', raw.split(';')[0])]
+    left, right = min(p[0] for p in island), max(p[0] for p in island)
+    if not any(v < left for v in xs) or not any(v > right for v in xs):
+        fail(name, 'the pocket was not cleared on both sides of the island')
 
 
 def max_lateral_engagement(gcode):
@@ -425,6 +741,8 @@ def audit(name, job, expect_drill=False, max_engagement=None):
         if bite > max_engagement * 1.35 + 1e-6:
             fail(name, f'a straight feed move bites {bite:.4f}" of material, far over '
                        f'the {max_engagement:.4f}" per-pass limit: {line[:60]}')
+
+    check_standing_tabs(name, g)
 
     # --- header claims vs reality ---------------------------------------------------
     sim = simulate(g)
@@ -716,6 +1034,20 @@ def main():
     for label in ('GEARBOX-L', 'Bracket (left) [v2]', 'ARM_2129#3'):
         audit(f'engrave/{label[:12]}', engraved_run(label))
 
+    # Engraving in a job whose FIRST operation is drilled. The name has to be cut by a
+    # milling tool, and the audit follows the tool that is actually in the spindle
+    # rather than the section banner - the engrave block has a banner of its own, which
+    # is precisely how a twist drill being fed sideways at 75 IPM read as clean.
+    audit('engrave/after-drilling', MultiToolJob(
+        material='plywood', thickness=0.25, engrave=True, machine_id='omio_x8',
+        tools=[Tool(1, '#7 drill', 0.201, 2, type='drill'),
+               Tool(2, '1/8 in endmill', 0.125, 2)],
+        parts=[PartOps(dxf_path=plate(holes=[(1.0, 1.0, 0.201), (5.0, 1.0, 0.201)]),
+                       name='GEARBOX-L', operations=[
+                           Operation('holes', 1, 'Drill'),
+                           Operation('perimeter', 2)])]),
+          expect_drill=True)
+
     # Dry runs. Nothing in the corpus audited one, so the audit had no independent
     # opinion on the feature whose entire job is to be trustworthy: 13 separate
     # mutations of the dry-run code produced no audit finding at all. The frame here is
@@ -796,6 +1128,21 @@ def main():
                            height, mode=mode, square_end=mill)
     audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, mode='lightening',
                square_end=True, cut_to_length=True)
+    # Thick-wall 1x1 with a small cutter: the per-pass depth (0.101") is LESS than the
+    # 0.125" wall, so the first pass does not clear the top wall. This is the geometry
+    # that made the walls-only branch rapid through solid 6061 at mid-span, and it is
+    # here so the cross-section check has something real to prove.
+    audit_tube('tube/1x1/thick-wall/facing+cut', 1.0, 12.0, 1.0, mode='lightening',
+               tool=0.125, wall=0.125, square_end=True, cut_to_length=True)
+
+    # Pockets with a standing island, square and rectangular - the shapes the circular
+    # ring detector does NOT divert, and so the ones that were gouged.
+    audit_island_pocket('pocket/island/square',
+                        [(0, 0), (4, 0), (4, 3), (0, 3)],
+                        [(1.5, 1.0), (2.5, 1.0), (2.5, 2.0), (1.5, 2.0)])
+    audit_island_pocket('pocket/island/long',
+                        [(0, 0), (6, 0), (6, 3), (0, 3)],
+                        [(1.0, 1.2), (5.0, 1.2), (5.0, 1.8), (1.0, 1.8)], tool=0.157)
 
     # Custom designs: a mixed-size face (which no single drill could make), the same
     # design on a narrow face, and one that also squares the end - allowed here because

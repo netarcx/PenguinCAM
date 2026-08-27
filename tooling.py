@@ -288,14 +288,27 @@ class Tool:
         """Short operator-facing identity, safe for a G-code comment."""
         return sanitize_comment(f"T{self.slot} {self.name}", f"T{self.slot}")
 
+    #: What each tool type IS, in the words an operator (and the audit) reads. A tool
+    #: name is free text - "#7 drill", "1/8 EM", "spot" - so the program has to state
+    #: the kind separately, or nothing downstream can tell a twist drill from a cutter.
+    KIND_NAMES = {'endmill': 'end mill', 'drill': 'twist drill', 'vbit': 'V-bit'}
+
+    @property
+    def kind(self) -> str:
+        """This tool's type as a phrase, e.g. 'twist drill' or '90 deg V-bit'."""
+        name = self.KIND_NAMES.get(self.type, self.type)
+        if self.type == 'vbit':
+            return f"{self.included_angle:.0f} deg {name}"
+        return name
+
     def description(self) -> str:
         """The line this tool gets in the header's tool table."""
-        bits = [f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
-                f"{self.diameter:.4f} in diameter",
-                f"{self.flutes} flute" + ('s' if self.flutes != 1 else '')]
-        if self.type == 'vbit':
-            bits.append(f"{self.included_angle:.0f} deg V")
-        return ', '.join(bits)
+        return ', '.join([
+            f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
+            f"{self.diameter:.4f} in diameter",
+            f"{self.flutes} flute" + ('s' if self.flutes != 1 else ''),
+            self.kind,
+        ])
 
 
 @dataclass
@@ -354,7 +367,69 @@ class Operation:
                 self.scope['width'] = _positive_finite(self.scope.get('width', 0.02), 'width')
             except (TypeError, ValueError) as exc:
                 raise ToolingError(f"Chamfer {self.label!r} has a bad width: {exc}") from exc
+        self._validate_scope_numbers()
         self.name = str(self.name or OP_LABELS[self.op_type])
+
+    #: Deepest a spot/centre drill may go, whatever the stock. A spot only has to break
+    #: the surface enough to stop the twist drill walking; anything deeper is either a
+    #: typo or a job for the drill itself.
+    MAX_SPOT_DEPTH = 0.25
+
+    #: Included point angles a real twist drill is ground to. 118 is the general-purpose
+    #: default and 135 the split point; outside this band the tip-length compensation
+    #: stops being a small correction and starts driving the tool through the table.
+    MIN_POINT_ANGLE = 60.0
+    MAX_POINT_ANGLE = 150.0
+
+    #: Every numeric scope key, and whether zero is allowed. `float(raw)` with no check
+    #: was how `spot_depth: 100` reached the machine as a commanded 99.75 in feed move
+    #: and `point_angle: 5` put the final peck 2.2 in below the sacrifice board - both
+    #: in programs that reported success.
+    _NUMERIC_SCOPE_FIELDS = ('spot_depth', 'point_angle', 'size_tolerance',
+                             'min_diameter', 'max_diameter', 'min_area', 'max_area')
+
+    def _validate_scope_numbers(self) -> None:
+        """Check every number in `scope` before anything downstream reads it."""
+        for key in self._NUMERIC_SCOPE_FIELDS:
+            raw = self.scope.get(key)
+            if raw is None:
+                continue
+            if key == 'point_angle':
+                self.scope[key] = self._checked_point_angle(raw)
+                continue
+            try:
+                value = _positive_finite(raw, key)
+            except (TypeError, ValueError) as exc:
+                raise ToolingError(
+                    f"Operation {self.label!r} has a bad {key}: {exc}") from exc
+            self.scope[key] = value
+
+        depth = self.scope.get('spot_depth')
+        if depth is not None and depth > self.MAX_SPOT_DEPTH:
+            raise ToolingError(
+                f"Operation {self.label!r} asks for a spot_depth of {depth:g} in. A "
+                f"centre drill only marks the location; anything past "
+                f"{self.MAX_SPOT_DEPTH:g} in is a drilling operation, not a spot.")
+
+    def _checked_point_angle(self, raw: Any) -> float:
+        """One message for every way a point angle can be wrong, and it names the range.
+
+        The tip-length compensation divides by tan(angle / 2), so a small angle is not a
+        small error: `point_angle: 5` computed a tip 1.4 in long and put the final peck
+        at G1 Z-2.2239, two inches below the sacrifice board, in a program that reported
+        success.
+        """
+        bad = (f"Operation {self.label!r} has a point_angle of {raw!r}. A twist drill's "
+               f"included point angle must be a number between {self.MIN_POINT_ANGLE:g} "
+               f"and {self.MAX_POINT_ANGLE:g} degrees; 118 is the general-purpose grind "
+               f"and 135 the split point.")
+        try:
+            angle = _finite(raw, 'point_angle')
+        except (TypeError, ValueError) as exc:
+            raise ToolingError(bad) from exc
+        if not (self.MIN_POINT_ANGLE <= angle <= self.MAX_POINT_ANGLE):
+            raise ToolingError(bad)
+        return angle
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Operation':
@@ -406,9 +481,12 @@ class Operation:
 
     @property
     def spot_depth(self) -> Optional[float]:
-        """How deep a spot/centre drill goes. None = derive from the tool diameter."""
-        raw = self.scope.get('spot_depth')
-        return float(raw) if raw else None
+        """How deep a spot/centre drill goes. None = derive from the tool diameter.
+
+        Already range-checked by `_validate_scope_numbers`; nothing unvalidated can
+        reach here.
+        """
+        return self.scope.get('spot_depth')
 
     @property
     def drill_point_angle(self) -> Optional[float]:
@@ -416,9 +494,9 @@ class Operation:
 
         It sets how much deeper than the stock a through hole must go for the exit to be
         full diameter, so a 135 deg split point drills measurably shallower than a 118.
+        Range-checked at parse time - see `_validate_scope_numbers`.
         """
-        raw = self.scope.get('point_angle')
-        return float(raw) if raw else None
+        return self.scope.get('point_angle')
 
 
 @dataclass
@@ -499,6 +577,14 @@ class MultiToolJob:
                 if op.tool_slot not in slots:
                     raise ToolingError(f"Operation {op.label!r} on {part.name!r} asks for "
                                        f"T{op.tool_slot}, which is not in the tool list")
+                # The absolute cap lives on Operation; the stock is only known here.
+                spot = op.spot_depth
+                if spot is not None and spot > self.thickness:
+                    raise ToolingError(
+                        f"Operation {op.label!r} on {part.name!r} asks for a spot_depth "
+                        f"of {spot:g} in in {self.thickness:g} in stock. A spot that "
+                        f"goes through the material is a drilled hole, and this one "
+                        f"would cut the table.")
 
     def tool(self, slot: int) -> Tool:
         for t in self.tools:
@@ -536,12 +622,32 @@ class MultiToolJob:
 
 # ------------------------------------------------------------------------- feeds/speeds
 
-def resolve_feeds_material(material: str) -> str:
-    """Map a PenguinCAM material id onto a `feeds_speeds` material key."""
+def resolve_feeds_material(material: str, config: Optional[TeamConfig] = None,
+                           machine_id: Optional[str] = None) -> Optional[str]:
+    """Map a PenguinCAM material id onto a `feeds_speeds` material key.
+
+    Three outcomes, and the difference between them matters:
+
+    * a key, when the feeds model carries numbers for this material;
+    * ``None``, when it does not but the TEAM CONFIG defines a preset. Those are the
+      team's own tested feeds and the caller must use them as they stand. Falling back
+      to ``'plywood'`` here re-derived brass, delrin and garolite from wood's chipload
+      model and overwrote the tuned preset with it;
+    * ``ToolingError``, when nothing knows the material at all. There is no safe guess.
+    """
     key = feeds_speeds.canonical_material_key(material)
     if key is None:
         key = FEEDS_MATERIAL_ALIASES.get(str(material or '').lower(), '')
-    return key if key in feeds_speeds.MATERIALS else 'plywood'
+    if key in feeds_speeds.MATERIALS:
+        return key
+    cfg = config or TeamConfig()
+    if cfg.get_material_preset(material, machine_id):
+        return None
+    known = sorted(set(feeds_speeds.MATERIALS) | set(cfg.known_material_ids(machine_id)))
+    raise ToolingError(
+        f"Unknown material {material!r}: neither the feeds model nor the team config "
+        f"has numbers for it, and a guessed feed rate is how bits break. Known "
+        f"materials: {', '.join(known)}.")
 
 
 def resolve_feeds_machine(machine_id: Optional[str]) -> str:
@@ -552,7 +658,8 @@ def resolve_feeds_machine(machine_id: Optional[str]) -> str:
 
 
 def compute_tool_feeds(tool: Tool, material: str, machine_id: Optional[str],
-                       op_type: str, feeds_machine: Optional[str] = None
+                       op_type: str, feeds_machine: Optional[str] = None,
+                       config: Optional[TeamConfig] = None
                        ) -> Tuple[Dict[str, Any], List[str]]:
     """Derive this tool's feeds/speeds for this operation.
 
@@ -570,7 +677,23 @@ def compute_tool_feeds(tool: Tool, material: str, machine_id: Optional[str],
         (resolve_feeds_machine(candidate) for candidate in (feeds_machine, machine_id)
          if candidate and str(candidate).lower() in feeds_speeds.MACHINES),
         DEFAULT_FEEDS_MACHINE)
-    material_key = resolve_feeds_material(material)
+    material_key = resolve_feeds_material(material, config, machine_id)
+
+    if material_key is None:
+        # The team defined this material; the feeds model has never heard of it. Their
+        # preset - already applied to the post-processor - IS the answer. Overlaying the
+        # model here would quote a different material's chipload over tested numbers.
+        feeds = {
+            'unmodelled_material': True,
+            'machine_key': machine_key,
+            'material_key': None,
+            'operation': 'preset',
+            'warnings': [],
+        }
+        return feeds, [
+            f"{material} has no entry in the feeds model, so this job runs the team "
+            f"config's preset feeds for it unchanged. Verify them against a test cut "
+            f"before trusting a long program."]
 
     if tool.type == 'drill':
         # Drilling is quoted on surface speed and feed per revolution, not chipload per
@@ -689,6 +812,18 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
     """
     d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
     material_key = feeds.get('material_key')
+
+    if feeds.get('unmodelled_material'):
+        # Nothing to overlay: the post-processor already carries the team's own preset
+        # for this material, which is the only tested number anyone has. Explicit
+        # per-tool overrides still win, as they do everywhere else.
+        if tool.spindle_speed:
+            pp.spindle_speed = int(tool.spindle_speed)
+        if tool.feed_rate:
+            pp.feed_rate = float(tool.feed_rate)
+        if tool.plunge_rate:
+            pp.plunge_rate = float(tool.plunge_rate)
+        return
 
     # Final defense in depth: callers outside generate_operation historically skipped
     # the anchoring helper. Mutate the shared feed record so every downstream consumer
@@ -1273,7 +1408,8 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     """
     tool = job.tool(op.tool_slot)
     feeds, warnings = compute_tool_feeds(tool, job.material, job.machine_id, op.op_type,
-                                         feeds_machine=job.feeds_machine)
+                                         feeds_machine=job.feeds_machine,
+                                         config=job.config)
 
     pp = build_part_postprocessor(job, part, tool.diameter)
     anchor_warning = _anchor_metal_feed(pp, tool, feeds)
@@ -1309,7 +1445,7 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     pp._pending_clearance_rapid = True
 
     mismatch = _check_tool_suits_operation(op, tool)
-    material_key = resolve_feeds_material(job.material)
+    material_key = resolve_feeds_material(job.material, job.config, job.machine_id)
     flute_cap = feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max')
     if (not mismatch and tool.type == 'endmill' and flute_cap
             and tool.flutes > flute_cap):
@@ -1561,7 +1697,7 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
     """
     instructions = [f"Remove {previous.label}" ] if previous else []
     instructions += [
-        f"Install {nxt.label}, {nxt.diameter:.4f} in diameter",
+        f"Install {nxt.label}, {nxt.diameter:.4f} in diameter, {nxt.kind}",
         f"Re-zero G54 Z to {pp.z_zero_surface()} with the new tool, not with G92",
         "Do NOT change the X or Y zero",
     ]
@@ -1587,7 +1723,8 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
 
 def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                  timestamp: Optional[str] = None,
-                 suggested_filename: Optional[str] = None) -> PostProcessorResult:
+                 suggested_filename: Optional[str] = None,
+                 extra_warnings: Optional[Sequence[str]] = None) -> PostProcessorResult:
     """Stitch the ordered operation bodies into one program with manual tool changes."""
     import datetime
 
@@ -1598,6 +1735,7 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     # are kept: "this operation matched no features" is exactly what the person who
     # mistyped a size range needs to hear, and dropping the body would silence it.
     all_warnings = [w for b in bodies for w in b['warnings']]
+    all_warnings.extend(extra_warnings or [])
     bodies = [b for b in bodies if b['lines']]
     if not bodies:
         return PostProcessorResult(success=False,
@@ -1656,6 +1794,7 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     ] if (header_pp.pause_before_perimeter and first_perimeter is not None) else []
 
     current_tool: Optional[Tool] = None
+    current_rpm: Optional[int] = None   # what the spindle was last actually commanded
     change_number = 0
     for i, body in enumerate(bodies):
         pp, tool, op, part = body['pp'], body['tool'], body['op'], body['part']
@@ -1673,9 +1812,23 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                 gcode.extend(pp._generate_pause_and_park_gcode(
                     'PAUSE FOR FIXTURING', fixturing_here))
             if needs_change:   # very first tool: nothing to swap out, just say what to load
-                gcode.append(f"(Load {tool.label} before starting this program)")
+                gcode.append(f"(Load {tool.label}, {tool.kind}, before starting "
+                             f"this program)")
                 gcode.append("")
+            elif int(pp.spindle_speed) != current_rpm:
+                # Same tool, different operation, different derived RPM. The feeds model
+                # quotes a slot, a pocket and a profile differently, and each body's
+                # header printed its own number - but S was only ever emitted at a tool
+                # change, so the spindle kept turning at the FIRST body's speed while
+                # later bodies fed to their own. Verified: a pockets body announcing
+                # 12000 RPM ran at 9320, putting the chipload 29% above what the
+                # aluminum guard validated. S alone is legal with M3 already active.
+                gcode.append("")
+                gcode.append(f"S{int(pp.spindle_speed)}  ; Spindle to "
+                             f"{int(pp.spindle_speed)} RPM for this operation")
+                gcode.append("G4 P1  ; Wait for the spindle to settle")
         current_tool = tool
+        current_rpm = int(pp.spindle_speed)
 
         gcode.append("")
         gcode.append(f"(===== {sanitize_comment(op.label).upper()} - "
@@ -1841,6 +1994,12 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     # assignment is reported as such instead of surfacing later as whatever downstream
     # complaint happens to fire first.
     errors: List[str] = []
+    # Before anything reads a DXF: does anyone have feeds for this material? A material
+    # nobody knows used to reach the generator and come back out as plywood numbers.
+    try:
+        resolve_feeds_material(job.material, job.config, job.machine_id)
+    except ToolingError as exc:
+        return PostProcessorResult(success=False, errors=[str(exc)])
     for part in job.parts:
         for op in part.operations:
             mismatch = _check_tool_suits_operation(op, job.tool(op.tool_slot))
@@ -1890,7 +2049,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         # so that is the earliest point the part is still solid stock. Multi-tool jobs
         # used to drop the engraving on the floor entirely while the summary said
         # "names engraved".
-        if job.engrave and part_index not in engraved:
+        # ...and on a body whose tool can actually WRITE. A twist drill has no
+        # peripheral cutting edge and no radial rigidity, and drilled holes are ordered
+        # first, so attaching to the literal first body loaded a drill, promised "axial
+        # plunge only", then fed it sideways at 75 IPM to draw the part name.
+        if job.engrave and part_index not in engraved and body['tool'].type != 'drill':
             engraved.add(part_index)
             lines, warnings = _engrave_lines(job, part, body['tool'].diameter)
             body['lines'] = lines + body['lines']
@@ -1902,6 +2065,17 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     if errors:
         return PostProcessorResult(success=False, errors=errors)
 
+    # A part machined entirely with drills has no tool that can write. Say so - a name
+    # that never got cut is exactly the kind of silence this feature exists to avoid.
+    job_warnings: List[str] = []
+    if job.engrave:
+        for index, part in enumerate(job.parts):
+            if index not in engraved:
+                job_warnings.append(
+                    f"{part.name}: the name was not engraved. Every operation on this "
+                    f"part uses a twist drill, which cannot cut sideways. Add an end "
+                    f"mill operation to engrave it.")
+
     # Order the held-back tab removals so the tool already in the spindle goes first; the
     # rest group by tool, so the run costs at most one change per perimeter tool.
     if deferred:
@@ -1910,7 +2084,8 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         bodies.extend(deferred)
 
     return assemble_job(job, bodies, timestamp=timestamp,
-                        suggested_filename=suggested_filename)
+                        suggested_filename=suggested_filename,
+                        extra_warnings=job_warnings)
 
 
 # --------------------------------------------------------------------------- job specs

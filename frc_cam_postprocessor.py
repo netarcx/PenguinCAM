@@ -29,6 +29,7 @@ from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
 # Local modules
+import dxf_geometry
 from dxf_geometry import entities_to_closed_paths, sample_spline
 from team_config import TeamConfig
 
@@ -422,6 +423,12 @@ class FRCPostProcessor:
         # refuses the program. A skipped engraving is the case that needs it: silence
         # would leave an operator expecting a label that is not there.
         self.warnings = []
+        # Advice from reading the DXF (an unclosed outline, a bridged gap). Separate
+        # from self.warnings because that one is cleared at generation time.
+        self.geometry_warnings = []
+        #: Chains that did not close, so identify_perimeter_and_pockets can tell a lost
+        #: outer profile from a stray line.
+        self.open_chains = []
 
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
@@ -483,10 +490,17 @@ class FRCPostProcessor:
         preset_material = 'aluminum' if is_aluminum else material
         preset = self.config.get_material_preset(preset_material, machine_id)
 
-        # Check if we got a valid preset (config returns empty dict for unknown materials)
+        # The config returns an empty dict when nothing knows this material. That used
+        # to fall through to plywood with a printed warning nobody reads on a web
+        # request - and a wrong feed table in metal is a broken bit, not a cosmetic
+        # problem. Refuse, and say what would have worked.
         if not preset:
-            print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
-            preset = self.config.get_material_preset('plywood', machine_id)
+            known = self.config.known_material_ids(machine_id)
+            raise ValueError(
+                f"Unknown material {material!r}. PenguinCAM has no feeds for it, and "
+                f"guessing is how bits break. Known materials: {', '.join(known)}. "
+                f"To machine something else, add it to the machine's materials block "
+                f"in the team config.")
 
         # A material preset is shop-owned data and may be years older than this code.
         # The old PenguinCAM config template itself persisted 55 IPM / 0.200 in for
@@ -1091,6 +1105,10 @@ class FRCPostProcessor:
     def load_dxf(self, filename: str):
         """Load DXF file and extract geometry, organized by layer if multi-layer DXF"""
         print(f"Loading {filename}...")
+        # Advice raised while READING the drawing, kept apart from self.warnings, which
+        # every generate_* entry point clears before it builds a toolpath.
+        self.geometry_warnings = []
+        self.open_chains = []
         doc = ezdxf.readfile(filename)
         msp = doc.modelspace()
 
@@ -1127,16 +1145,17 @@ class FRCPostProcessor:
         # Extract polylines and lines (boundaries/pockets)
         self.polylines = []
         
-        # Method 1: Look for LWPOLYLINE entities
+        # Method 1: Look for LWPOLYLINE entities. polyline_points flattens any bulge
+        # arcs - without it a slot with semicircular ends loaded as a rectangle.
         for entity in msp.query('LWPOLYLINE'):
-            points = [(p[0], p[1]) for p in entity.get_points('xy')]
+            points = dxf_geometry.polyline_points(entity)
             if entity.closed and len(points) > 2:
                 self.polylines.append(points)
-        
+
         # Method 2: Look for POLYLINE entities
         for entity in msp.query('POLYLINE'):
             if entity.is_2d_polyline:
-                points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                points = dxf_geometry.polyline_points(entity)
                 if entity.is_closed and len(points) > 2:
                     self.polylines.append(points)
         
@@ -1187,13 +1206,26 @@ class FRCPostProcessor:
             return None
         if not poly.is_valid or poly.is_empty or poly.length == 0:
             return None
-        # Isoperimetric quotient: 1.0 for a circle, ~0.95 octagon, ~0.79 square.
-        # 0.97 admits tessellated circles (~0.998) while excluding octagons/rounded rects.
+        # Isoperimetric quotient: 1.0 for a circle, ~0.95 octagon, ~0.79 square. On its
+        # own it is not enough - a stadium up to about 1.3:1 clears 0.97, so a
+        # 0.20 x 0.26 adjustment slot was machined as a 0.235 round hole at its
+        # centroid. A tessellated true circle measures ~0.998, so the bar can be much
+        # higher without losing any real hole.
         circularity = 4 * math.pi * poly.area / (poly.length ** 2)
-        if circularity < 0.97:
+        if circularity < 0.99:
+            return None
+        # ...and every vertex has to be the same distance from the middle. This is what
+        # separates a circle from a short slot: the slot's radius swings from its half
+        # width at the flats to its half length at the ends, while a tessellated circle
+        # holds its radius to a fraction of a percent.
+        centroid = poly.centroid
+        radii = [math.hypot(x - centroid.x, y - centroid.y) for x, y in coords]
+        mean_radius = sum(radii) / len(radii)
+        if mean_radius <= 0:
+            return None
+        if any(abs(r - mean_radius) > 0.015 * mean_radius for r in radii):
             return None
         diameter = 2 * math.sqrt(poly.area / math.pi)
-        centroid = poly.centroid
         return {'center': (centroid.x, centroid.y),
                 'radius': diameter / 2, 'diameter': diameter}
 
@@ -1225,8 +1257,9 @@ class FRCPostProcessor:
                         # Each HATCH has multiple boundary paths
                         for path in entity.paths:
                             if hasattr(path, 'vertices') and path.vertices:
-                                # Polyline path
-                                coords = [(v[0], v[1]) for v in path.vertices]
+                                # Polyline path, bulge arcs flattened - a HATCH vertex
+                                # carries a bulge just as an LWPOLYLINE one does.
+                                coords = dxf_geometry.hatch_path_points(path)
                                 if len(coords) >= 3:
                                     # Circular boundaries are holes, not pockets -
                                     # recover them as circles so the hole classifier
@@ -1257,13 +1290,13 @@ class FRCPostProcessor:
                 # Extract polylines from this layer (same logic as single-layer)
                 for entity in msp.query('LWPOLYLINE'):
                     if entity.dxf.layer == layer_name:
-                        points = [(p[0], p[1]) for p in entity.get_points('xy')]
+                        points = dxf_geometry.polyline_points(entity)
                         if entity.closed and len(points) > 2:
                             layer_polylines.append(points)
 
                 for entity in msp.query('POLYLINE'):
                     if entity.is_2d_polyline and entity.dxf.layer == layer_name:
-                        points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                        points = dxf_geometry.polyline_points(entity)
                         if entity.is_closed and len(points) > 2:
                             layer_polylines.append(points)
 
@@ -1313,13 +1346,40 @@ class FRCPostProcessor:
                 self._apply_z_frame()
                 print(f"  Derived stock thickness from CAD layers: {max_depth:.4f}\"")
 
+    #: A bridged gap bigger than this moves a real edge, so the operator hears about it.
+    #: Below it, the difference is CAD endpoint noise and saying so would be chatter.
+    GAP_REPORT_THRESHOLD = 0.02
+
     def _chain_entities_to_paths(self, lines, arcs, splines, unclosed_polylines=None, ellipses=None):
         """Stitch individual LINE/ARC/ELLIPSE/SPLINE and unclosed LWPOLYLINE entities into
         closed boundary paths. Delegates to the shared dxf_geometry stitcher (also used by
-        the 2.5D DXF reconstruction) so sampling + stitching live in exactly one place."""
+        the 2.5D DXF reconstruction) so sampling + stitching live in exactly one place.
+
+        A chain that does NOT close is recorded rather than dropped in silence. That
+        silence is what let a part with an unclosed outer profile promote its biggest
+        POCKET to perimeter and profile through the middle of the part, with tabs.
+        """
+        def note_open(coords, gap):
+            self.open_chains.append({'coords': coords, 'gap': gap})
+            start, end = coords[0], coords[-1]
+            self.geometry_warnings.append(
+                f'A boundary in the drawing does not close: a {gap:.4f}" gap between '
+                f'({start[0]:.3f}, {start[1]:.3f}) and ({end[0]:.3f}, {end[1]:.3f}). '
+                f'That outline was not machined.')
+
+        def note_weld(coords, gap):
+            if gap <= self.GAP_REPORT_THRESHOLD:
+                return
+            start = coords[0]
+            self.geometry_warnings.append(
+                f'A boundary was closed across a {gap:.4f}" gap near '
+                f'({start[0]:.3f}, {start[1]:.3f}). The cut edge there is PenguinCAM\'s '
+                f'straight line, not something you drew.')
+
         return entities_to_closed_paths(
             lines=lines, arcs=arcs, ellipses=ellipses or [],
-            splines=splines, polylines=unclosed_polylines or [])
+            splines=splines, polylines=unclosed_polylines or [],
+            on_open_loop=note_open, on_welded_gap=note_weld)
 
     def _mirror_geometry_x(self):
         """Mirror all loaded geometry across the X axis (x -> -x), for a part 'flipped
@@ -2138,8 +2198,45 @@ class FRCPostProcessor:
 
         print(f"\nIdentified perimeter and {len(self.pockets)} pockets")
 
+        self._check_open_chains_against_perimeter(candidate_perimeter)
+
         # Sort pockets to minimize travel time
         self._sort_pockets()
+
+    def _check_open_chains_against_perimeter(self, perimeter_points) -> None:
+        """Refuse the part when a DROPPED chain is bigger than the perimeter we chose.
+
+        An outer profile that fails to close is discarded, and the biggest remaining
+        closed loop - a POCKET - gets promoted to perimeter. The program then profiles
+        through the middle of the part, with tabs, and looks perfectly ordinary. The
+        signature is unmistakable: something we threw away was larger than the outline
+        we kept. A smaller open chain is a stray line and only earns the warning it
+        already has.
+        """
+        if not getattr(self, 'open_chains', None) or not perimeter_points:
+            return
+
+        def extents(points):
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            return (max(xs) - min(xs), max(ys) - min(ys))
+
+        perimeter_w, perimeter_h = extents(perimeter_points)
+        for chain in self.open_chains:
+            coords = chain['coords']
+            if len(coords) < 2:
+                continue
+            width, height = extents(coords)
+            if width * height <= perimeter_w * perimeter_h + 1e-6:
+                continue
+            start, end = coords[0], coords[-1]
+            self._add_error(
+                f'The outer profile did not close: a {chain["gap"]:.4f}" gap between '
+                f'({start[0]:.3f}, {start[1]:.3f}) and ({end[0]:.3f}, {end[1]:.3f}). '
+                f'That outline is bigger than the boundary PenguinCAM would otherwise '
+                f'profile, so the program would cut through the middle of the part. '
+                f'Close the outline in CAD and export again.')
+            return
 
     def _generate_interior_gcode(self, emit_contour_pauses: bool) -> List[str]:
         """Generate the interior-feature toolpath (holes + pockets) for this part.
@@ -2396,6 +2493,13 @@ class FRCPostProcessor:
                 gcode.extend(self._chamfer_tool_change_gcode(to_vbit=False))
                 gcode.extend(self._generate_tab_removal_gcode(self._deferred_tab_positions))
 
+        # Errors raised while BUILDING the toolpath - a part too small to hold three
+        # tabs, a hole no tool in the job can make - are as fatal as the ones raised
+        # during validation. They used to land on self.errors and be discarded, so the
+        # route reported success and handed over a program with the feature missing.
+        if self.errors:
+            return PostProcessorResult(success=False, errors=self.errors.copy())
+
         # Footer (skipped for job-body mode; assemble_job_gcode adds one shared footer)
         if include_header_footer:
             gcode.extend(self._generate_gcode_footer())
@@ -2414,7 +2518,9 @@ class FRCPostProcessor:
             success=True,
             gcode='\n'.join(gcode),
             filename=filename,
-            warnings=warnings + [w for w in self.warnings if w not in warnings],
+            warnings=(warnings
+                      + [w for w in self.geometry_warnings if w not in warnings]
+                      + [w for w in self.warnings if w not in warnings]),
             stats={
                 'num_holes': len(self.holes) if hasattr(self, 'holes') else 0,
                 'num_pockets': len(self.pockets) if hasattr(self, 'pockets') else 0,
@@ -2496,7 +2602,7 @@ class FRCPostProcessor:
 
         return {'interior': interior, 'perimeter': perimeter, 'chamfer': chamfer,
                 'tab_removal': tab_removal, 'errors': list(self.errors),
-                'warnings': list(self.warnings)}
+                'warnings': list(self.geometry_warnings) + list(self.warnings)}
 
     # ---- Portability helpers: work-coordinate safe moves + optional coolant/park -------
     # Everything below emits G54 work-coordinate G-code by default. Machine-coordinate
@@ -2629,7 +2735,8 @@ class FRCPostProcessor:
         Air/Mist -> M7 (mist output, e.g. air blast), Flood -> M8."""
         coolant = (self.machine_coolant or '').strip().lower()
         code = 'M7' if coolant in ('air', 'mist') else ('M8' if coolant == 'flood' else None)
-        return f'{code}  ; Coolant on ({self.machine_coolant})' if code else None
+        return (f'{code}  ; Coolant on, {sanitize_comment(self.machine_coolant)}'
+                if code else None)
 
     def _coolant_off_gcode(self):
         """Coolant-stop line (M9), or None if no coolant is configured."""
@@ -2679,7 +2786,7 @@ class FRCPostProcessor:
         px, py, pz = self.park_position
         return [
             f'G53 G0 Z{pz:.4f}  ; {comment}: raise to safe machine Z',
-            f'G53 G0 X{px} Y{py}  ; {comment}: move gantry to park position',
+            f'G53 G0 X{px:.4f} Y{py:.4f}  ; {comment}: move gantry to park position',
         ]
 
     def _force_board_datum_for_tube(self):
@@ -2948,7 +3055,9 @@ class FRCPostProcessor:
         # Use provided timestamp or generate one
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        timestamp_display = timestamp[:16]
+        # request.form.get('timestamp') is whatever the browser sent. Slicing to 16
+        # characters shortens it; it does not make it safe for a comment.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # Title
         gcode.append(f"({sanitize_comment(self.team_name, 'PenguinCAM').upper()} - Team {self.team_number})")
@@ -3019,7 +3128,7 @@ class FRCPostProcessor:
             if hasattr(self, 'layer_data'):
                 gcode.append(f"(Layers: {len(self.layer_data)} depths)")
         else:
-            gcode.append(f"(Coolant: {self.machine_coolant})")
+            gcode.append(f"(Coolant: {sanitize_comment(self.machine_coolant, 'None')})")
 
         gcode.append("")
 
@@ -5199,6 +5308,17 @@ class FRCPostProcessor:
 
         gcode.append(f"(Contour-parallel clearing: {len(contours)} offset passes)")
 
+        # Every link between rings, and onto the final boundary trace, goes through the
+        # SAME guard the plain pocket path uses: a straight feed only when the link stays
+        # inside the already-cleared region, otherwise retract, rapid over, ramp back
+        # down. Without it the tool fed in a straight line at full depth from wherever it
+        # was to the next ring's start - and with an island between them, straight
+        # through it. Only circular islands were diverted (to the spiral clearer), so a
+        # rectangular one was gouged.
+        link_tol = 1e-4
+        final_cut_z = ramp_start_height - num_helical_passes * depth_per_pass
+        cur_pos = (entry_x, entry_y)
+
         # Cut contours from outside-in
         pass_number = 0
         for contour_geom in reversed(contours):
@@ -5215,37 +5335,37 @@ class FRCPostProcessor:
 
                 # Canonical orientation (exterior CCW) = climb milling for interior pockets.
                 poly_to_cut = orient(poly_to_cut, 1.0)
-                contour_coords = list(poly_to_cut.exterior.coords)
+                contour_coords = list(poly_to_cut.exterior.coords)[:-1]
                 if len(contour_coords) < 3:
                     continue
 
                 pass_number += 1
                 gcode.append(f"(Contour pass {pass_number})")
-
-                gcode.append(f"G1 X{contour_coords[0][0]:.4f} Y{contour_coords[0][1]:.4f} F{self.feed_rate}")
-                for point in contour_coords[1:]:
-                    gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
+                cur_pos = self._link_and_cut_ring(gcode, contour_coords, cur_pos,
+                                                  offset_poly, ramp_start_height,
+                                                  final_cut_z, link_tol)
 
         # Final pass - trace tool-compensated boundary (exterior + interiors). Canonical
         # orientation makes the exterior CCW (climb around the pocket wall) and interiors CW
         # (climb around any island), matching the CCW hole/helical toolpaths.
         if isinstance(offset_poly, Polygon):
             offset_poly = orient(offset_poly, 1.0)
-        exterior_coords = list(offset_poly.exterior.coords)[:-1]
+        exterior_coords = (list(offset_poly.exterior.coords)[:-1]
+                           if hasattr(offset_poly, 'exterior') else [])
         if len(exterior_coords) >= 3:
             pass_number += 1
             gcode.append(f"(Contour pass {pass_number} - final outer perimeter)")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
-            for point in exterior_coords[1:]:
-                gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
+            cur_pos = self._link_and_cut_ring(gcode, exterior_coords, cur_pos,
+                                              offset_poly, ramp_start_height,
+                                              final_cut_z, link_tol)
 
             # Spring pass: re-trace the exterior at zero stepover to relieve
-            # tool deflection.
+            # tool deflection. The tool is already on the ring.
             gcode.append(f"(Spring pass - compensate for tool deflection)")
-            for point in exterior_coords[1:]:
+            spring = self._reorder_closed_ring(exterior_coords, cur_pos)
+            for point in spring[1:]:
                 gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
+            gcode.append(f"G1 X{spring[0][0]:.4f} Y{spring[0][1]:.4f} F{self.feed_rate}")
 
         # Also trace interior boundaries of the tool-compensated ring
         if hasattr(offset_poly, 'interiors'):
@@ -5254,21 +5374,109 @@ class FRCPostProcessor:
                 if len(interior_coords) >= 3:
                     pass_number += 1
                     gcode.append(f"(Contour pass {pass_number} - inner boundary)")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
-                    for point in interior_coords[1:]:
-                        gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
+                    cur_pos = self._link_and_cut_ring(gcode, interior_coords, cur_pos,
+                                                      offset_poly, ramp_start_height,
+                                                      final_cut_z, link_tol)
 
                     # Spring pass on this interior boundary.
                     gcode.append(f"(Spring pass - compensate for tool deflection)")
-                    for point in interior_coords[1:]:
+                    spring = self._reorder_closed_ring(interior_coords, cur_pos)
+                    for point in spring[1:]:
                         gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
+                    gcode.append(f"G1 X{spring[0][0]:.4f} Y{spring[0][1]:.4f} F{self.feed_rate}")
 
         # Retract
         gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
 
         return gcode
+
+    def _emit_ramp_moves(self, gcode: List[str],
+                         ramp_points: List[Tuple[float, float, float]],
+                         start_point: Tuple[float, float],
+                         ramp_start_height: float, ramp_depth: float,
+                         ramp_distance: float, floor_z: float,
+                         tab_zones: List[Tuple[float, float]],
+                         tab_z: float) -> float:
+        """Emit the ramp-in moves, holding tab height wherever the ramp would cut a tab.
+
+        The ramp descends along the perimeter for as much as several inches - on 1/4"
+        aluminum at 4 degrees, about 4.6" - so on a small part it covers ground that
+        later carries a tab. Where the ramp has already dropped below the top of a
+        standing tab it is milling that tab away, which is why the lift belongs here as
+        well as in the ordinary cutting pass. Where the ramp is still above the tab top,
+        the material is intact on its own and no lift is needed.
+
+        Returns the Z the tool is left at.
+        """
+        if not ramp_points:
+            return ramp_start_height
+
+        def z_at(distance: float) -> float:
+            # The end of the ramp is the pass floor EXACTLY. Recomputing it as
+            # `start - depth` leaves float dust that differs between the two Z datums,
+            # and a "did we get there?" comparison then emitted an extra move in one
+            # frame and not the other.
+            if ramp_distance <= 0 or distance >= ramp_distance - 1e-12:
+                return floor_z
+            return ramp_start_height - (distance / ramp_distance) * ramp_depth
+
+        def tab_at(distance: float) -> bool:
+            return any(a <= distance <= b for a, b in tab_zones)
+
+        # Distances of the ramp's own waypoints, plus every tab boundary that falls
+        # inside the ramp, so a tab can start and end mid-segment.
+        waypoints = []      # (distance, x, y)
+        distance = 0.0
+        previous = start_point
+        for x, y, _ in ramp_points:
+            distance += self._distance_2d(previous, (x, y))
+            waypoints.append((min(distance, ramp_distance), x, y))
+            previous = (x, y)
+
+        cuts = sorted({d for zone in tab_zones for d in zone
+                       if 0.0 < d < waypoints[-1][0]})
+
+        expanded = []
+        index = 0
+        previous_distance, previous_point = 0.0, start_point
+        for target, x, y in waypoints:
+            span = target - previous_distance
+            while index < len(cuts) and cuts[index] < target:
+                cut = cuts[index]
+                t = (cut - previous_distance) / span if span > 1e-12 else 0.0
+                expanded.append((cut,
+                                 previous_point[0] + t * (x - previous_point[0]),
+                                 previous_point[1] + t * (y - previous_point[1])))
+                index += 1
+            expanded.append((target, x, y))
+            previous_distance, previous_point = target, (x, y)
+
+        current_z = ramp_start_height
+        previous_distance = 0.0
+        tab_number = 0
+        for step, (target, x, y) in enumerate(expanded, 1):
+            middle = (previous_distance + target) / 2.0
+            # The ramp only descends, so the end of the piece is its deepest point:
+            # testing the midpoint instead let the last piece before a lift dip a few
+            # ten-thousandths into the tab.
+            if tab_zones and tab_at(middle) and z_at(target) < tab_z:
+                if abs(current_z - tab_z) > 1e-9:
+                    tab_number += 1
+                    gcode.append(f"G1 Z{tab_z:.4f} F{self.plunge_rate}  "
+                                 f"; Tab lift during ramp")
+                    current_z = tab_z
+                gcode.append(f"G1 X{x:.4f} Y{y:.4f} F{self.feed_rate}")
+            else:
+                z = z_at(target)
+                if abs(current_z - tab_z) < 1e-9 and current_z > z + 1e-9:
+                    # Leaving a tab: drop back onto the ramp schedule before moving on.
+                    gcode.append(f"G1 Z{z_at(previous_distance):.4f} "
+                                 f"F{self.plunge_rate}  ; Tab end")
+                gcode.append(f"G1 X{x:.4f} Y{y:.4f} Z{z:.4f} "
+                             f"F{self.ramp_feed_rate}  ; Ramp segment {step}")
+                current_z = z
+            previous_distance = target
+        return current_z
 
     def _generate_contour_gcode(self,
                                contour_points: List[Tuple[float, float]],
@@ -5350,16 +5558,38 @@ class FRCPostProcessor:
         # Calculate equal depth per pass for consistent tool loading
         depth_per_pass = total_cut_depth / num_passes
 
-        # What actually remains standing in a tab when this contour finishes: material
-        # from the cut bottom up to the LAST pass that cut straight across the tab spans
-        # (only the final pass lifts over them), capped by the tab height and the stock
-        # itself. Stashed for the tab-removal pass, which must step through exactly this
-        # much material - on thin stock a single-pass profile leaves tabs the full plate
-        # thickness, and "the tabs" is not a place to abandon the depth-per-pass limit.
-        thinned_top = (self.material_top - (num_passes - 1) * depth_per_pass
-                       if num_passes > 1 else self.material_top)
-        self._tab_material_top = min(thinned_top, self.material_top,
-                                     self.cut_depth + self.tab_height)
+        # A tab stands from the finished cut depth up to `tab_top_z`, and EVERY pass
+        # whose floor is below that lifts over the tab zones - not just the final one.
+        # Lifting only on the final pass meant the intermediate passes cut straight
+        # through the tabs at their own depth: on 5-pass 1/4" aluminum the tabs ended up
+        # 0.054" tall instead of the configured 0.15", a third of the holding area the
+        # operator was told they had. The removal pass reads this to know how much
+        # material it really has to step through.
+        tab_top_z = min(self.material_top, self.cut_depth + self.tab_height)
+        self._tab_material_top = tab_top_z
+
+        # Tabs are distributed over the WHOLE perimeter. Sizing them against
+        # `contour_length - ramp_distance` collapsed on small parts: aluminum's 4 degree
+        # ramp is ~4.6" on 1/4" stock, so a 1"x1" part had a shorter perimeter than its
+        # own ramp and got a negative spacing with all three tabs stacked at one point.
+        tab_zones_by_distance = []
+        num_tabs = 0
+        actual_tab_spacing = 0.0
+        if self.tabs_enabled:
+            if 3 * self.tab_width > contour_length:
+                self._add_error(
+                    f"{contour_type.capitalize()} is only {contour_length:.3f}\" around, "
+                    f"which is too short for three {self.tab_width:.3f}\" tabs. The part "
+                    f"is too small for tabbed profiling at these settings: use narrower "
+                    f"tabs, or hold this part another way and turn tabs off.")
+                return gcode
+            num_tabs = max(3, int(math.ceil(contour_length / self.tab_spacing)))
+            actual_tab_spacing = contour_length / num_tabs
+            half_tab_width = self.tab_width / 2
+            for i in range(num_tabs):
+                centre = actual_tab_spacing * (i + 0.5)
+                tab_zones_by_distance.append((centre - half_tab_width,
+                                              centre + half_tab_width))
 
         # Multi-pass cutting loop
         for pass_num in range(1, num_passes + 1):
@@ -5385,24 +5615,12 @@ class FRCPostProcessor:
             ramp_distance = ramp_depth / math.tan(math.radians(self.ramp_angle))
             gcode.append(f"(Ramp-in: {ramp_distance:.4f}\" at {self.ramp_angle} deg)")
 
-            # Calculate tab zones ONLY on final pass (if tabs are enabled)
-            tab_zones = []  # List of (start_dist, end_dist) tuples
+            # This pass lifts over the tabs if its floor would otherwise go below the
+            # top of the standing tab. A pass whose floor is still above `tab_top_z`
+            # leaves the tab material intact by itself and needs no lift.
+            tab_zones = tab_zones_by_distance if pass_cut_depth < tab_top_z - 1e-9 else []
+            tab_z = tab_top_z
             if is_final_pass and self.tabs_enabled:
-                # We cut from ramp_distance to contour_length, so tabs should only be in that range
-                cutting_length = contour_length - ramp_distance
-
-                # Calculate number of tabs based on desired spacing, with minimum of 3
-                num_tabs = max(3, int(math.ceil(cutting_length / self.tab_spacing)))
-                actual_tab_spacing = cutting_length / num_tabs
-
-                # Place tabs starting after the ramp, centered in each section
-                half_tab_width = self.tab_width / 2
-                for i in range(num_tabs):
-                    tab_center = ramp_distance + actual_tab_spacing * (i + 0.5)
-                    tab_start = tab_center - half_tab_width
-                    tab_end = tab_center + half_tab_width
-                    tab_zones.append((tab_start, tab_end))
-
                 gcode.append(f"(Tabs: {num_tabs} tabs - desired spacing: {self.tab_spacing:.2f}\", actual: {actual_tab_spacing:.2f}\" - width: {self.tab_width:.4f}\")")
             elif is_final_pass and not self.tabs_enabled:
                 gcode.append(f"(Tabs disabled - perimeter will be cut through completely)")
@@ -5444,9 +5662,13 @@ class FRCPostProcessor:
                     ramp_end_segment = i  # Ramp ends partway through this segment
                     break
 
-            # Execute ramp moves using ramp feed rate
-            for i, (x, y, z) in enumerate(ramp_points):
-                gcode.append(f"G1 X{x:.4f} Y{y:.4f} Z{z:.4f} F{self.ramp_feed_rate}  ; Ramp segment {i+1}")
+            # Execute the ramp, lifting over any tab the ramp would otherwise cut
+            # through. The ramp descends along the perimeter, so once it is below the
+            # top of a tab it is removing that tab's material - the very thing the later
+            # passes are carefully preserving.
+            current_z = self._emit_ramp_moves(
+                gcode, ramp_points, offset_points[0], ramp_start_height, ramp_depth,
+                ramp_distance, pass_cut_depth, tab_zones, tab_z)
 
             # Ensure we're at full depth
             if current_ramp_dist < ramp_distance:
@@ -5482,15 +5704,38 @@ class FRCPostProcessor:
 
                         # Return to perimeter path
                         gcode.append(f"G1 X{helix_center_x:.4f} Y{helix_center_y:.4f} F{self.feed_rate}  ; Return to perimeter")
+                        current_z = target_z
+                    else:
+                        current_z = pass_cut_depth
 
             gcode.append("")
 
-            # Cut around perimeter with tabs (on final pass only), starting from where ramp ended
-            # Use segment-centric approach: check each segment against tab zones
-            current_distance = current_ramp_dist
-            tab_z = pass_cut_depth + self.tab_height
+            # Cut around the perimeter, lifting over the tab zones. Distances here are
+            # measured along the contour from `offset_points[0]`, the same frame the tab
+            # zones and the ramp use, so a tab has ONE position whichever code sees it.
+            # The lap begins where the RAMP ended, which is why it starts at
+            # `current_ramp_dist` and the first segment is short by however far into
+            # that segment the ramp went.
+            lap_start = current_ramp_dist
+            lap_end = current_ramp_dist + contour_length
+            current_distance = lap_start
             tab_number = 0
-            current_z = pass_cut_depth  # Track current Z height to avoid unnecessary moves
+            # The lap re-cuts the whole perimeter, so every tab is crossed exactly once:
+            # a tab behind the lap's start point is met at the END of the lap, one
+            # contour length further along. A tab the lap STARTS inside is met at both
+            # ends, in two pieces - the ramp can finish anywhere, tabs included, and the
+            # half left behind would otherwise be cut away by the closing move.
+            lap_tab_zones = []       # (start, end, tab_idx, piece_order)
+            for tab_idx, (a, b) in enumerate(tab_zones):
+                if a >= lap_start:
+                    lap_tab_zones.append((a, b, tab_idx, 0))
+                elif b <= lap_start:
+                    lap_tab_zones.append((a + contour_length, b + contour_length,
+                                          tab_idx, 0))
+                else:
+                    lap_tab_zones.append((lap_start, b, tab_idx, 1))
+                    lap_tab_zones.append((a + contour_length, lap_start + contour_length,
+                                          tab_idx, 0))
 
             # Store tab positions for the tab removal pass (only on final pass).
             # A single tab can straddle multiple contour segments — common on
@@ -5506,6 +5751,18 @@ class FRCPostProcessor:
             remaining_points = offset_points[ramp_end_segment:] + offset_points[:ramp_end_segment]
             remaining_lengths = segment_lengths[ramp_end_segment:] + segment_lengths[:ramp_end_segment]
 
+            # The tool is at the RAMP END, not at the start of that segment. Starting
+            # the first segment from its own first vertex made the lap's distances run
+            # ahead of the real path by however far into the segment the ramp went - and
+            # a tab placed in that stretch was then cut on the way back to it.
+            if ramp_points:
+                ramp_end_point = (ramp_points[-1][0], ramp_points[-1][1])
+                next_vertex_distance = (sum(segment_lengths[:ramp_end_segment])
+                                        + segment_lengths[ramp_end_segment % len(segment_lengths)])
+                remaining_points = [ramp_end_point] + remaining_points[1:]
+                remaining_lengths = ([max(0.0, next_vertex_distance - current_ramp_dist)]
+                                     + remaining_lengths[1:])
+
             # Helper function to process a segment with tab checking
             def process_segment(p1, p2, seg_start_dist, seg_length):
                 nonlocal tab_number, current_z, tab_waypoints_by_idx
@@ -5515,20 +5772,22 @@ class FRCPostProcessor:
 
                 seg_end_dist = seg_start_dist + seg_length
 
-                # Find all tab zones that intersect this segment (only if tabs enabled for this pass)
+                # Find all tab zones that intersect this segment. Every pass whose floor
+                # is below the tab top lifts, not only the final one - otherwise the
+                # intermediate passes mill away the material the tabs are made of.
                 intersecting_tabs = []
-                if is_final_pass:  # Only process tabs on final pass
-                    for tab_idx, (tab_start, tab_end) in enumerate(tab_zones):
-                        # Check if tab zone overlaps with segment
-                        if tab_start < seg_end_dist and tab_end > seg_start_dist:
-                            # Clamp to segment boundaries
-                            overlap_start = max(tab_start, seg_start_dist)
-                            overlap_end = min(tab_end, seg_end_dist)
-                            intersecting_tabs.append((overlap_start, overlap_end, tab_idx))
+                for tab_start, tab_end, tab_idx, piece in lap_tab_zones:
+                    # Check if tab zone overlaps with segment
+                    if tab_start < seg_end_dist and tab_end > seg_start_dist:
+                        # Clamp to segment boundaries
+                        overlap_start = max(tab_start, seg_start_dist)
+                        overlap_end = min(tab_end, seg_end_dist)
+                        intersecting_tabs.append((overlap_start, overlap_end,
+                                                  (tab_idx, piece)))
 
                 if not intersecting_tabs:
                     # No tabs in this segment - ensure we're at cut depth, then cut normally
-                    if current_z != pass_cut_depth:
+                    if abs(current_z - pass_cut_depth) > 1e-9:
                         gcode.append(f"G1 Z{pass_cut_depth:.4f} F{self.plunge_rate}")
                         current_z = pass_cut_depth
                     gcode.append(f"G1 X{p2[0]:.4f} Y{p2[1]:.4f} F{self.feed_rate}")
@@ -5542,21 +5801,21 @@ class FRCPostProcessor:
                 subsegments = []
                 current_pos = seg_start_dist
 
-                for overlap_start, overlap_end, tab_idx in intersecting_tabs:
+                for overlap_start, overlap_end, tab_key in intersecting_tabs:
                     # Add pre-tab segment if there's a gap
                     if current_pos < overlap_start:
-                        subsegments.append((current_pos, overlap_start, False, -1))
+                        subsegments.append((current_pos, overlap_start, False, None))
 
                     # Add tab segment
-                    subsegments.append((overlap_start, overlap_end, True, tab_idx))
+                    subsegments.append((overlap_start, overlap_end, True, tab_key))
                     current_pos = overlap_end
 
                 # Add post-tab segment if there's remaining length
                 if current_pos < seg_end_dist:
-                    subsegments.append((current_pos, seg_end_dist, False, -1))
+                    subsegments.append((current_pos, seg_end_dist, False, None))
 
                 # Process each subsegment
-                for sub_start, sub_end, is_tab, tab_idx in subsegments:
+                for sub_start, sub_end, is_tab, tab_key in subsegments:
                     # Calculate XY position at subsegment end
                     t_end = (sub_end - seg_start_dist) / seg_length
                     end_x = p1[0] + t_end * (p2[0] - p1[0])
@@ -5571,16 +5830,16 @@ class FRCPostProcessor:
                         # Record this sub-segment for the removal pass. Contiguous
                         # pieces of the same tab share an endpoint geometrically,
                         # so we only append the new endpoint on continuations.
-                        if tab_idx not in tab_waypoints_by_idx:
-                            tab_waypoints_by_idx[tab_idx] = [(start_x, start_y), (end_x, end_y)]
+                        if tab_key not in tab_waypoints_by_idx:
+                            tab_waypoints_by_idx[tab_key] = [(start_x, start_y), (end_x, end_y)]
                         else:
-                            tab_waypoints_by_idx[tab_idx].append((end_x, end_y))
+                            tab_waypoints_by_idx[tab_key].append((end_x, end_y))
 
                         # Move to tab start in XY
                         gcode.append(f"G1 X{start_x:.4f} Y{start_y:.4f} F{self.feed_rate}")
 
                         # Raise Z only if not already at tab height
-                        if current_z != tab_z:
+                        if abs(current_z - tab_z) > 1e-9:
                             tab_number += 1
                             gcode.append(f"G1 Z{tab_z:.4f} F{self.plunge_rate}  ; Tab {tab_number} start")
                             current_z = tab_z
@@ -5589,7 +5848,7 @@ class FRCPostProcessor:
                         gcode.append(f"G1 X{end_x:.4f} Y{end_y:.4f} F{self.feed_rate}")
                     else:
                         # Lower Z only if not already at cut depth
-                        if current_z != pass_cut_depth:
+                        if abs(current_z - pass_cut_depth) > 1e-9:
                             gcode.append(f"G1 Z{pass_cut_depth:.4f} F{self.plunge_rate}  ; Tab end")
                             current_z = pass_cut_depth
 
@@ -5610,15 +5869,27 @@ class FRCPostProcessor:
                 ramp_end_x, ramp_end_y, _ = ramp_points[-1]
                 last_point = remaining_points[-1]
 
-                # Calculate closing segment
-                closing_length = self._distance_2d((ramp_end_x, ramp_end_y), last_point)
+                # The closing move covers the contour distance still owed, so a tab that
+                # lives in it is not clipped off the end of the lap. Geometrically it is
+                # a chord back to the ramp's end point.
+                closing_length = max(self._distance_2d((ramp_end_x, ramp_end_y), last_point),
+                                     lap_end - current_distance)
 
                 # Process closing segment
                 process_segment(last_point, (ramp_end_x, ramp_end_y), current_distance, closing_length)
 
-            # Store tab positions from final pass for removal
+            # Store tab positions from final pass for removal. A tab the lap started
+            # inside was recorded in two pieces; they are the same physical tab, so they
+            # are re-joined in contour order and the removal pass cuts it as one.
             if is_final_pass:
-                all_tab_positions = sorted(tab_waypoints_by_idx.items(), key=lambda kv: kv[0])
+                merged = {}
+                for (tab_idx, piece), points in sorted(tab_waypoints_by_idx.items()):
+                    existing = merged.get(tab_idx)
+                    if existing is None:
+                        merged[tab_idx] = list(points)
+                    else:
+                        existing.extend(p for p in points if p != existing[-1])
+                all_tab_positions = sorted(merged.items(), key=lambda kv: kv[0])
 
             # Retract
             gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")
@@ -6119,6 +6390,26 @@ class FRCPostProcessor:
             'finishing_depth_per_pass': finishing_depth_per_pass
         }
 
+    #: Extra depth a pass must have gone past the nominal wall bottom before the middle
+    #: of the tube counts as open. Extruded box tube wall thickness is a nominal figure;
+    #: 0.02" covers the usual mill tolerance on 6061 tube.
+    TUBE_WALL_CLEAR_MARGIN = 0.02
+
+    def _tube_middle_is_open(self, pass_num: int, depth_per_pass: float,
+                             wall_thickness: float) -> bool:
+        """Has a previous pass cut clear through the top wall at mid-tube?
+
+        The top wall of box tube spans the FULL width, so mid-tube is solid until some
+        pass has milled past its underside. `pass_num` is 0-based, and the pass before
+        it reached `pass_num * depth_per_pass` below the top of the tube.
+
+        Only when that is past the wall bottom with margin may a pass cut the two side
+        walls and skip the middle - otherwise it would leave an uncut web (which can
+        stop cut-to-length severing the tube) and, worse, cross that web at depth.
+        """
+        cleared_depth = pass_num * depth_per_pass
+        return cleared_depth >= wall_thickness + self.TUBE_WALL_CLEAR_MARGIN
+
     def _parse_tube_size(self, tube_size: str) -> tuple[float, float]:
         """
         Parse tube size string to width and height dimensions.
@@ -6255,16 +6546,19 @@ class FRCPostProcessor:
         for pass_num in range(num_roughing_passes):
             z_cut = z_top - (pass_num + 1) * roughing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full arc pattern across entire width
+            if not self._tube_middle_is_open(pass_num, roughing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: the top wall spans the whole tube, and nothing has proven
+                # it is gone yet at mid-tube.
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position at start
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X, so this rapid
+                # descends alongside the tube, not into it.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing pattern across tube width
                 gcode.append(f'G1 F{arc_feed}')
@@ -6281,15 +6575,15 @@ class FRCPostProcessor:
                 # Retract after this pass
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing through back wall only
                 gcode.append(f'G1 F{arc_feed}')
@@ -6303,12 +6597,14 @@ class FRCPostProcessor:
                 if current_x > back_wall_inner_x:
                     gcode.append(f'G1 X{back_wall_inner_x:.4f}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube. The earlier passes cleared this
+                # column, but a saw-cut end can leave stock proud by more than the
+                # margin, so this descent is a controlled feed, not a rapid.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Arc clearing through front wall
                 gcode.append(f'G1 F{arc_feed}')
@@ -6335,15 +6631,16 @@ class FRCPostProcessor:
         for pass_num in range(num_finishing_passes):
             z_cut = z_top - (pass_num + 1) * finishing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full cut across entire width
+            if not self._tube_middle_is_open(pass_num, finishing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: nothing has proven the top wall is gone at mid-tube yet.
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position for finishing
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Single horizontal cut across
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -6351,24 +6648,25 @@ class FRCPostProcessor:
                 # Retract
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Cut through back wall only
                 gcode.append(f'G1 X{back_wall_inner_x:.4f} F{self.feed_rate}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube, not a rapid: proud saw-cut stock
+                # can sit below the cleared floor by more than the margin allows.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Cut through front wall
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -6463,7 +6761,8 @@ class FRCPostProcessor:
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Format for G-code header (just date and time, no seconds)
-        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
+        # Client-supplied; truncating to YYYY-MM-DD HH:MM is not sanitization.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE FACING OPERATION )')
@@ -6714,13 +7013,17 @@ class FRCPostProcessor:
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Format for G-code header (just date and time, no seconds)
-        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
+        # Client-supplied; truncating to YYYY-MM-DD HH:MM is not sanitization.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE PATTERN OPERATION )')
         gcode.append(f'( Generated: {timestamp_display} )')
         if hasattr(self, 'user_name') and self.user_name:
-            gcode.append(f'( User: {self.user_name} )')
+            # A Google/Onshape display name reads like "Trent Fox (Mentor) Jose" - a
+            # nested paren and a non-ASCII byte, both forbidden. The plate header has
+            # sanitized this for a while; the tube header had not.
+            gcode.append(f"( User: {sanitize_comment(self.user_name, 'unknown')} )")
         gcode.append(f'( Tube height: {tube_height:.3f}" )')
         # A drilled hole pattern runs a twist drill, not an end mill, and the header is
         # what the operator reads before loading a tool.
@@ -7255,16 +7558,19 @@ class FRCPostProcessor:
         for pass_num in range(num_roughing_passes):
             z_cut = z_top - (pass_num + 1) * roughing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full arc pattern across entire width
+            if not self._tube_middle_is_open(pass_num, roughing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: the top wall spans the whole tube and no pass has yet
+                # proven it gone at mid-tube. Skipping the middle here would also leave
+                # an uncut web that stops the tube separating.
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position at start (combine X Y for cleaner G-code)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing pattern across tube width
                 gcode.append(f'G1 F{arc_feed}')
@@ -7281,15 +7587,15 @@ class FRCPostProcessor:
                 # Retract after this pass
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing through back wall only
                 gcode.append(f'G1 F{arc_feed}')
@@ -7303,12 +7609,14 @@ class FRCPostProcessor:
                 if current_x > back_wall_inner_x:
                     gcode.append(f'G1 X{back_wall_inner_x:.4f}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube. Earlier passes cleared this column,
+                # but a saw-cut end can leave stock proud past the margin, so the
+                # descent is a controlled feed rather than a rapid.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Arc clearing through front wall
                 gcode.append(f'G1 F{arc_feed}')
@@ -7334,15 +7642,16 @@ class FRCPostProcessor:
         for pass_num in range(num_finishing_passes):
             z_cut = z_top - (pass_num + 1) * finishing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full cut across entire width
+            if not self._tube_middle_is_open(pass_num, finishing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: nothing has proven the top wall is gone at mid-tube yet.
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position for finishing
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Single horizontal cut across
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -7350,24 +7659,25 @@ class FRCPostProcessor:
                 # Retract
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Cut through back wall only
                 gcode.append(f'G1 X{back_wall_inner_x:.4f} F{self.feed_rate}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube, not a rapid: proud saw-cut stock can
+                # sit below the cleared floor by more than the margin allows.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Cut through front wall
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -7943,6 +8253,22 @@ def main():
         parser.error('--chamfer-width is only supported in standard mode. Multi-tool '
                      'jobs (--ops-file) describe a chamfer as an operation instead.')
 
+    # Tube modes are inch-only, all the way through: the tube frame, the jig geometry
+    # and the emitted G20 are all inches, and load_tube_pattern / load_tube_design
+    # already refuse millimetres. The CLI did not, so `--units mm` built a millimetre
+    # post-processor and then emitted inch tube geometry under a hard-coded G20.
+    if args.mode.startswith('tube-'):
+        if args.units != 'inch':
+            parser.error(f'--mode {args.mode} is inch-only. Tube jigs, tube sizes and '
+                         f'the tube coordinate frame are all in inches; drop '
+                         f'--units mm and give the dimensions in inches.')
+        # Silently ignoring --z-zero hid a real mistake: a tube job zeroes on the JIG,
+        # not on a sheet lying on a spoilboard, so neither datum choice means anything.
+        if args.z_zero is not None:
+            parser.error(f'--z-zero does not apply to --mode {args.mode}. A tube job is '
+                         f'zeroed at the jig in G54, with Z=0 at the bottom of the tube; '
+                         f'there is no stock top or sacrifice board to choose between.')
+
     # A multi-tool job describes its own tools and operations, so it bypasses the
     # single-tool mode branching below entirely.
     if args.ops_file:
@@ -7958,7 +8284,10 @@ def main():
         pp = FRCPostProcessor(args.thickness, args.tool_diameter,
                               config=load_cli_config(args.config),
                               tool_flutes=args.tool_flutes)
-        pp.apply_material_preset(args.material)  # Tube facing is always aluminum family
+        try:
+            pp.apply_material_preset(args.material)  # Tube facing is always aluminum family
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.spindle_speed != 18000:
             pp.spindle_speed = args.spindle_speed
@@ -8033,7 +8362,10 @@ def main():
         # Apply material preset and user parameters (shared logic). Scaled to the
         # actual tool - a no-op for the drilled pattern's 0.201" bit, a derate for a
         # custom design milled with a small cutter. Explicit feed flags come last.
-        pp.apply_material_preset(args.material)
+        try:
+            pp.apply_material_preset(args.material)
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.user:
             pp.user_name = args.user
@@ -8124,7 +8456,10 @@ def main():
         # for the 4 mm reference tool; scale it to the tool actually specified. An
         # explicit --feed-rate / --plunge-rate afterwards is the user overriding the
         # derate on purpose, so those come last.
-        pp.apply_material_preset(args.material)
+        try:
+            pp.apply_material_preset(args.material)
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.max_pass_depth is not None:
             try:

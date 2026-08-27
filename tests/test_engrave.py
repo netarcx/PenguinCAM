@@ -309,3 +309,73 @@ class MultiToolEngraveTest(unittest.TestCase):
         for p in pts:
             self.assertFalse(bore.intersects(Point(p)), f'{p} is over the bore')
             self.assertTrue(plate.contains(Point(p)), f'{p} is off the part')
+
+
+class EngraveNeverRunsOnADrillTest(unittest.TestCase):
+    """A twist drill has no peripheral cutting edge. Engraving with one snaps it.
+
+    The engraving attached to the part's FIRST body with no tool-type check, and
+    order_operations puts drilled holes ahead of profiles - so a job with a drill in T1
+    loaded the drill, printed "Axial plunge only", then fed it sideways at 75 IPM to
+    write the part name.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='engrave_drill_')
+        self.dxf = os.path.join(self.tmp, 'p.dxf')
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (5, 0), (5, 4), (0, 4)], close=True)
+        for x in (1.0, 4.0):
+            msp.add_circle((x, 1.0), 0.201 / 2)
+        doc.saveas(self.dxf)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _job(self, ops, tools):
+        import tooling
+        return tooling.MultiToolJob(
+            material='plywood', thickness=0.25, engrave=True, tools=tools,
+            parts=[tooling.PartOps(dxf_path=self.dxf, name='GEARBOX-L',
+                                   operations=ops)],
+            config=TeamConfig())
+
+    def _run(self, job):
+        import tooling
+        with redirect_stdout(io.StringIO()):
+            return tooling.generate_multitool_job(job, timestamp='2026-01-01 00:00:00')
+
+    def test_engraving_lands_in_the_end_mill_body(self):
+        import tooling
+        job = self._job(
+            ops=[tooling.Operation('holes', 1), tooling.Operation('perimeter', 2)],
+            tools=[tooling.Tool(1, '#7 drill', 0.201, 2, type='drill'),
+                   tooling.Tool(2, '1/8 endmill', 0.125, 2)])
+        result = self._run(job)
+        self.assertTrue(result.success, msg=str(result.errors))
+        gcode = result.gcode
+        self.assertIn('ENGRAVE PART NAME', gcode)
+        # The engraving must sit after the drill's section has ended and the end mill
+        # has been called for.
+        engrave_at = gcode.index('ENGRAVE PART NAME')
+        drill_at = gcode.index('DRILLING')
+        self.assertGreater(engrave_at, drill_at,
+                           'the name is engraved while the twist drill is loaded')
+        between = gcode[drill_at:engrave_at]
+        self.assertIn('1/8 endmill', between,
+                      'no tool change to a milling cutter before the engraving')
+
+    def test_a_part_with_only_drilling_is_not_engraved(self):
+        """No milling body means no tool that can write. Skip it and say so, rather
+        than writing with the drill."""
+        import tooling
+        job = self._job(
+            ops=[tooling.Operation('holes', 1)],
+            tools=[tooling.Tool(1, '#7 drill', 0.201, 2, type='drill')])
+        result = self._run(job)
+        self.assertNotIn('ENGRAVE PART NAME', result.gcode or '')
+        self.assertTrue(
+            any('GEARBOX-L' in w and 'engrav' in w.lower() for w in result.warnings),
+            f'silently dropped the engraving: {result.warnings}')

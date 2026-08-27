@@ -15,6 +15,7 @@ The contract under test:
 import io
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -361,9 +362,25 @@ class TestTabRemovalRespectsDepthLimit(unittest.TestCase):
                 pp.classify_holes()
                 result = pp.generate_gcode(timestamp='2026-08-24 13:00:00')
             self.assertTrue(result.success, result.errors)
-            # The tab material left standing is one perimeter pass-depth, so the
-            # removal engages within the ceiling.
-            self.assertLessEqual(pp._tab_material_top - pp.cut_depth, 0.03125 + 1e-9)
+            # The tabs stand their full designed height - on stock this thin that is
+            # the whole plate - so the removal pass is what has to respect the ceiling,
+            # stepping down through them like every other cut.
+            tab_top = pp._tab_material_top
+            self.assertGreater(tab_top - pp.cut_depth, 0.03125,
+                               'tabs were thinned; they hold a fraction of the part')
+            lines = result.gcode.splitlines()
+            start = next(i for i, l in enumerate(lines) if 'TAB REMOVAL PASS' in l)
+            plunges = [float(re.search(r'Z(-?[\d.]+)', l).group(1))
+                       for l in lines[start:] if 'Plunge in kerf' in l]
+            self.assertTrue(plunges)
+            previous = tab_top
+            for z in plunges:
+                if z > previous:            # next tab, back to the top
+                    previous = tab_top
+                self.assertLessEqual(previous - z, 0.03125 + 1e-9,
+                                     f'tab removal engages {previous - z:.4f}"')
+                previous = z
+            self.assertAlmostEqual(min(plunges), pp.cut_depth, places=4)
         finally:
             os.remove(dxf)
 

@@ -11,6 +11,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -125,6 +126,82 @@ class TestToolValidation(unittest.TestCase):
         job = build_job(parts=[PartOps(dxf_path=make_plate_dxf(), name='p',
                                        operations=[Operation('perimeter', 2)])])
         self.assertEqual([t.slot for t in job.used_tools], [2])
+
+
+class TestDrillScopeValidation(unittest.TestCase):
+    """Numbers in `scope` go straight into Z arithmetic. Every one of them is checked at
+    the door, because past it there is nothing between a typo and a commanded move.
+
+    Both of these were verified as generating a "successful" program: `point_angle: 5`
+    put the last peck at G1 Z-2.2239, 2.2 inches below the sacrifice board, and
+    `spot_depth: 100` commanded a feed move 99.75 inches down.
+    """
+
+    def test_point_angle_must_be_a_real_drill_point(self):
+        for angle in (5, 0, -118, 200, float('nan'), float('inf')):
+            with self.subTest(angle=angle):
+                with self.assertRaises(ToolingError) as ctx:
+                    Operation('holes', 1, scope={'point_angle': angle})
+                message = str(ctx.exception)
+                self.assertIn('point_angle', message)
+                self.assertIn('118', message)      # says what a normal value looks like
+
+    def test_ordinary_point_angles_are_accepted(self):
+        for angle in (118, 135, 90, 60, 150):
+            with self.subTest(angle=angle):
+                op = Operation('holes', 1, scope={'point_angle': angle})
+                self.assertAlmostEqual(op.drill_point_angle, float(angle))
+
+    def test_spot_depth_must_be_positive_finite_and_shallow(self):
+        for depth in (100, 0, -1, float('nan'), float('inf'), 0.5):
+            with self.subTest(depth=depth):
+                with self.assertRaises(ToolingError) as ctx:
+                    Operation('holes', 1, scope={'purpose': 'spot', 'spot_depth': depth})
+                self.assertIn('spot_depth', str(ctx.exception))
+
+    def test_spot_depth_cannot_exceed_the_stock(self):
+        with self.assertRaises(ToolingError) as ctx:
+            build_job(thickness=0.06,
+                      tools=[Tool(1, 'centre', 0.125, 2, type='drill'),
+                             Tool(2, 'em', 0.25, 2)],
+                      parts=[PartOps(dxf_path=make_plate_dxf(), name='p', operations=[
+                          Operation('holes', 1, scope={'purpose': 'spot',
+                                                       'spot_depth': 0.2}),
+                          Operation('perimeter', 2)])])
+        self.assertIn('spot_depth', str(ctx.exception))
+
+    def test_scope_size_ranges_are_validated(self):
+        for key in ('min_diameter', 'max_diameter'):
+            for bad in (float('nan'), -1, 'wide'):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ToolingError):
+                        Operation('holes', 1, scope={key: bad})
+        for key in ('min_area', 'max_area'):
+            for bad in (float('inf'), -0.5):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ToolingError):
+                        Operation('pockets', 1, scope={key: bad})
+
+    def test_size_tolerance_is_validated_at_the_door(self):
+        with self.assertRaises(ToolingError):
+            Operation('holes', 1, scope={'size_tolerance': float('nan')})
+        with self.assertRaises(ToolingError):
+            Operation('holes', 1, scope={'size_tolerance': -0.01})
+
+    def test_tool_fields_reject_nan(self):
+        for field, value in (('diameter', float('nan')), ('flutes', float('nan')),
+                             ('included_angle', float('nan'))):
+            with self.subTest(field=field):
+                with self.assertRaises(ToolingError):
+                    Tool.from_dict({'slot': 1, 'name': 'x', 'diameter': 0.25,
+                                    field: value})
+
+    def test_bad_scope_from_an_ops_file_is_a_clean_refusal(self):
+        """`json.loads` accepts a bare NaN literal, so this is a real posted payload."""
+        data = json.loads('{"op_type": "holes", "tool_slot": 1, '
+                          '"scope": {"spot_depth": NaN}}')
+        with self.assertRaises(ToolingError):
+            Operation.from_dict(data)
 
 
 class TestOperationOrdering(unittest.TestCase):
@@ -317,7 +394,17 @@ class TestFeeds(unittest.TestCase):
     def test_material_alias_maps_to_the_feeds_model(self):
         self.assertEqual(tooling.resolve_feeds_material('aluminum'), 'aluminum_6063')
         self.assertEqual(tooling.resolve_feeds_material('polycarb'), 'polycarbonate')
-        self.assertEqual(tooling.resolve_feeds_material('something_custom'), 'plywood')
+
+    def test_team_defined_material_skips_the_model(self):
+        """None means "the team's preset is the answer" - not "use plywood". Quoting
+        brass or delrin off wood's chipload model overwrote tested numbers."""
+        cfg = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M', 'materials': {'something_custom': {'name': 'Custom'}}}}})
+        self.assertIsNone(tooling.resolve_feeds_material('something_custom', cfg))
+
+    def test_material_nobody_knows_is_refused(self):
+        with self.assertRaises(ToolingError):
+            tooling.resolve_feeds_material('something_custom')
 
 
 class TestChamferGeometry(unittest.TestCase):
@@ -2209,3 +2296,67 @@ class TestLocalMode(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSpindleSpeedFollowsTheOperation(unittest.TestCase):
+    """One tool, several operations, several derived RPMs - and only the first was ever
+    commanded.
+
+    The feeds model quotes a different spindle speed per operation (a slot, a pocket and
+    a profile are not the same cut), and the section header prints the number it derived.
+    But S is only emitted at a tool change, so the pockets body announced 12000 RPM and
+    fed F30 while the spindle was still turning 9320 - 29% over the chipload the aluminum
+    guard had validated. Reversed, the same gap lands in the rubbing regime.
+    """
+
+    def _job(self):
+        return build_job(
+            material='aluminum', thickness=0.25,
+            tools=[Tool(1, '1/8 in 1-flute endmill', 0.125, 1)],
+            parts=[PartOps(dxf_path=make_plate_dxf(), name='plate', operations=[
+                Operation('holes', 1), Operation('pockets', 1),
+                Operation('perimeter', 1)])])
+
+    def test_each_body_runs_at_the_rpm_it_announces(self):
+        result = generate(self._job())
+        self.assertTrue(result.success, result.errors)
+
+        commanded = None
+        for line in result.gcode.splitlines():
+            code = line.split('(')[0].split(';')[0].strip()
+            spoken = re.match(r'^S(\d+)\b', code)
+            if spoken:
+                commanded = int(spoken.group(1))
+                continue
+            announced = re.search(r'\(Tool [\d.]+ in diameter, feed [\d.]+ ipm, '
+                                  r'spindle (\d+) rpm\)', line)
+            if announced:
+                self.assertEqual(
+                    commanded, int(announced.group(1)),
+                    f"the section claims {announced.group(1)} RPM but the spindle was "
+                    f"last commanded {commanded}: {line}")
+
+    def test_a_changed_speed_is_given_time_to_settle(self):
+        result = generate(self._job())
+        lines = result.gcode.splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r'^S\d+\s*$', line.split(';')[0].strip()):
+                self.assertTrue(
+                    any(l.strip().startswith('G4 P') for l in lines[i:i + 3]),
+                    f'no dwell after the spindle change at line {i + 1}')
+
+    def test_one_speed_for_the_whole_job_emits_no_extra_s_words(self):
+        """Nothing changed means nothing to re-issue - no noise in the common case."""
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (6, 0), (6, 4), (0, 4)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        job = build_job(
+            tools=[Tool(1, '1/8 in 1-flute endmill', 0.125, 1)],
+            parts=[PartOps(dxf_path=path, name='plate',
+                           operations=[Operation('perimeter', 1)])])
+        result = generate(job)
+        self.assertTrue(result.success, result.errors)
+        speeds = [l for l in result.gcode.splitlines()
+                  if re.match(r'^S\d+', l.split(';')[0].strip())]
+        self.assertEqual(len(speeds), 1, speeds)
