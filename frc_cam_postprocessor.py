@@ -4444,6 +4444,11 @@ class FRCPostProcessor:
 
         return gcode
 
+    #: Below this toolpath radius there is nothing to mill: the helix and spiral both
+    #: collapse to a point, and a G3 whose I/J round to zero is GRBL error:33. Peck
+    #: straight down instead. Inches; a hole this close to the tool size IS the tool.
+    MIN_MILLABLE_RADIUS = 0.001
+
     def _generate_hole_gcode(self, cx: float, cy: float, diameter: float, needs_peck_drill: bool = False) -> List[str]:
         """
         Generate G-code for a hole using helical entry + spiral-out strategy,
@@ -4463,11 +4468,23 @@ class FRCPostProcessor:
         # If hole is too small for helical entry, use peck drilling to get down. A hole at
         # the tool size has a zero (or float-noise-negative) toolpath radius: clamp it to 0
         # so it becomes a pure straight peck drill (the peck helper skips lateral clearing).
-        if needs_peck_drill:
+        #
+        # A hole only a few ten-thousandths over the tool takes the same route. Milling it
+        # meant a helical entry at a radius that formats as zero: `G3 ... I-0.0000 J0`,
+        # which GRBL answers with error:33, seven thousand times over as the pass count
+        # went to 1/7137. A team config with min_millable_multiplier at 1.0 is all it took.
+        if needs_peck_drill or 0.0 <= final_toolpath_radius < self.MIN_MILLABLE_RADIUS:
             return self._generate_peck_drill_and_spiral_gcode(cx, cy, diameter, max(final_toolpath_radius, 0.0))
 
         if final_toolpath_radius <= 0:
-            gcode.append(f"(WARNING: Tool diameter {self.tool_diameter:.4f}\" is too large for {diameter:.4f}\" hole!)")
+            # An error, not a comment. This used to emit a note into an otherwise
+            # "successful" program and drop the feature, so the operator found the hole
+            # missing with the part off the machine. classify_holes catches it for a DXF;
+            # the multilayer and tube paths reach here by other routes.
+            self._add_error(
+                f'Hole at ({cx:.3f}, {cy:.3f}) is {diameter:.4f}" across, which the '
+                f'{self.tool_diameter:.4f}" tool cannot make. Use a smaller cutter for '
+                f'this hole, or drill it.')
             return gcode
 
         # Strategy: Helical entry at small radius, then spiral outward

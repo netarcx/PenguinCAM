@@ -7,6 +7,7 @@ solid keep-material). This asserts no cutting move in the ring path comes closer
 to the ring center than the inner radius.
 """
 import math
+import re
 import unittest
 
 from shapely.geometry import Point
@@ -197,6 +198,80 @@ class NarrowPocketHelixTest(unittest.TestCase):
         self.assertTrue(radii)
         expected = pp.tool_radius * pp.helix_radius_multiplier
         self.assertAlmostEqual(max(radii), expected, places=4)
+
+
+
+class HoleAtToolDiameterTest(unittest.TestCase):
+    """A team config with min_millable_multiplier at 1.0 lets a hole barely wider than
+    the cutter take the MILLING path, and the milling path has nowhere to go.
+
+    At a toolpath radius of 0.000025 the helical entry emitted `G3 ... I-0.0000 J0` -
+    a zero-radius arc, which GRBL answers with error:33 - 7137 times. And a hole the tool
+    is genuinely too big for was dropped with nothing but a G-code comment, so the
+    program reported success with the feature missing.
+    """
+
+    PERMISSIVE = None   # set in setUp; TeamConfig import is local to this module
+
+    def setUp(self):
+        import io
+        from contextlib import redirect_stdout
+        from team_config import TeamConfig
+        self.cfg = TeamConfig({'machining': {'holes': {'min_millable_multiplier': 1.0}}})
+        self._io, self._redirect = io, redirect_stdout
+
+    def _hole(self, diameter, tool=0.157):
+        with self._redirect(self._io.StringIO()):
+            pp = FRCPostProcessor(0.25, tool, config=self.cfg)
+            pp.apply_material_preset('plywood')
+            pp.circles = [{'center': (1.0, 1.0), 'diameter': diameter,
+                           'radius': diameter / 2}]
+            pp.polylines = [[(0, 0), (4, 0), (4, 3), (0, 3)]]
+            pp.identify_perimeter_and_pockets()
+            pp.classify_holes()
+            needs_peck = pp.holes[0]['needs_peck_drill'] if pp.holes else False
+            gcode = pp._generate_hole_gcode(1.0, 1.0, diameter,
+                                            needs_peck_drill=needs_peck)
+        return pp, gcode
+
+    def test_no_zero_radius_arc_is_ever_emitted(self):
+        for diameter in (0.15701, 0.15705, 0.1571, 0.1575, 0.158):
+            with self.subTest(diameter=diameter):
+                pp, gcode = self._hole(diameter)
+                for line in gcode:
+                    for word in ('I', 'J'):
+                        m = re.search(rf'\b{word}(-?[\d.]+)', line.split(';')[0])
+                        if m and line.split(';')[0].strip().startswith(('G2', 'G3')):
+                            self.assertNotAlmostEqual(
+                                abs(float(m.group(1))), 0.0, places=4,
+                                msg=f'zero-radius arc: {line}')
+
+    def test_a_hair_of_stock_is_pecked_not_milled(self):
+        pp, gcode = self._hole(0.15705)
+        text = '\n'.join(gcode)
+        self.assertIn('Peck', text)
+        self.assertNotIn('Helical pass', text)
+
+    def test_a_hole_the_tool_cannot_make_fails_the_program(self):
+        """Not a comment in a 'successful' program.
+
+        classify_holes catches this for a DXF, but the multilayer and tube paths reach
+        the hole generator by other routes, so the generator has to refuse for itself.
+        """
+        with self._redirect(self._io.StringIO()):
+            pp = FRCPostProcessor(0.25, 0.25, config=self.cfg)
+            pp.apply_material_preset('plywood')
+            gcode = pp._generate_hole_gcode(1.0, 1.0, 0.157, needs_peck_drill=False)
+        self.assertTrue(pp.errors, 'the dropped hole was only a comment')
+        joined = ' '.join(pp.errors)
+        self.assertIn('0.157', joined)
+        self.assertIn('0.250', joined)
+
+    def test_an_ordinary_hole_is_still_milled(self):
+        pp, gcode = self._hole(0.5)
+        text = '\n'.join(gcode)
+        self.assertIn('Helical pass', text)
+        self.assertFalse(pp.errors, pp.errors)
 
 
 if __name__ == '__main__':
