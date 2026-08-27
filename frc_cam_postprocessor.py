@@ -483,10 +483,17 @@ class FRCPostProcessor:
         preset_material = 'aluminum' if is_aluminum else material
         preset = self.config.get_material_preset(preset_material, machine_id)
 
-        # Check if we got a valid preset (config returns empty dict for unknown materials)
+        # The config returns an empty dict when nothing knows this material. That used
+        # to fall through to plywood with a printed warning nobody reads on a web
+        # request - and a wrong feed table in metal is a broken bit, not a cosmetic
+        # problem. Refuse, and say what would have worked.
         if not preset:
-            print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
-            preset = self.config.get_material_preset('plywood', machine_id)
+            known = self.config.known_material_ids(machine_id)
+            raise ValueError(
+                f"Unknown material {material!r}. PenguinCAM has no feeds for it, and "
+                f"guessing is how bits break. Known materials: {', '.join(known)}. "
+                f"To machine something else, add it to the machine's materials block "
+                f"in the team config.")
 
         # A material preset is shop-owned data and may be years older than this code.
         # The old PenguinCAM config template itself persisted 55 IPM / 0.200 in for
@@ -7974,7 +7981,10 @@ def main():
         pp = FRCPostProcessor(args.thickness, args.tool_diameter,
                               config=load_cli_config(args.config),
                               tool_flutes=args.tool_flutes)
-        pp.apply_material_preset(args.material)  # Tube facing is always aluminum family
+        try:
+            pp.apply_material_preset(args.material)  # Tube facing is always aluminum family
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.spindle_speed != 18000:
             pp.spindle_speed = args.spindle_speed
@@ -8049,7 +8059,10 @@ def main():
         # Apply material preset and user parameters (shared logic). Scaled to the
         # actual tool - a no-op for the drilled pattern's 0.201" bit, a derate for a
         # custom design milled with a small cutter. Explicit feed flags come last.
-        pp.apply_material_preset(args.material)
+        try:
+            pp.apply_material_preset(args.material)
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.user:
             pp.user_name = args.user
@@ -8140,7 +8153,10 @@ def main():
         # for the 4 mm reference tool; scale it to the tool actually specified. An
         # explicit --feed-rate / --plunge-rate afterwards is the user overriding the
         # derate on purpose, so those come last.
-        pp.apply_material_preset(args.material)
+        try:
+            pp.apply_material_preset(args.material)
+        except ValueError as exc:
+            parser.error(str(exc))
         pp.scale_feeds_to_tool()
         if args.max_pass_depth is not None:
             try:

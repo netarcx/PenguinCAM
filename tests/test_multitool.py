@@ -317,7 +317,17 @@ class TestFeeds(unittest.TestCase):
     def test_material_alias_maps_to_the_feeds_model(self):
         self.assertEqual(tooling.resolve_feeds_material('aluminum'), 'aluminum_6063')
         self.assertEqual(tooling.resolve_feeds_material('polycarb'), 'polycarbonate')
-        self.assertEqual(tooling.resolve_feeds_material('something_custom'), 'plywood')
+
+    def test_team_defined_material_skips_the_model(self):
+        """None means "the team's preset is the answer" - not "use plywood". Quoting
+        brass or delrin off wood's chipload model overwrote tested numbers."""
+        cfg = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M', 'materials': {'something_custom': {'name': 'Custom'}}}}})
+        self.assertIsNone(tooling.resolve_feeds_material('something_custom', cfg))
+
+    def test_material_nobody_knows_is_refused(self):
+        with self.assertRaises(ToolingError):
+            tooling.resolve_feeds_material('something_custom')
 
 
 class TestChamferGeometry(unittest.TestCase):

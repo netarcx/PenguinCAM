@@ -204,24 +204,37 @@ MATERIALS['aluminum_6063'] = {
 }
 
 
+#: Word-tokens that name the aluminum family. Matched as whole words after splitting
+#: on anything that is not a letter, never as substrings - "alder" contains "al" and is
+#: a wood, and a wood running at aluminum feeds is as wrong as the reverse.
+ALUMINUM_WORDS = frozenset({'al', 'alu', 'aluminum'})
+
+#: Alloy designations that identify aluminum wherever they appear in an id, so
+#: "al6061", "6061-T6" and "AL 7075" all land in the family.
+ALUMINUM_ALLOY_MARKERS = ('6061', '6063', '7075')
+
+
 def canonical_material_key(material):
     """Return the feeds-model key for a known material spelling, or ``None``.
 
     Alloy names arrive from YAML, the web API, saved jobs, and the CLI. Treat every
     normal spelling of 6061/6063 as aluminum before any fallback can select plywood.
     An unspecified ``aluminum`` resolves as 6063, the less-machinable alloy, so the
-    generic preset is conservative for either alloy.
+    generic preset is conservative for either alloy - and so does 7075, which the model
+    does not carry its own numbers for.
+
+    Returning ``None`` is a real answer: nothing in the model knows this material, and
+    callers must refuse rather than substitute a table they have no reason to trust.
     """
     token = re.sub(r'[^a-z0-9]+', '_', str(material or '').strip().lower()).strip('_')
     token = token.replace('aluminium', 'aluminum')
     if not token:
         return None
-    if '6063' in token and ('aluminum' in token or token.startswith('6063')):
-        return 'aluminum_6063'
-    if '6061' in token and ('aluminum' in token or token.startswith('6061')):
-        return 'aluminum_6061'
-    if token in ('aluminum', 'aluminum_tube'):
-        return 'aluminum_6063'
+    words = set(w for w in re.split(r'[^a-z]+', token) if w)
+    if words & ALUMINUM_WORDS or any(m in token for m in ALUMINUM_ALLOY_MARKERS):
+        # 6061 is the one grade with its own numbers. 6063, 7075 and unspecified
+        # aluminum all take the 6063 preset: it is the most conservative of the three.
+        return 'aluminum_6061' if '6061' in token else 'aluminum_6063'
     aliases = {'polycarb': 'polycarbonate'}
     resolved = aliases.get(token, token)
     return resolved if resolved in MATERIALS else None
@@ -271,7 +284,14 @@ def calculate_drill_feeds(machine, material, tool):
     """
     m = _resolve(machine, MACHINES, 'machine')
     mat_key = canonical_material_key(material) if isinstance(material, str) else None
-    drill = DRILLING.get(mat_key) or DRILLING['plywood']
+    drill = DRILLING.get(mat_key)
+    if drill is None:
+        # Falling back to plywood here ran a twist drill in an unknown metal at 300 SFM
+        # and wood's feed per revolution. There is no safe guess for a material nobody
+        # has quoted; refuse and let the caller say so.
+        raise ValueError(
+            f"No drilling data for material {material!r}. Known drilling materials: "
+            + ', '.join(sorted(DRILLING)))
 
     diameter = float(tool['diameter'])
     if diameter <= 0:

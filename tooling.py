@@ -534,12 +534,32 @@ class MultiToolJob:
 
 # ------------------------------------------------------------------------- feeds/speeds
 
-def resolve_feeds_material(material: str) -> str:
-    """Map a PenguinCAM material id onto a `feeds_speeds` material key."""
+def resolve_feeds_material(material: str, config: Optional[TeamConfig] = None,
+                           machine_id: Optional[str] = None) -> Optional[str]:
+    """Map a PenguinCAM material id onto a `feeds_speeds` material key.
+
+    Three outcomes, and the difference between them matters:
+
+    * a key, when the feeds model carries numbers for this material;
+    * ``None``, when it does not but the TEAM CONFIG defines a preset. Those are the
+      team's own tested feeds and the caller must use them as they stand. Falling back
+      to ``'plywood'`` here re-derived brass, delrin and garolite from wood's chipload
+      model and overwrote the tuned preset with it;
+    * ``ToolingError``, when nothing knows the material at all. There is no safe guess.
+    """
     key = feeds_speeds.canonical_material_key(material)
     if key is None:
         key = FEEDS_MATERIAL_ALIASES.get(str(material or '').lower(), '')
-    return key if key in feeds_speeds.MATERIALS else 'plywood'
+    if key in feeds_speeds.MATERIALS:
+        return key
+    cfg = config or TeamConfig()
+    if cfg.get_material_preset(material, machine_id):
+        return None
+    known = sorted(set(feeds_speeds.MATERIALS) | set(cfg.known_material_ids(machine_id)))
+    raise ToolingError(
+        f"Unknown material {material!r}: neither the feeds model nor the team config "
+        f"has numbers for it, and a guessed feed rate is how bits break. Known "
+        f"materials: {', '.join(known)}.")
 
 
 def resolve_feeds_machine(machine_id: Optional[str]) -> str:
@@ -550,7 +570,8 @@ def resolve_feeds_machine(machine_id: Optional[str]) -> str:
 
 
 def compute_tool_feeds(tool: Tool, material: str, machine_id: Optional[str],
-                       op_type: str, feeds_machine: Optional[str] = None
+                       op_type: str, feeds_machine: Optional[str] = None,
+                       config: Optional[TeamConfig] = None
                        ) -> Tuple[Dict[str, Any], List[str]]:
     """Derive this tool's feeds/speeds for this operation.
 
@@ -568,7 +589,23 @@ def compute_tool_feeds(tool: Tool, material: str, machine_id: Optional[str],
         (resolve_feeds_machine(candidate) for candidate in (feeds_machine, machine_id)
          if candidate and str(candidate).lower() in feeds_speeds.MACHINES),
         DEFAULT_FEEDS_MACHINE)
-    material_key = resolve_feeds_material(material)
+    material_key = resolve_feeds_material(material, config, machine_id)
+
+    if material_key is None:
+        # The team defined this material; the feeds model has never heard of it. Their
+        # preset - already applied to the post-processor - IS the answer. Overlaying the
+        # model here would quote a different material's chipload over tested numbers.
+        feeds = {
+            'unmodelled_material': True,
+            'machine_key': machine_key,
+            'material_key': None,
+            'operation': 'preset',
+            'warnings': [],
+        }
+        return feeds, [
+            f"{material} has no entry in the feeds model, so this job runs the team "
+            f"config's preset feeds for it unchanged. Verify them against a test cut "
+            f"before trusting a long program."]
 
     if tool.type == 'drill':
         # Drilling is quoted on surface speed and feed per revolution, not chipload per
@@ -687,6 +724,18 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
     """
     d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
     material_key = feeds.get('material_key')
+
+    if feeds.get('unmodelled_material'):
+        # Nothing to overlay: the post-processor already carries the team's own preset
+        # for this material, which is the only tested number anyone has. Explicit
+        # per-tool overrides still win, as they do everywhere else.
+        if tool.spindle_speed:
+            pp.spindle_speed = int(tool.spindle_speed)
+        if tool.feed_rate:
+            pp.feed_rate = float(tool.feed_rate)
+        if tool.plunge_rate:
+            pp.plunge_rate = float(tool.plunge_rate)
+        return
 
     # Final defense in depth: callers outside generate_operation historically skipped
     # the anchoring helper. Mutate the shared feed record so every downstream consumer
@@ -1271,7 +1320,8 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     """
     tool = job.tool(op.tool_slot)
     feeds, warnings = compute_tool_feeds(tool, job.material, job.machine_id, op.op_type,
-                                         feeds_machine=job.feeds_machine)
+                                         feeds_machine=job.feeds_machine,
+                                         config=job.config)
 
     pp = build_part_postprocessor(job, part, tool.diameter)
     anchor_warning = _anchor_metal_feed(pp, tool, feeds)
@@ -1307,7 +1357,7 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     pp._pending_clearance_rapid = True
 
     mismatch = _check_tool_suits_operation(op, tool)
-    material_key = resolve_feeds_material(job.material)
+    material_key = resolve_feeds_material(job.material, job.config, job.machine_id)
     flute_cap = feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max')
     if (not mismatch and tool.type == 'endmill' and flute_cap
             and tool.flutes > flute_cap):
@@ -1839,6 +1889,12 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     # assignment is reported as such instead of surfacing later as whatever downstream
     # complaint happens to fire first.
     errors: List[str] = []
+    # Before anything reads a DXF: does anyone have feeds for this material? A material
+    # nobody knows used to reach the generator and come back out as plywood numbers.
+    try:
+        resolve_feeds_material(job.material, job.config, job.machine_id)
+    except ToolingError as exc:
+        return PostProcessorResult(success=False, errors=[str(exc)])
     for part in job.parts:
         for op in part.operations:
             mismatch = _check_tool_suits_operation(op, job.tool(op.tool_slot))

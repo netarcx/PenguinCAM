@@ -333,12 +333,15 @@ class TestMaterialPresets(unittest.TestCase):
         self.assertEqual(pp.feed_rate, 75.0)
         self.assertEqual(pp.stepover_percentage, 0.55)
 
-    def test_invalid_material_falls_back_to_plywood(self):
+    def test_invalid_material_is_refused(self):
+        """Falling back to plywood was how `--material al6061` ran 6061 at 75 IPM and
+        18000 RPM with no aluminum protections at all. Nothing knows this material, so
+        there is nothing safe to run: refuse and name what IS known."""
         pp = FRCPostProcessor(0.25, 0.157)
-        pp.apply_material_preset('unobtainium')
-        # Should fall back to plywood defaults
-        self.assertEqual(pp.feed_rate, 75.0)
-        self.assertEqual(pp.ramp_angle, 20.0)
+        with self.assertRaises(ValueError) as caught:
+            pp.apply_material_preset('unobtainium')
+        self.assertIn('unobtainium', str(caught.exception))
+        self.assertIn('plywood', str(caught.exception))
 
     def test_mm_units_converts_feed_rates(self):
         pp = FRCPostProcessor(6.35, 4.0, units='mm')  # 0.25" = 6.35mm
@@ -500,9 +503,16 @@ class TestCornerSlowdown(unittest.TestCase):
         pc = FRCPostProcessor(0.25, 0.157); pc.apply_material_preset('polycarbonate')
         self.assertAlmostEqual(al.corner_min_feed_scale, 0.6)   # keeps a real chip at protected RPM
         self.assertAlmostEqual(pc.corner_min_feed_scale, 0.7)   # heat-limited: gentler, preserve chip load
-        # A custom/unknown material falls back to the (softer) default, not the aluminum floor.
-        cust = FRCPostProcessor(0.25, 0.157); cust.apply_material_preset('mystery_material')
+        # A material the TEAM defined but the feeds model has not falls back to the
+        # (softer) default floor, not the aluminum one. A material nobody defined is
+        # refused outright rather than given anyone's numbers.
+        cfg = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M', 'materials': {'mystery_material': {'name': 'Mystery'}}}}})
+        cust = FRCPostProcessor(0.25, 0.157, config=cfg)
+        cust.apply_material_preset('mystery_material')
         self.assertAlmostEqual(cust.corner_min_feed_scale, 0.7)
+        with self.assertRaises(ValueError):
+            FRCPostProcessor(0.25, 0.157).apply_material_preset('mystery_material')
 
     def test_corner_slowdown_preserves_pocket_geometry(self):
         import re
