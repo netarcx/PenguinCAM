@@ -66,7 +66,9 @@ class TestControllerPortability(unittest.TestCase):
 
     def test_park_opt_in(self):
         g = self._flat_gcode(self._cfg(park_position={'x': 1.0, 'y': 2.0, 'z': -0.5}))
-        self.assertIn('G53 G0 X1.0 Y2.0', g)             # park appears only when configured
+        # Formatted to four decimals: an unformatted YAML float can emit X1e-05,
+        # which GRBL rejects outright.
+        self.assertIn('G53 G0 X1.0000 Y2.0000', g)       # park appears only when configured
         self.assertIn('G53 G0 Z-0.5000', g)
 
 

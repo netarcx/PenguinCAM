@@ -2646,7 +2646,8 @@ class FRCPostProcessor:
         Air/Mist -> M7 (mist output, e.g. air blast), Flood -> M8."""
         coolant = (self.machine_coolant or '').strip().lower()
         code = 'M7' if coolant in ('air', 'mist') else ('M8' if coolant == 'flood' else None)
-        return f'{code}  ; Coolant on ({self.machine_coolant})' if code else None
+        return (f'{code}  ; Coolant on, {sanitize_comment(self.machine_coolant)}'
+                if code else None)
 
     def _coolant_off_gcode(self):
         """Coolant-stop line (M9), or None if no coolant is configured."""
@@ -2696,7 +2697,7 @@ class FRCPostProcessor:
         px, py, pz = self.park_position
         return [
             f'G53 G0 Z{pz:.4f}  ; {comment}: raise to safe machine Z',
-            f'G53 G0 X{px} Y{py}  ; {comment}: move gantry to park position',
+            f'G53 G0 X{px:.4f} Y{py:.4f}  ; {comment}: move gantry to park position',
         ]
 
     def _force_board_datum_for_tube(self):
@@ -2947,7 +2948,9 @@ class FRCPostProcessor:
         # Use provided timestamp or generate one
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        timestamp_display = timestamp[:16]
+        # request.form.get('timestamp') is whatever the browser sent. Slicing to 16
+        # characters shortens it; it does not make it safe for a comment.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # Title
         gcode.append(f"({sanitize_comment(self.team_name, 'PenguinCAM').upper()} - Team {self.team_number})")
@@ -3018,7 +3021,7 @@ class FRCPostProcessor:
             if hasattr(self, 'layer_data'):
                 gcode.append(f"(Layers: {len(self.layer_data)} depths)")
         else:
-            gcode.append(f"(Coolant: {self.machine_coolant})")
+            gcode.append(f"(Coolant: {sanitize_comment(self.machine_coolant, 'None')})")
 
         gcode.append("")
 
@@ -6651,7 +6654,8 @@ class FRCPostProcessor:
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Format for G-code header (just date and time, no seconds)
-        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
+        # Client-supplied; truncating to YYYY-MM-DD HH:MM is not sanitization.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE FACING OPERATION )')
@@ -6902,13 +6906,17 @@ class FRCPostProcessor:
         if not timestamp:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Format for G-code header (just date and time, no seconds)
-        timestamp_display = timestamp[:16]  # YYYY-MM-DD HH:MM
+        # Client-supplied; truncating to YYYY-MM-DD HH:MM is not sanitization.
+        timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
         # === HEADER ===
         gcode.append('( PENGUINCAM TUBE PATTERN OPERATION )')
         gcode.append(f'( Generated: {timestamp_display} )')
         if hasattr(self, 'user_name') and self.user_name:
-            gcode.append(f'( User: {self.user_name} )')
+            # A Google/Onshape display name reads like "Trent Fox (Mentor) Jose" - a
+            # nested paren and a non-ASCII byte, both forbidden. The plate header has
+            # sanitized this for a while; the tube header had not.
+            gcode.append(f"( User: {sanitize_comment(self.user_name, 'unknown')} )")
         gcode.append(f'( Tube height: {tube_height:.3f}" )')
         # A drilled hole pattern runs a twist drill, not an end mill, and the header is
         # what the operator reads before loading a tool.

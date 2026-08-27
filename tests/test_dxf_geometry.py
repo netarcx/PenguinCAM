@@ -135,5 +135,109 @@ class TestHatchBulges(unittest.TestCase):
                          [(0, 0), (2, 0), (2, 1), (0, 1)])
 
 
+
+def comment_faults(gcode):
+    """Every CLAUDE.md comment rule broken by this program, as (line number, why)."""
+    faults = []
+    for number, line in enumerate(gcode.splitlines(), 1):
+        try:
+            line.encode('ascii')
+        except UnicodeEncodeError:
+            faults.append((number, f'non-ASCII: {line[:60]}'))
+        depth = deepest = 0
+        for char in line.split(';')[0]:
+            if char == '(':
+                depth += 1
+                deepest = max(deepest, depth)
+            elif char == ')':
+                depth -= 1
+        if deepest > 1:
+            faults.append((number, f'nested comment: {line[:60]}'))
+        inside = False
+        for char in line:
+            if char == '(':
+                inside = True
+            elif char == ')':
+                inside = False
+            elif inside and char in '[]':
+                faults.append((number, f'bracket in comment: {line[:60]}'))
+                break
+    return faults
+
+
+class TestHostileTextInHeaders(unittest.TestCase):
+    """Names and timestamps reach the header straight from a Google account, an Onshape
+    session and a form field. The plate header learned to sanitise them; the tube header
+    did not, and neither did the coolant name or the timestamp anywhere.
+    """
+
+    HOSTILE_USER = 'Trent (Coach) Fox José'
+    HOSTILE_TIME = '2026-08-27 (12:00) [utc]—'
+    HOSTILE_COOLANT = 'Air (comp) [shop]'
+
+    def _config(self):
+        from team_config import TeamConfig
+        return TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M', 'machine': {'coolant': self.HOSTILE_COOLANT}}}})
+
+    def test_a_tube_program_survives_it(self):
+        with redirect_stdout(io.StringIO()):
+            pp = FRCPostProcessor(0.0625, 0.157, config=self._config())
+            pp.apply_material_preset('aluminum_tube')
+            pp.tube_height = 1.0
+            pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+            pp.user_name = self.HOSTILE_USER
+            result = pp.generate_tube_pattern_gcode(
+                tube_height=1.0, square_end=True, cut_to_length=False,
+                tube_width=2.0, tube_length=12.0, timestamp=self.HOSTILE_TIME)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(comment_faults(result.gcode), [])
+
+    def test_a_tube_facing_program_survives_it(self):
+        with redirect_stdout(io.StringIO()):
+            pp = FRCPostProcessor(0.0625, 0.157, config=self._config())
+            pp.apply_material_preset('aluminum_tube')
+            pp.user_name = self.HOSTILE_USER
+            result = pp.generate_tube_facing_gcode(tube_size='1x1',
+                                                   timestamp=self.HOSTILE_TIME)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(comment_faults(result.gcode), [])
+
+    def test_a_plate_program_survives_it(self):
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (4, 0), (4, 3), (0, 3)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        try:
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(0.25, 0.157, config=self._config())
+                pp.apply_material_preset('plywood')
+                pp.user_name = self.HOSTILE_USER
+                pp.load_dxf(path)
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                result = pp.generate_gcode(timestamp=self.HOSTILE_TIME)
+            self.assertTrue(result.success, result.errors)
+            self.assertEqual(comment_faults(result.gcode), [])
+        finally:
+            os.remove(path)
+
+    def test_a_park_position_is_formatted_not_repr(self):
+        """An unformatted YAML float emits X1e-05, which GRBL rejects outright."""
+        from team_config import TeamConfig
+        cfg = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M', 'machine': {'park_position': {'x': 0.00001, 'y': -0.5,
+                                                       'z': -0.25}}}}})
+        with redirect_stdout(io.StringIO()):
+            pp = FRCPostProcessor(0.25, 0.157, config=cfg)
+            pp.apply_material_preset('plywood')
+            park = pp._park_gcode()
+        self.assertTrue(park)
+        for line in park:
+            self.assertNotIn('e-', line)
+            self.assertNotIn('e+', line)
+
+
 if __name__ == '__main__':
     unittest.main()

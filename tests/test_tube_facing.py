@@ -290,7 +290,7 @@ class TestTubeFacingGeneration(unittest.TestCase):
         pp = FRCPostProcessor(0.25, 0.157, config=cfg)
         content = pp.generate_tube_facing_gcode(tube_size='1x1').gcode
         self.assertIn("G53 G0 Z-0.2500", content)      # raise to machine safe Z
-        self.assertIn("G53 G0 X0.5 Y-0.5", content)    # gantry to the configured park spot
+        self.assertIn("G53 G0 X0.5000 Y-0.5000", content)  # gantry to the park spot
 
     def test_tube_wcs_defaults_to_g54(self):
         """With no tube WCS configured, tube ops run in G54 (operator zeros it per tube) -
