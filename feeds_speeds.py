@@ -361,7 +361,15 @@ def _resolve(spec, presets, kind):
     if isinstance(spec, dict):
         base = {}
         if spec.get('preset'):
-            base = dict(presets.get(spec['preset'], {}))
+            # Named, so it must exist. Resolving an unknown name to an empty base left
+            # the caller's handful of overrides standing in for the whole spec, and the
+            # first field the model reached for was simply absent - surfacing in the
+            # calculator API as `KeyError: 'preferred_rpm'`, a 500 with nothing in it
+            # for whoever typed the name.
+            if spec['preset'] not in presets:
+                raise ValueError(f"Unknown {kind} preset: {spec['preset']!r}. "
+                                 f"Options: {sorted(presets)}")
+            base = dict(presets[spec['preset']])
         base.update({k: v for k, v in spec.items() if k != 'preset'})
         return base
     raise TypeError(f"{kind} must be a preset key or dict, got {type(spec).__name__}")
