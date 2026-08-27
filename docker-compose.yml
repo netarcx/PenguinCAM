@@ -1,0 +1,23 @@
+services:
+  penguincam:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: penguincam:local
+    init: true
+    restart: unless-stopped
+    environment:
+      PORT: "6238"
+      PENGUINCAM_LOCAL: "1"
+      EMBED_COOKIES: "0"
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:-penguincam-local-development-key}"
+      PENGUINCAM_CONFIG: /app/PenguinCAM-config.yaml
+    ports:
+      # Local mode has no sign-in, so expose it only on the Docker host.
+      - "127.0.0.1:${PENGUINCAM_PORT:-6238}:6238"
+    volumes:
+      # Set PENGUINCAM_CONFIG_FILE to use a different team's machine config.
+      - type: bind
+        source: "${PENGUINCAM_CONFIG_FILE:-./PenguinCAM-config-2129.yaml}"
+        target: /app/PenguinCAM-config.yaml
+        read_only: true
