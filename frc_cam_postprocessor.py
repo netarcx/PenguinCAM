@@ -405,7 +405,8 @@ class FRCPostProcessor:
         self.tabs_enabled = config.tabs_enabled  # Whether tabs are enabled
         self.tab_width = config.tab_width  # Width of tabs (inches)
         self.tab_height = config.tab_height  # How much material to leave in tab (inches)
-        self.tab_spacing = config.tab_spacing  # Desired spacing between tabs (inches)
+        # Config states the spacing in inches; a mm program was placing a tab every 2 mm.
+        self.tab_spacing = self._len(config.tab_spacing)
 
         # Fixturing preferences from config
         self.pause_before_perimeter = config.pause_before_perimeter  # Pause before perimeter for screw fixturing
@@ -709,34 +710,47 @@ class FRCPostProcessor:
             notes.append(f"feed scaled to {self.feed_rate:.1f} {unit} for the "
                          f"{diameter_in:.3f} in tool, from the 4 mm reference")
 
-        # The aluminum ceiling is a proven one-flute feed. With two flutes at the same
-        # RPM each tooth receives half the chip, rubs, builds heat, and welds aluminum
-        # to the edge. We deliberately do not raise the unproven feed; lower RPM just
-        # enough to preserve the material's minimum chipload, but never below the
+        # The preset feed is a proven ONE-FLUTE number. With two flutes at the same RPM
+        # each tooth receives half the chip and rubs - in aluminum it builds heat and
+        # welds to the edge; in wood and plastics it burnishes and burns. Either way the
+        # answer is the same and it is not to raise the unproven feed: lower RPM just
+        # enough to preserve the material's minimum chipload, and never below the
         # machine's spindle floor.
-        if feeds_speeds.is_aluminum_material(material_key):
-            minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+        #
+        # This was aluminum-only while the chipload REFUSAL below applied to every
+        # modelled material, so a plywood config the shop had used for years - 70 IPM,
+        # 18000 RPM, two flutes, 0.0019 per tooth against a 0.002 minimum - stopped
+        # generating instead of getting the RPM correction that would have fixed it.
+        chipload_model = feeds_speeds.MATERIALS.get(material_key) or {}
+        minimum = chipload_model.get('chipload_min')
+        if minimum:
+            is_aluminum = feeds_speeds.is_aluminum_material(material_key)
             machine_key = (self.machine_preset_id
                            if self.machine_preset_id in feeds_speeds.MACHINES
                            else 'omio_x8')
             spindle_floor = feeds_speeds.MACHINES[machine_key]['rpm_min']
             base_rpm_ceiling = ((self.feed_rate * to_inch)
                                 / (self.tool_flutes * minimum))
-            rpm_ceiling = ((self.feed_rate * to_inch) * self.corner_min_feed_scale
-                           / (self.tool_flutes * minimum))
+            # Aluminum coordinates against the CORNER feed as well as the straight one,
+            # so a slowed corner move cannot drop into the rubbing regime. The softer,
+            # heat-limited materials are held to the straight feed only.
+            rpm_ceiling = (base_rpm_ceiling * self.corner_min_feed_scale
+                           if is_aluminum else base_rpm_ceiling)
             if base_rpm_ceiling < spindle_floor - 1e-9:
+                material_name = chipload_model.get('name', material_key)
                 raise ValueError(
                     f'{diameter_in:.3f} in {self.tool_flutes}-flute cutter cannot make '
-                    f'the minimum aluminum chip at the {spindle_floor} RPM spindle '
-                    f'floor and the protected feed. Use a larger or 1-flute cutter.')
+                    f'the minimum {material_name} chip at the {spindle_floor} RPM '
+                    f'spindle floor and this feed. Use a larger or 1-flute cutter.')
             protected_rpm = max(spindle_floor, min(self.spindle_speed,
                                                    math.floor(rpm_ceiling)))
             if protected_rpm < self.spindle_speed:
                 old_rpm = self.spindle_speed
                 self.spindle_speed = int(protected_rpm)
+                scope = ('straight and corner' if is_aluminum else 'straight')
                 notes.append(f"spindle reduced from {old_rpm} to {self.spindle_speed} RPM "
-                             f"for {self.tool_flutes} flutes so straight and corner "
-                             f"chipload stay above {minimum:.4f} in/tooth")
+                             f"for {self.tool_flutes} flutes so {scope} "
+                             f"chipload stays above {minimum:.4f} in/tooth")
 
         # Pocket corners deliberately run below base_feed. Do not let that force
         # protection cross into rubbing: the lowest emitted F word must still make the
@@ -1102,6 +1116,39 @@ class FRCPostProcessor:
         else:
             return int_part + frac_value
 
+    #: $INSUNITS codes this cares about. Every other value (0 = unitless, and the
+    #: exotic ones: metres, feet, microns) is not worth second-guessing.
+    _INSUNITS_NAMES = {1: ('inch', 'inches'), 4: ('mm', 'millimetres')}
+
+    def _check_header_units(self, doc) -> None:
+        """Cross-check the drawing's own declared units against the job's.
+
+        $INSUNITS says what the drawing thinks its numbers mean. If it contradicts the
+        units this job was set up in, one of the two is wrong by a factor of 25.4 -
+        every coordinate, every thickness, every feed - and nothing else in the pipeline
+        would ever notice. So it is worth saying out loud.
+
+        WARN, never auto-convert. The header is unreliable in the wild: plenty of
+        exporters leave it at 0 or set it to whatever the template had, so trusting it
+        enough to rescale the geometry would break more parts than it saved.
+        """
+        try:
+            code = int(doc.header.get('$INSUNITS', 0) or 0)
+        except (TypeError, ValueError):
+            return
+        named = self._INSUNITS_NAMES.get(code)
+        if named is None or named[0] == self.units:
+            return
+        drawing_units = named[1]
+        job_units = 'inches' if self.units == 'inch' else 'millimetres'
+        message = (
+            f'The drawing says its units are {drawing_units} ($INSUNITS), but this job '
+            f'is set up in {job_units}. If the drawing is right, every dimension in the '
+            f'program is off by a factor of 25.4. Check the part size in the preview '
+            f'before you cut, and re-export or change the job units if it is wrong.')
+        print(f"  WARNING: {message}")
+        self.geometry_warnings.append(message)
+
     def load_dxf(self, filename: str):
         """Load DXF file and extract geometry, organized by layer if multi-layer DXF"""
         print(f"Loading {filename}...")
@@ -1111,6 +1158,7 @@ class FRCPostProcessor:
         self.open_chains = []
         doc = ezdxf.readfile(filename)
         msp = doc.modelspace()
+        self._check_header_units(doc)
 
         # Check for multi-layer structure
         layers_with_depths = {}
@@ -2617,6 +2665,43 @@ class FRCPostProcessor:
     # all three together - and the two datums then differ by exactly the stock
     # thickness, move for move (tests/test_unit.py asserts that).
 
+    def _len(self, inches: float) -> float:
+        """A length written in inches, in whatever units this program works in.
+
+        Feeds and several preset lengths were already converted for millimetre mode, but
+        a handful of Z-frame constants were used verbatim - and read as millimetres they
+        are absurd: 0.5 mm of traverse clearance over the stock, a 0.008 mm through-cut
+        overcut (the part stays attached), 0.1 mm of peck chip-clearance. Every inch
+        literal that is a LENGTH goes through here.
+        """
+        return inches * 25.4 if self.units == 'mm' else inches
+
+    #: How far above the last peck the tool rapids back to before cutting again. Enough
+    #: to clear chips left in the flute, small enough not to waste the cycle. Inches.
+    PECK_RETURN_CLEARANCE_IN = 0.02
+
+    #: Chip-clearing retract for a drilled hole: just above the stock, not the full safe
+    #: height - retracting to safe Z between every peck spends the cycle in rapids.
+    DRILL_RETRACT_CLEARANCE_IN = 0.1
+
+    #: Where a spot drill rapids down to before its feed move. Inches.
+    SPOT_APPROACH_CLEARANCE_IN = 0.05
+
+    #: Extra room a dry run leaves above the stock, over and above the clearance height.
+    DRY_RUN_EXTRA_CLEARANCE_IN = 0.25
+
+    @property
+    def peck_return_clearance(self) -> float:
+        return self._len(self.PECK_RETURN_CLEARANCE_IN)
+
+    @property
+    def drill_retract_clearance(self) -> float:
+        return self._len(self.DRILL_RETRACT_CLEARANCE_IN)
+
+    @property
+    def spot_approach_clearance(self) -> float:
+        return self._len(self.SPOT_APPROACH_CLEARANCE_IN)
+
     def _apply_z_frame(self):
         """Place material_top / retract_height / cut_depth for the current datum and
         stock thickness. Called from __init__ and again whenever the thickness or the
@@ -2626,14 +2711,19 @@ class FRCPostProcessor:
         # non-rotating end mill fed through plywood at 50 ipm, under a banner
         # promising the program does not cut anything. The requested lift is a
         # minimum; the stock decides the rest.
+        # The config states these in inches whatever the program's units are, so they
+        # are converted here rather than at every use.
+        clearance = self._len(self.clearance_height)
+        overcut = self._len(self.sacrifice_board_depth)
         self.dry_run_lift = (max(self.dry_run_request,
-                                 self.material_thickness + self.clearance_height + 0.25)
+                                 self.material_thickness + clearance
+                                 + self._len(self.DRY_RUN_EXTRA_CLEARANCE_IN))
                              if self.dry_run_request else 0.0)
         top = 0.0 if self.z_datum == Z_DATUM_STOCK_TOP else self.material_thickness
         top += self.dry_run_lift          # 0 for a real program
         self.material_top = top                                  # top face of the stock
-        self.retract_height = top + self.clearance_height        # rapid height over it
-        self.cut_depth = top - self.material_thickness - self.sacrifice_board_depth
+        self.retract_height = top + clearance                    # rapid height over it
+        self.cut_depth = top - self.material_thickness - overcut
 
     @property
     def stock_bottom(self) -> float:
@@ -2817,7 +2907,7 @@ class FRCPostProcessor:
         on any part with a central bearing bore.
         """
         poly = Polygon(self.perimeter)
-        margin = self.tool_radius + 0.05
+        margin = self.tool_radius + self._len(0.05)
         area = poly.buffer(-margin)
         if area.is_empty:
             return area
@@ -4131,10 +4221,6 @@ class FRCPostProcessor:
         half_angle = math.radians(max(1.0, min(179.0, point_angle)) / 2.0)
         return (diameter / 2.0) / math.tan(half_angle)
 
-    #: How far above the last peck the tool rapids back to before cutting again. Enough
-    #: to clear chips left in the flute, small enough not to waste the cycle.
-    PECK_RETURN_CLEARANCE = 0.02
-
     def _emit_peck_cycle(self, gcode: List[str], cx: float, cy: float,
                          final_depth: float, retract_plane: float,
                          peck_depth: float, feed: float) -> None:
@@ -4169,7 +4255,7 @@ class FRCPostProcessor:
             if previous < retract_plane:
                 # Coming back after a chip-clearing retract: rapid down to just above
                 # where the last peck stopped, then cut from there.
-                gcode.append(f"G0 Z{previous + self.PECK_RETURN_CLEARANCE:.4f}  "
+                gcode.append(f"G0 Z{previous + self.peck_return_clearance:.4f}  "
                              f"; Rapid back to just above the last peck")
             gcode.append(f"G1 Z{target:.4f} F{feed:.1f}  ; Peck {peck} of {pecks}")
             if peck < pecks:
@@ -4191,7 +4277,7 @@ class FRCPostProcessor:
 
         # Chip-clearing retract: just above the stock, not the full safe height - a G83
         # that retracts to safe Z between every peck spends the whole cycle in rapids.
-        retract_plane = self.material_top + 0.1
+        retract_plane = self.material_top + self.drill_retract_clearance
         if through:
             final_depth = self.cut_depth - point
             note = (f"(Through hole: {self.material_thickness:.4f} in stock plus "
@@ -4263,7 +4349,8 @@ class FRCPostProcessor:
         target = self.material_top - depth
         return [
             f"G0 X{cx:.4f} Y{cy:.4f}  ; Rapid over hole centre",
-            f"G0 Z{self.material_top + 0.05:.4f}  ; Down to just above the stock",
+            f"G0 Z{self.material_top + self.spot_approach_clearance:.4f}  "
+            f"; Down to just above the stock",
             f"G1 Z{target:.4f} F{self.plunge_rate:.1f}  ; Spot",
             f"G0 Z{self.retract_height:.4f}  ; Retract",
         ]
@@ -4285,7 +4372,8 @@ class FRCPostProcessor:
 
         # Peck drilling parameters (from material settings)
         peck_depth = self.peck_drill_depth
-        retract_plane = self.material_top + 0.1  # 0.1" above stock for chip clearing (not full retract)
+        # Just above the stock for chip clearing, not a full retract.
+        retract_plane = self.material_top + self.drill_retract_clearance
         final_depth = self.cut_depth  # Bottom of cut (negative value)
 
         # A hole at (essentially) the tool diameter has no material to clear beyond the
@@ -4374,6 +4462,11 @@ class FRCPostProcessor:
 
         return gcode
 
+    #: Below this toolpath radius there is nothing to mill: the helix and spiral both
+    #: collapse to a point, and a G3 whose I/J round to zero is GRBL error:33. Peck
+    #: straight down instead. Inches; a hole this close to the tool size IS the tool.
+    MIN_MILLABLE_RADIUS = 0.001
+
     def _generate_hole_gcode(self, cx: float, cy: float, diameter: float, needs_peck_drill: bool = False) -> List[str]:
         """
         Generate G-code for a hole using helical entry + spiral-out strategy,
@@ -4393,11 +4486,23 @@ class FRCPostProcessor:
         # If hole is too small for helical entry, use peck drilling to get down. A hole at
         # the tool size has a zero (or float-noise-negative) toolpath radius: clamp it to 0
         # so it becomes a pure straight peck drill (the peck helper skips lateral clearing).
-        if needs_peck_drill:
+        #
+        # A hole only a few ten-thousandths over the tool takes the same route. Milling it
+        # meant a helical entry at a radius that formats as zero: `G3 ... I-0.0000 J0`,
+        # which GRBL answers with error:33, seven thousand times over as the pass count
+        # went to 1/7137. A team config with min_millable_multiplier at 1.0 is all it took.
+        if needs_peck_drill or 0.0 <= final_toolpath_radius < self.MIN_MILLABLE_RADIUS:
             return self._generate_peck_drill_and_spiral_gcode(cx, cy, diameter, max(final_toolpath_radius, 0.0))
 
         if final_toolpath_radius <= 0:
-            gcode.append(f"(WARNING: Tool diameter {self.tool_diameter:.4f}\" is too large for {diameter:.4f}\" hole!)")
+            # An error, not a comment. This used to emit a note into an otherwise
+            # "successful" program and drop the feature, so the operator found the hole
+            # missing with the part off the machine. classify_holes catches it for a DXF;
+            # the multilayer and tube paths reach here by other routes.
+            self._add_error(
+                f'Hole at ({cx:.3f}, {cy:.3f}) is {diameter:.4f}" across, which the '
+                f'{self.tool_diameter:.4f}" tool cannot make. Use a smaller cutter for '
+                f'this hole, or drill it.')
             return gcode
 
         # Strategy: Helical entry at small radius, then spiral outward
@@ -4851,6 +4956,15 @@ class FRCPostProcessor:
 
         # Calculate helical entry parameters
         helix_radius = self.tool_radius * self.helix_radius_multiplier  # Helix radius from material preset
+
+        # A helical entry bores a hole of tool_radius + helix_radius from the centre, and
+        # a narrow pocket has nowhere to put it: in a 0.20" slot the preset radius on a
+        # 0.157" cutter swept 0.137 against a 0.100 half-width, cutting 0.037" into each
+        # wall before the toolpath proper began. Same clamp as the island-aware sibling.
+        max_helix_radius = offset_poly.boundary.distance(Point(entry_x, entry_y))
+        if helix_radius > max_helix_radius * 0.9:  # 90% safety factor
+            helix_radius = max(max_helix_radius * 0.9, self.tool_radius * 0.25)  # Floor at 25% of tool_radius
+
         ramp_start_height = self.material_top + self.ramp_start_clearance
         num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius, ramp_start_height=ramp_start_height)
 
@@ -6329,8 +6443,16 @@ class FRCPostProcessor:
             new_val = coord_val + offset
             return f'{axis}{new_val:.4f}'
 
+        # Only the CODE, never the comment. A comment describes the pre-offset frame and
+        # is prose, not words the machine reads: rewriting numbers in it turned
+        # "Depth level 1/2" into "Depth level 1/2.0000" and quietly moved every diameter
+        # a comment stated. If a comment should reflect the offset, it is written that
+        # way where it is emitted.
+        cut = min((i for i in (line.find('('), line.find(';')) if i >= 0),
+                  default=len(line))
+        code, comment = line[:cut], line[cut:]
         # Match axis letter followed by optional minus and digits
-        return re.sub(rf'{axis}(-?\d+\.?\d*)', replace_coord, line)
+        return re.sub(rf'{axis}(-?\d+\.?\d*)', replace_coord, code) + comment
 
     def _adjust_y_coordinate(self, line: str, y_offset: float) -> str:
         """
@@ -6389,6 +6511,39 @@ class FRCPostProcessor:
             'num_finishing_passes': num_finishing_passes,
             'finishing_depth_per_pass': finishing_depth_per_pass
         }
+
+    #: Material the roughing pass leaves for the cut-to-length finishing pass, inches.
+    CUT_TO_LENGTH_FINISH_STOCK = 0.0125
+    #: How far each arc advances in X, and its radius, in the arc-clearing pattern.
+    CUT_TO_LENGTH_ARC_ADVANCE = 0.04
+    CUT_TO_LENGTH_ARC_RADIUS = 0.05
+    #: How far the tool edge stands clear of the tube in X at the ends of a facing or
+    #: cut-to-length sweep.
+    TUBE_SWEEP_X_CLEARANCE = 0.05
+
+    def tube_swept_extents(self, tube_width: float, tube_length: float,
+                           square_end: bool, cut_to_length: bool) -> tuple:
+        """How much travel a tube program actually needs, in inches: (x_span, y_max).
+
+        Not the same as the tube. Facing and cutting to length both start and finish
+        CLEAR of the tube in X - tool radius plus 0.05 at each end - and the
+        cut-to-length arc reaches past the cut plane in Y by the finish stock, the arc
+        offset and the arc radius. Comparing the tube against the travel let a tube that
+        just fits the table produce a program that ran into the soft limit.
+        """
+        tool_radius = self.tool_diameter / 2.0
+        x_span = tube_width or 0.0
+        y_max = tube_length or 0.0
+        if square_end or cut_to_length:
+            x_span += 2 * (tool_radius + self.TUBE_SWEEP_X_CLEARANCE)
+        if cut_to_length:
+            half_advance = self.CUT_TO_LENGTH_ARC_ADVANCE / 2
+            j_offset = math.sqrt(self.CUT_TO_LENGTH_ARC_RADIUS ** 2 - half_advance ** 2)
+            y_max += (tool_radius + self.CUT_TO_LENGTH_FINISH_STOCK + j_offset
+                      + self.CUT_TO_LENGTH_ARC_RADIUS)
+            if square_end:
+                y_max += self.tube_facing_offset
+        return x_span, y_max
 
     #: Extra depth a pass must have gone past the nominal wall bottom before the middle
     #: of the tube counts as open. Extruded box tube wall thickness is a nominal figure;
@@ -6522,7 +6677,6 @@ class FRCPostProcessor:
         # frame, so the tool traces the same path in the air above the jig.
         z_top = tube_height + self.dry_run_lift        # Top of tube
         z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
-        z_final = z_top - total_depth  # Final depth (just over half height)
 
         chord_face = roughing_y + tool_radius  # Face position at chord (start/end of arc)
         gcode.append(f'( Tube facing: {tube_width:.2f}" wide x {tube_height:.2f}" tall )')
@@ -6934,7 +7088,27 @@ class FRCPostProcessor:
 
         Returns:
             PostProcessorResult with gcode string and stats
+
+        Raises:
+            ValueError: when the tube height or wall thickness is not physical.
         """
+        # The whole Z frame here is built from these two: the face-2 toolpath is lifted by
+        # (tube_height - wall thickness) and facing cuts to just over half the height. A
+        # wall thicker than half the tube therefore puts the cut through the far wall and
+        # into the jig, and a non-finite height crashed deeper in with an AttributeError
+        # from the coordinate rewriter. Only the Flask route checked this, so the CLI and
+        # any future caller had no guard at all. The route keeps its friendlier wording.
+        if not math.isfinite(tube_height) or tube_height <= 0:
+            raise ValueError(
+                f'Tube height must be a positive, finite number of inches, '
+                f'got {tube_height!r}.')
+        wall = self.material_thickness
+        if not math.isfinite(wall) or not 0 < wall < tube_height / 2:
+            raise ValueError(
+                f'The tube wall thickness ({wall!r} in) must be positive and less than '
+                f'half the {tube_height:.3f} in tube height. Anything thicker and the '
+                f'toolpath goes through the far wall into the jig.')
+
         self._force_board_datum_for_tube()
         # The second face is machined from a processor of its own, built by the caller -
         # so forcing the datum on `self` alone left face 2 on whatever the team config
@@ -7086,35 +7260,64 @@ class FRCPostProcessor:
         gcode.append(f'G0 Z{tube_safe_z:.4f}  ; Retract to safe height before any XY move')
         gcode.append('')
 
-        # Determine tube width for facing operations
-        if tube_width is None:
-            # Measured from the geometry, ALWAYS - not only when squaring. Face 2 is
-            # mirrored with X_new = tube_width - X_old, so a guessed width does not make
-            # the mirror approximate, it puts every face-2 feature at the wrong X. With
-            # the old default of 1.0 a 2" tube machined face 2 up to 1" off the near
-            # edge - into the jig.
-            tube_width = None
-            if True:
-                all_x_coords = []
-                if hasattr(self, 'holes'):
-                    for hole in self.holes:
-                        all_x_coords.append(hole['center'][0])
-                if hasattr(self, 'pockets'):
-                    for pocket in self.pockets:
-                        all_x_coords.extend([p[0] for p in pocket])
-                if hasattr(self, 'perimeter') and self.perimeter:
-                    all_x_coords.extend([p[0] for p in self.perimeter])
+        # Face 2 is mirrored with X_new = tube_width - X_old, so this number is not a
+        # nicety: get it wrong and every face-2 feature lands at the wrong X. The
+        # DECLARED width - the whitelisted tube size the operator picked - is the
+        # authority. The drawing's extents are only a cross-check, because a face whose
+        # features sit inboard (any ordinary hole pattern) measures narrower than the
+        # tube it goes on.
+        tube_warnings: List[str] = []
+        all_x_coords = []
+        if hasattr(self, 'holes'):
+            for hole in self.holes:
+                radius = hole.get('radius', hole.get('diameter', 0.0) / 2.0)
+                all_x_coords.extend([hole['center'][0] - radius,
+                                     hole['center'][0] + radius])
+        if hasattr(self, 'pockets'):
+            for pocket in self.pockets:
+                all_x_coords.extend([p[0] for p in pocket])
+        if hasattr(self, 'perimeter') and self.perimeter:
+            all_x_coords.extend([p[0] for p in self.perimeter])
+        measured_width = (max(all_x_coords) - min(all_x_coords)
+                          if len(all_x_coords) >= 2 else None)
+        if measured_width is not None and measured_width <= 0.1:
+            measured_width = None
 
-                if all_x_coords:
-                    calculated_width = max(all_x_coords) - min(all_x_coords)
-                    if calculated_width > 0.1:  # Only use if reasonable
-                        tube_width = calculated_width
-            if tube_width is None:
+        if tube_width is None:
+            if measured_width is None:
                 return PostProcessorResult(success=False, errors=[
                     'Could not measure the tube width from the drawing, and face 2 is '
                     'machined by mirroring about it. Pass the tube width explicitly '
                     '(--tube-width) rather than have every face-2 feature land at the '
                     'wrong X.'])
+            tube_width = measured_width
+            tube_warnings.append(
+                f'No tube width was given, so it was measured from the drawing as '
+                f'{tube_width:.3f}". Face 2 is mirrored about that number: if the '
+                f'drawing has no face outline the measurement is only as wide as the '
+                f'features, and every face-2 feature will be off by the difference.')
+        elif measured_width is not None and abs(measured_width - tube_width) > 0.05:
+            tube_warnings.append(
+                f'The drawing spans {measured_width:.3f}" in X but the declared tube '
+                f'width is {tube_width:.3f}". Face 2 is mirrored about the DECLARED '
+                f'width, which is right when the drawing simply has no face outline - '
+                f'but if the tube is really {measured_width:.3f}" wide, every face-2 '
+                f'feature will be off by {abs(measured_width - tube_width):.3f}".')
+
+        # Now that the width is known, check the TOOLPATH against the travel, not just
+        # the tube. See tube_swept_extents.
+        x_span, y_reach = self.tube_swept_extents(
+            tube_width, tube_length, square_end, cut_to_length)
+        x_max = self.config.machine_x_max
+        y_max = self.config.machine_y_max
+        if x_span > x_max + 1e-9 or y_reach > y_max + 1e-9:
+            return PostProcessorResult(success=False, errors=[
+                f'A {tube_width:.2f}" x {(tube_length or 0.0):.2f}" tube does not fit '
+                f'the machine ({x_max:.1f}" x {y_max:.1f}" of travel): the toolpath '
+                f'needs {x_span:.3f}" of X and reaches {y_reach:.3f}" in Y. Squaring the '
+                f'end and cutting to length both sweep clear of the tube, so the '
+                f'toolpath is bigger than the tube. Machine it in shorter sections, or '
+                f'use a longer-travel machine.'])
 
         # === PHASE 1: FIRST FACE (SQUARE + MACHINE PATTERN) ===
         gcode.append('( === PHASE 1: FIRST FACE === )')
@@ -7283,7 +7486,7 @@ class FRCPostProcessor:
             success=True,
             gcode='\n'.join(gcode),
             filename=filename,
-            warnings=[],
+            warnings=tube_warnings,
             stats={
                 'operation': 'tube_pattern',
                 'tube_height': tube_height,
@@ -7490,12 +7693,11 @@ class FRCPostProcessor:
 
         # For cut to length, the tool's -Y edge defines the kept part boundary
         # (opposite of tube facing where +Y edge defines the face)
-        # Roughing leaves 0.0125" for finishing pass
-        finish_stock = 0.0125  # Material left for finishing
+        finish_stock = self.CUT_TO_LENGTH_FINISH_STOCK
 
         # Arc clearing parameters (same as tube facing)
-        arc_advance = 0.04  # How far each arc advances in X
-        arc_radius = 0.05  # Arc radius
+        arc_advance = self.CUT_TO_LENGTH_ARC_ADVANCE
+        arc_radius = self.CUT_TO_LENGTH_ARC_RADIUS
         half_advance = arc_advance / 2
         j_offset = math.sqrt(arc_radius**2 - half_advance**2)
 
@@ -7533,7 +7735,6 @@ class FRCPostProcessor:
         # frame, so the tool traces the same path in the air above the jig.
         z_top = tube_height + self.dry_run_lift        # Top of tube
         z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
-        z_final = z_top - total_depth  # Final depth (just over half height)
 
         gcode.append(f'( Tube width: {tube_width:.2f}" x height: {tube_height:.2f}" )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" )')
@@ -8356,9 +8557,6 @@ def main():
                               tool_flutes=(1 if use_pattern and args.tube_pattern == 'holes'
                                            else args.tool_flutes))
 
-        # Store tube height for Z-offset calculations
-        pp.tube_height = args.tube_height
-
         # Apply material preset and user parameters (shared logic). Scaled to the
         # actual tool - a no-op for the drilled pattern's 0.201" bit, a derate for a
         # custom design milled with a small cutter. Explicit feed flags come last.
@@ -8389,14 +8587,36 @@ def main():
             args.tube_width = face_width
             if not any(a.startswith('--tube-height') for a in sys.argv):
                 args.tube_height = size_height
-                pp.tube_height = size_height
             pattern_warnings = pp.load_tube_pattern(
                 face_width, args.tube_length, mode=args.tube_pattern)
         else:
             pp.load_dxf(args.input_dxf)
             pp.transform_coordinates('bottom-left', args.rotation)  # Tube jig is always bottom-left
-            pp.classify_holes()
+            # identify_perimeter_and_pockets FIRST: it is what claims a circular outline
+            # as the perimeter and drops that circle from self.circles. Classifying holes
+            # first left a round part's outline machined as a giant hole as well.
             pp.identify_perimeter_and_pockets()
+            pp.classify_holes()
+
+        # NOW the explicit flags, honouring the "explicit feed flags come last" comment
+        # above. A drilled hole pattern's loader runs apply_twist_drill_feeds, which
+        # overwrote every feed the operator had just pinned - so --plunge-rate on an
+        # unusual drill was accepted and then discarded. They are still bounded: argparse
+        # rejects anything over the diameter-scaled aluminum ceiling before we get here,
+        # and validate_aluminum_cutting_parameters checks the final numbers at
+        # generation time.
+        if args.spindle_speed != 18000:
+            pp.spindle_speed = args.spindle_speed
+        if args.feed_rate is not None:
+            pp.feed_rate = args.feed_rate
+        if args.plunge_rate is not None:
+            pp.plunge_rate = args.plunge_rate
+            # A drilled hole has no lateral cut: its feed IS the plunge, and the peck
+            # moves read feed_rate. Leaving those apart would command the model's rate
+            # on the way down and the operator's nowhere at all.
+            if use_pattern and args.tube_pattern == 'holes' and args.feed_rate is None:
+                pp.feed_rate = args.plunge_rate
+                pp.ramp_feed_rate = args.plunge_rate
 
         # Debug: Check what was classified
         hole_count = len(pp.holes) if hasattr(pp, 'holes') else 0
@@ -8495,8 +8715,10 @@ def main():
         # Load and process DXF (shared logic)
         pp.load_dxf(args.input_dxf)
         pp.transform_coordinates(args.origin_corner, args.rotation)
-        pp.classify_holes()
+        # Perimeter first, then holes - see the tube branch above and the route in
+        # frc_cam_gui_app, which have always done it in this order.
         pp.identify_perimeter_and_pockets()
+        pp.classify_holes()
 
         # Call API to generate G-code
         base_name = os.path.splitext(os.path.basename(args.output_gcode))[0]
@@ -8531,7 +8753,9 @@ def main():
         print(f"  Tool radius: {pp.tool_radius:.4f}\"")
         print(f"  Perimeter: offset OUTWARD by {pp.tool_radius:.4f}\"")
         print(f"  Pockets: offset INWARD by {pp.tool_radius:.4f}\"")
-        print(f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" (holes < {pp.min_millable_hole:.3f}\" skipped)")
+        print(f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" "
+              f"(holes under {pp.min_millable_hole:.3f}\" are peck-drilled at the "
+              f"tool size, not milled)")
 
 
 if __name__ == '__main__':

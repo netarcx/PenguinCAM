@@ -16,7 +16,10 @@
   "z_datum": "sacrifice_board",
 
   "tools": [
-    { "slot": 1, "name": "1/8 in 1-flute endmill", "diameter": 0.125, "flutes": 1 },
+    { "slot": 1, "name": "1/8 in 1-flute endmill", "diameter": 0.125, "flutes": 1,
+      "_flute_length": "Optional. How deep this cutter can actually reach; a job that",
+      "_flute_length_2": "asks for more gets a warning. Unset, 4x diameter is assumed.",
+      "flute_length": 0.5 },
     { "slot": 2, "name": "1/4 in 1-flute endmill", "diameter": 0.250, "flutes": 1 },
     { "slot": 3, "name": "1/2 in 90 deg V-bit", "diameter": 0.500, "flutes": 2,
       "type": "vbit", "included_angle": 90 }
@@ -24,7 +27,7 @@
 
   "parts": [
     {
-      "dxf": "../sample_part.dxf",
+      "dxf": "example_plate.dxf",
       "name": "plate",
       "place_x": 0,
       "place_y": 0,

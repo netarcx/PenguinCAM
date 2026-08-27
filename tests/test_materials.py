@@ -189,5 +189,43 @@ class TestDrillingMaterialFallback(unittest.TestCase):
         self.assertGreater(drill['rpm'], 0)
 
 
+
+class TestPresetResolution(unittest.TestCase):
+    """A dict spec may name a base preset to start from. An unknown name resolved to an
+    empty base, so the caller's few overrides became the WHOLE spec and the first field
+    the model reached for was missing - surfacing in the calculator API as
+    `KeyError: 'preferred_rpm'`, a 500 with nothing in it for the user.
+    """
+
+    def test_an_unknown_machine_preset_is_named(self):
+        with self.assertRaises(ValueError) as caught:
+            feeds_speeds.calculate_feeds({'preset': 'omio_x9', 'rpm_max': 20000},
+                                         'plywood', {'diameter': 0.157, 'flutes': 1})
+        message = str(caught.exception)
+        self.assertIn('omio_x9', message)
+        self.assertIn('omio_x8', message)      # and says what there is
+
+    def test_an_unknown_material_preset_is_named(self):
+        with self.assertRaises(ValueError) as caught:
+            feeds_speeds.calculate_feeds('omio_x8',
+                                         {'preset': 'plywoood', 'chipload_min': 0.002},
+                                         {'diameter': 0.157, 'flutes': 1})
+        message = str(caught.exception)
+        self.assertIn('plywoood', message)
+        self.assertIn('plywood', message)
+
+    def test_a_known_preset_still_overlays(self):
+        feeds = feeds_speeds.calculate_feeds(
+            {'preset': 'omio_x8', 'feed_max': 90.0}, 'plywood',
+            {'diameter': 0.157, 'flutes': 1})
+        self.assertLessEqual(feeds['feed_xy'], 90.0)
+
+    def test_a_dict_with_no_preset_needs_no_base(self):
+        """A fully-specified custom spec is passed through as it stands."""
+        resolved = feeds_speeds._resolve({'rpm_min': 8000, 'rpm_max': 24000},
+                                        feeds_speeds.MACHINES, 'machine')
+        self.assertEqual(resolved, {'rpm_min': 8000, 'rpm_max': 24000})
+
+
 if __name__ == '__main__':
     unittest.main()

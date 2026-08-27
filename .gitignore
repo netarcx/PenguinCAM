@@ -63,3 +63,6 @@ tests/**/__pycache__/
 # Saved jobs (job_library.py): a team's own nests, with the DXFs stored alongside
 # them. Local data next to the local config, not something to commit.
 penguincam-jobs/
+
+# The bug-sweep work order: a scratch document, not part of the product.
+FIX_INSTRUCTIONS.md

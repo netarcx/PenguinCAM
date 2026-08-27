@@ -431,5 +431,73 @@ class TestDerateReachesTheProgram(unittest.TestCase):
         self.assertNotIn('feed scaled', result.gcode)
 
 
+
+class TestChiploadCoordinationForEveryMaterial(unittest.TestCase):
+    """RPM coordination was aluminum-only; the chipload REFUSAL applied to everything.
+
+    So a config the shop had been cutting plywood with for years - 70 IPM, 18000 RPM, a
+    two-flute cutter - stopped generating: 70 IPM at 18000 RPM on two flutes is 0.0019
+    per tooth against plywood's 0.002 minimum. The fix for that is the one aluminum
+    already had: drop the RPM until the chip is big enough. Refusal is for when even the
+    spindle floor cannot get there.
+    """
+
+    def _pp(self, material, feed, flutes=2, tool=0.157, rpm=18000):
+        cfg = TeamConfig({'version': 2, 'default_machine': 'omio_x8', 'machines': {
+            'omio_x8': {'name': 'Omio', 'materials': {material: {
+                'feed_rate': feed, 'ramp_feed_rate': 50.0, 'plunge_rate': 35.0,
+                'spindle_speed': rpm}}}}})
+        pp = FRCPostProcessor(0.25, tool, config=cfg, tool_flutes=flutes)
+        with redirect_stdout(io.StringIO()):
+            pp.apply_material_preset(material, 'omio_x8')
+            pp.scale_feeds_to_tool()
+        return pp
+
+    def _chipload(self, pp):
+        return pp.feed_rate / (pp.spindle_speed * pp.tool_flutes)
+
+    def test_two_flute_plywood_at_70_ipm_works_again(self):
+        pp = self._pp('plywood', 70.0)
+        minimum = feeds_speeds.MATERIALS['plywood']['chipload_min']
+        self.assertGreaterEqual(self._chipload(pp), minimum - 1e-9)
+        self.assertLess(pp.spindle_speed, 18000, 'the RPM was not coordinated down')
+        self.assertGreaterEqual(pp.spindle_speed,
+                                feeds_speeds.MACHINES['omio_x8']['rpm_min'])
+
+    def test_the_feed_the_shop_tested_is_not_reduced(self):
+        """Coordination lowers RPM, never the tested feed."""
+        pp = self._pp('plywood', 70.0)
+        self.assertAlmostEqual(pp.feed_rate, 70.0)
+
+    def test_every_modelled_material_gets_coordinated(self):
+        for material in ('plywood', 'polycarbonate', 'hdpe', 'srpp'):
+            with self.subTest(material=material):
+                pp = self._pp(material, 70.0)
+                minimum = feeds_speeds.MATERIALS[material]['chipload_min']
+                self.assertGreaterEqual(self._chipload(pp), minimum - 1e-9)
+
+    def test_it_still_refuses_when_the_floor_cannot_get_there(self):
+        """A four-flute cutter at 20 IPM asks 0.0008 per tooth at the 6000 RPM floor;
+        no amount of coordinating reaches 0.002."""
+        with self.assertRaises(ValueError) as caught:
+            self._pp('plywood', 20.0, flutes=4)
+        message = str(caught.exception).lower()
+        self.assertIn('chip', message)
+
+    def test_aluminum_keeps_its_corner_protected_ceiling(self):
+        """Aluminum coordinates against the CORNER feed, not just the straight one, so
+        a corner move cannot drop into the rubbing regime. That must not be relaxed."""
+        pp = self._pp('aluminum', 30.0, flutes=2)
+        minimum = feeds_speeds.MATERIALS['aluminum_6063']['chipload_min']
+        corner_feed = pp.feed_rate * pp.corner_min_feed_scale
+        self.assertGreaterEqual(corner_feed / (pp.spindle_speed * pp.tool_flutes),
+                                minimum - 1e-9)
+
+    def test_a_config_already_inside_the_model_is_untouched(self):
+        pp = self._pp('plywood', 75.0, flutes=1)
+        self.assertEqual(pp.spindle_speed, 18000)
+        self.assertAlmostEqual(pp.feed_rate, 75.0)
+
+
 if __name__ == '__main__':
     unittest.main()

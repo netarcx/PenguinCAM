@@ -93,6 +93,19 @@ DEFAULT_DRILL_SIZE_TOLERANCE = 0.010
 MAX_OPERATIONS_PER_JOB = 120
 MAX_PARTS_PER_JOB = 60
 
+#: How close a drill must be to the correct TAP drill to count as it. Independent of
+#: the clearance-snap tolerance above, and much tighter, because a tap drill is not a
+#: size you round to: at +/-0.010 a 10-32 accepted #25 (0.1495) through #19 (0.1660),
+#: five drill sizes. The wrong end strips the threads; the other end breaks the tap.
+#: drill_sizes.tap_drill_for already works to 0.002, so acceptance matches it.
+TAP_DRILL_TOLERANCE = 0.002
+
+#: The most a per-operation or job-level `size_tolerance` may widen tap acceptance to.
+#: Widening the CLEARANCE tolerance is legitimate - a shop stocking fractional drills
+#: only genuinely substitutes across a few thou - but the same number must not be
+#: allowed to loosen a tap drill into the next thread's size.
+MAX_TAP_DRILL_TOLERANCE = 0.003
+
 #: Beyond this the difference between the drawn hole and the drill is big enough to
 #: matter to whatever goes through it, so it is called out with the consequence even
 #: when the configured tolerance allows it. Half a 64th.
@@ -213,6 +226,10 @@ class Tool:
     flutes: int = 1
     type: str = 'endmill'
     included_angle: float = 90.0        # V-tools only: full included angle, degrees
+    #: Usable cutting length, inches. Optional, because most tool listings state it and
+    #: most tool boxes do not. It is the depth this cutter can actually reach; past it
+    #: the shank is rubbing the wall, which is how a bit is snapped in a deep pocket.
+    flute_length: Optional[float] = None
     spindle_speed: Optional[int] = None  # explicit overrides; None = derive
     feed_rate: Optional[float] = None
     plunge_rate: Optional[float] = None
@@ -252,6 +269,12 @@ class Tool:
             if checked > limit:
                 raise ToolingError(f"Tool T{self.slot} has a {field_name} of {checked:g}, "
                                    f"which is past any plausible machine limit ({limit:g}).")
+        if self.flute_length is not None:
+            try:
+                self.flute_length = _positive_finite(self.flute_length, 'flute length')
+            except (TypeError, ValueError) as exc:
+                raise ToolingError(
+                    f"Tool T{self.slot} has a bad flute length: {exc}") from exc
         if self.spindle_speed is not None:
             self.spindle_speed = int(float(self.spindle_speed))
         if self.feed_rate is not None:
@@ -272,7 +295,8 @@ class Tool:
                     f"{required}. A blank row in the tool table cannot be used.")
         known = {f: data[f] for f in
                  ('slot', 'name', 'diameter', 'flutes', 'type', 'included_angle',
-                  'spindle_speed', 'feed_rate', 'plunge_rate') if f in data}
+                  'flute_length', 'spindle_speed', 'feed_rate', 'plunge_rate')
+                 if f in data}
         known.setdefault('name', f"T{known.get('slot', '?')}")
         return cls(**known)
 
@@ -280,6 +304,7 @@ class Tool:
         return {'slot': self.slot, 'name': self.name, 'diameter': self.diameter,
                 'flutes': self.flutes, 'type': self.type,
                 'included_angle': self.included_angle,
+                'flute_length': self.flute_length,
                 'spindle_speed': self.spindle_speed, 'feed_rate': self.feed_rate,
                 'plunge_rate': self.plunge_rate}
 
@@ -303,12 +328,15 @@ class Tool:
 
     def description(self) -> str:
         """The line this tool gets in the header's tool table."""
-        return ', '.join([
+        bits = [
             f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
             f"{self.diameter:.4f} in diameter",
             f"{self.flutes} flute" + ('s' if self.flutes != 1 else ''),
             self.kind,
-        ])
+        ]
+        if self.flute_length:
+            bits.append(f"{self.flute_length:.3f} in flute length")
+        return ', '.join(bits)
 
 
 @dataclass
@@ -616,7 +644,7 @@ class MultiToolJob:
         drill against a 0.196 in drawing was rejected as "hole too small for tool" before
         the snapping tolerance ever got a say.
         """
-        return min(t.diameter - (DEFAULT_DRILL_SIZE_TOLERANCE if t.type == 'drill' else 0.0)
+        return min(t.diameter - (self.drill_size_tolerance if t.type == 'drill' else 0.0)
                    for t in self.tools)
 
 
@@ -1205,6 +1233,9 @@ def plan_drilled_holes(op: Operation, tool: Tool, holes: Sequence[Dict[str, Any]
         return planned, notes, errors
 
     if purpose == drill_sizes.PURPOSE_TAP:
+        # Tap acceptance has its OWN tolerance, and a widened clearance tolerance may
+        # only loosen it as far as MAX_TAP_DRILL_TOLERANCE.
+        tap_tolerance = min(max(tolerance, TAP_DRILL_TOLERANCE), MAX_TAP_DRILL_TOLERANCE)
         for hole in holes:
             drawn = hole['diameter']
             advice = drill_sizes.tap_drill_for(drawn)
@@ -1215,7 +1246,7 @@ def plan_drilled_holes(op: Operation, tool: Tool, holes: Sequence[Dict[str, Any]
                     f"clearance hole, or draw the hole at the tap drill size directly.")
                 continue
             sizes = [d.diameter for d in advice['tap_drills'] if d]
-            if not any(abs(size - tool.diameter) <= tolerance for size in sizes):
+            if not any(abs(size - tool.diameter) <= tap_tolerance for size in sizes):
                 wanted = ', '.join(d.describe() for d in advice['tap_drills'] if d)
                 errors.append(
                     f"{op.label}: to tap {'/'.join(advice['threads'])} at {drawn:.4f} in "
@@ -1438,6 +1469,10 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     depth_warning = _apply_depth(pp, op)
     if depth_warning:
         warnings.append(depth_warning)
+
+    reach_warning = _check_tool_reach(pp, tool)
+    if reach_warning:
+        warnings.append(reach_warning)
 
     errors: List[str] = []
     lines: List[str] = []
@@ -1777,6 +1812,17 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
         entry_notes=entry_notes,
     )
 
+    # A tool that cannot reach the bottom of its own cut is something the operator has
+    # to read at the machine, not only in the browser response - they may be running a
+    # file someone else generated.
+    reach_notes = [w for w in dict.fromkeys(all_warnings)
+                   if 'flute' in w.lower() and 'deep' in w.lower()]
+    if reach_notes:
+        gcode.append('')
+        gcode.append('(** CHECK TOOL REACH **)')
+        for note in reach_notes:
+            gcode.append(f'({sanitize_comment(note)})')
+
     # The fixturing pause belongs immediately before the first cut that frees a part from
     # the stock. When that boundary is also a tool change, fold the instructions into the
     # change rather than stopping the operator twice in a row.
@@ -1873,13 +1919,22 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     )
 
 
-def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[str]:
-    """Every machinable feature must be cut by exactly one operation.
+def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]
+                               ) -> Tuple[List[str], List[str]]:
+    """Every machinable feature must be CUT by exactly one operation.
+
+    Returns (errors, warnings).
 
     A feature no operation claims is silently absent from the program, and the operator
     discovers it with the part already off the machine - so this is an error, not a
     warning. A feature TWO operations claim gets cut twice, which at best wastes time and
     at worst bores an oversized hole.
+
+    A SPOT operation is not a cutting operation. It marks where a hole goes and leaves
+    the hole to be made elsewhere, so it neither satisfies coverage nor conflicts with
+    the op that does. Counting it did both harms at once: a plan of just
+    [spot, perimeter] passed in silence and shipped a plate of dimples, while
+    spot-then-drill - the documented workflow - was rejected as "would be cut twice".
 
     Both holes and pockets are checked, and neither check is conditional on the part
     happening to have an operation of that kind. Gating the hole check on "does this part
@@ -1887,7 +1942,8 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
     on a 5-hole plate passed silently and drilled nothing - the exact failure the check
     exists to prevent.
     """
-    errors = []
+    errors: List[str] = []
+    warnings: List[str] = []
 
     for kind, listed, select, describe in (
         ('hole', features['holes'], selected_hole_keys,
@@ -1899,11 +1955,14 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
             continue
         relevant = ('holes', 'interior') if kind == 'hole' else ('pockets', 'interior')
         by_key = {f['key']: f for f in listed}
-        claimed, double_claimed = set(), set()
+        claimed, double_claimed, spotted = set(), set(), set()
         for op in part.operations:
             if op.op_type not in relevant:
                 continue
             selected = select(features, op.scope)
+            if op.drill_purpose == drill_sizes.PURPOSE_SPOT:
+                spotted |= selected
+                continue
             double_claimed |= (selected & claimed)
             claimed |= selected
 
@@ -1913,14 +1972,23 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]) -> List[
                           f"operation and would be cut twice. Narrow one operation's scope.")
 
         unclaimed = [f for f in listed if f['key'] not in claimed]
-        if unclaimed:
-            what = ', '.join(sorted({describe(f) for f in unclaimed}))
+        spot_only = [f for f in unclaimed if f['key'] in spotted]
+        if spot_only:
+            what = ', '.join(sorted({describe(f) for f in spot_only}))
+            warnings.append(
+                f"{part.name}: {len(spot_only)} {kind}(s) are spotted but never drilled "
+                f"in this job ({what}). They will come off the machine as dimples - a "
+                f"drill press is assumed.")
+
+        missing = [f for f in unclaimed if f['key'] not in spotted]
+        if missing:
+            what = ', '.join(sorted({describe(f) for f in missing}))
             errors.append(
-                f"{part.name}: {len(unclaimed)} {kind}(s) are not cut by any operation "
+                f"{part.name}: {len(missing)} {kind}(s) are not cut by any operation "
                 f"({what}). Add a {'holes' if kind == 'hole' else 'pockets'} operation for "
                 f"them, or widen an existing operation's scope.")
 
-    return errors
+    return errors, warnings
 
 
 def _validate_profile_order(job: MultiToolJob) -> List[str]:
@@ -1935,14 +2003,20 @@ def _validate_profile_order(job: MultiToolJob) -> List[str]:
 
     With tabs enabled this is all fine and nothing is reported: `defer_tabs` holds the
     removal pass back to the end of the program.
+
+    `remove_tabs: false` is fine too, and used to be refused. The deferral in
+    generate_operation is gated on remove_tabs, so with it off no removal pass is emitted
+    ANYWHERE and the part comes off the machine still held by its tabs, for someone to
+    cut out by hand. The plan is safe and the message the check produced - "the part is
+    cut free and left loose on the table" - was simply untrue. Only the absence of tabs
+    frees the part.
     """
-    if job.config.tabs_enabled and job.config.remove_tabs:
+    if job.config.tabs_enabled:
         return []
 
     errors = []
     multi_part = len(job.parts) > 1
-    reason = ("tabs are disabled in your configuration" if not job.config.tabs_enabled
-              else "tab removal is disabled in your configuration")
+    reason = "tabs are disabled in your configuration"
 
     for part in job.parts:
         perimeter_at = next((i for i, op in enumerate(part.operations)
@@ -1962,6 +2036,41 @@ def _validate_profile_order(job: MultiToolJob) -> List[str]:
                 f"parts on the sheet are still being machined. Enable tabs, or run this "
                 f"part as its own job.")
     return errors
+
+
+#: When a tool does not state its flute length, this many diameters is taken as the
+#: point past which the cut is worth mentioning. Stub-length end mills are commonly
+#: around 3xD and standard ones 3-4xD, so a cut deeper than 4xD is past most cutters.
+ASSUMED_FLUTE_LENGTH_DIAMETERS = 4.0
+
+
+def _check_tool_reach(pp: FRCPostProcessor, tool: Tool) -> Optional[str]:
+    """Warn when the cut is deeper than the cutter can reach. Never refuses.
+
+    Flute length is the depth a cutter can actually cut to; past it the shank is rubbing
+    the wall, which is how a bit gets snapped in a deep pocket. Nothing in PenguinCAM
+    knew the number, so a program could ask a stub-length bit for a half-inch cut and
+    only the shank found out.
+
+    Advice rather than refusal on purpose: PenguinCAM cannot see how far the tool sticks
+    out of the collet, and a shop that knows its own reach knows better than the program.
+    """
+    depth = pp.material_top - pp.cut_depth
+    if depth <= 0:
+        return None
+    if tool.flute_length:
+        if depth <= tool.flute_length + 1e-9:
+            return None
+        return (f"{tool.label} cuts {depth:.3f} in deep but its flutes are only "
+                f"{tool.flute_length:.3f} in long. Past that the shank rubs the wall. "
+                f"Use a longer cutter, or machine the part in two setups.")
+    assumed = tool.diameter * ASSUMED_FLUTE_LENGTH_DIAMETERS
+    if depth <= assumed + 1e-9:
+        return None
+    return (f"{tool.label} cuts {depth:.3f} in deep, which is more than 4x its "
+            f"{tool.diameter:.3f} in diameter. Most end mills that size do not have "
+            f"that much flute. Check the cutter reaches, and set its flute length in "
+            f"the tool list so PenguinCAM can check for you.")
 
 
 def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
@@ -2014,8 +2123,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         surveys.append(features)
         errors.extend(f"{part.name}: {e}" for e in features['errors'])
 
+    coverage_warnings: List[str] = []
     for part, features in zip(job.parts, surveys):
-        errors.extend(_validate_feature_coverage(part, features))
+        part_errors, part_warnings = _validate_feature_coverage(part, features)
+        errors.extend(part_errors)
+        coverage_warnings.extend(part_warnings)
 
     # A profile is the cut that frees the part, and multi-tool is the first mode that can
     # schedule work AFTER one - so before generating anything, refuse any plan where a
@@ -2067,7 +2179,7 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
 
     # A part machined entirely with drills has no tool that can write. Say so - a name
     # that never got cut is exactly the kind of silence this feature exists to avoid.
-    job_warnings: List[str] = []
+    job_warnings: List[str] = list(coverage_warnings)
     if job.engrave:
         for index, part in enumerate(job.parts):
             if index not in engraved:

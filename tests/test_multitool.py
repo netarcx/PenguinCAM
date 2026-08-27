@@ -1690,7 +1690,7 @@ class TestWholePlanSuggestion(unittest.TestCase):
         dxf = make_mixed_dxf()
         features = self._survey(dxf)
         plan = tooling.suggest_tooling(features, mill_diameter=0.25)
-        errors = tooling._validate_feature_coverage(
+        errors, _ = tooling._validate_feature_coverage(
             PartOps(dxf_path=dxf, name='p', operations=plan['operations']), features)
         self.assertEqual(errors, [])
 
@@ -2360,3 +2360,279 @@ class TestSpindleSpeedFollowsTheOperation(unittest.TestCase):
         speeds = [l for l in result.gcode.splitlines()
                   if re.match(r'^S\d+', l.split(';')[0].strip())]
         self.assertEqual(len(speeds), 1, speeds)
+
+
+class TestTapDrillTolerance(unittest.TestCase):
+    """A tap drill is not a size you round to.
+
+    Tap acceptance shared the clearance-snap tolerance, and at +/-0.010 a 10-32 accepted
+    #25 (0.1495) through #19 (0.1660) - five drill sizes. The wrong end strips the
+    threads, the other end breaks the tap. drill_sizes.tap_drill_for itself works to
+    0.002; acceptance now matches it, and the job-level drill_size_tolerance - which is
+    legitimately widened by shops that stock fractional drills only - cannot widen tap
+    acceptance past 0.003.
+    """
+
+    #: 10-32: nominal 0.1900, tap drill #21 = 0.1590.
+    TEN_THIRTYTWO = 0.1900
+
+    def _plan(self, drill, tolerance=None):
+        scope = {'purpose': 'tap'}
+        if tolerance is not None:
+            scope['size_tolerance'] = tolerance
+        job = drill_job(self.TEN_THIRTYTWO, drill, **scope)
+        with redirect_stdout(io.StringIO()):
+            return tooling.generate_multitool_job(job, timestamp='2026-08-20 12:00:00')
+
+    def test_the_right_tap_drills_are_accepted(self):
+        # 0.190 is the nominal of BOTH 10-24 and 10-32, so #25 and #21 are each
+        # correct for one of them; the note says which and flags the ambiguity.
+        for drill, name in ((0.1590, '#21'), (0.1495, '#25')):
+            with self.subTest(drill=name):
+                result = self._plan(drill)
+                self.assertTrue(result.success, result.errors)
+                self.assertTrue(any('TAP DRILL' in w for w in result.warnings),
+                                result.warnings)
+
+    def test_a_drill_that_is_no_thread_s_tap_drill_is_refused(self):
+        # Both sit inside the old +/-0.010 window around #21 or #25 and are neither.
+        for drill, name in ((0.1660, '#19'), (0.1540, '#23')):
+            with self.subTest(drill=name):
+                result = self._plan(drill)
+                self.assertFalse(result.success,
+                                 f'{name} was accepted as a 10-32/10-24 tap drill')
+                self.assertTrue(any('tap' in e.lower() for e in result.errors),
+                                result.errors)
+
+    def test_a_widened_job_tolerance_cannot_widen_tap_acceptance(self):
+        """0.010 is a legitimate CLEARANCE tolerance. It is not a tap tolerance."""
+        result = self._plan(0.1660, tolerance=0.010)
+        self.assertFalse(result.success, 'a widened tolerance let #19 through')
+
+    def test_the_tap_tolerance_constant_is_tight(self):
+        self.assertLessEqual(tooling.TAP_DRILL_TOLERANCE, 0.002)
+        self.assertLessEqual(tooling.MAX_TAP_DRILL_TOLERANCE, 0.003)
+
+    def test_clearance_holes_keep_their_wider_tolerance(self):
+        """The snap tolerance exists for a reason and this must not narrow it."""
+        job = drill_job(0.1960, 0.1935, purpose='clearance', size_tolerance=0.010)
+        with redirect_stdout(io.StringIO()):
+            result = tooling.generate_multitool_job(job, timestamp='2026-08-20 12:00:00')
+        self.assertTrue(result.success, result.errors)
+
+
+class TestSpotDrillCoverage(unittest.TestCase):
+    """A spot drill does not make the hole - it marks where the hole goes.
+
+    Coverage counted a spot op as having "cut" a hole, so a plan of just
+    [spot, perimeter] passed in silence and shipped a plate of dimples. And because it
+    counted, spot + drill on the same holes - the documented workflow - was rejected as a
+    double claim that "would be cut twice".
+    """
+
+    HOLE = 0.1935
+
+    def _job(self, ops, tools=None):
+        return build_job(
+            tools=tools or [Tool(1, 'centre drill', 0.125, 2, type='drill'),
+                            Tool(2, '#10 drill', self.HOLE, 2, type='drill'),
+                            Tool(3, '1/4 endmill', 0.25, 2)],
+            parts=[PartOps(dxf_path=make_hole_dxf(self.HOLE, 2), name='plate',
+                           operations=ops)])
+
+    def test_spot_then_drill_is_legal(self):
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('holes', 2, 'Drill'),
+            Operation('perimeter', 3)]))
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('CENTRE DRILLING', result.gcode)
+        self.assertIn('DRILLING', result.gcode)
+
+    def test_spot_alone_warns_that_nothing_drilled_them(self):
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('perimeter', 3)]))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('spot', joined)
+        self.assertIn('drill press', joined, result.warnings)
+
+    def test_a_hole_no_operation_touches_is_still_an_error(self):
+        """Two holes; both ops take only the first. Nothing claims the second at
+        all, spot included, so it is missing rather than merely undrilled."""
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot',
+                      scope={'purpose': 'spot', 'indices': [0]}),
+            Operation('holes', 2, 'Drill', scope={'indices': [0]}),
+            Operation('perimeter', 3)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('not cut by any operation' in e for e in result.errors),
+                        result.errors)
+
+    def test_two_real_drill_ops_on_one_hole_is_still_an_error(self):
+        result = generate(self._job([
+            Operation('holes', 2, 'Drill'),
+            Operation('holes', 2, 'Drill again'),
+            Operation('perimeter', 3)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('more than one' in e for e in result.errors), result.errors)
+
+    def test_two_spot_ops_on_one_hole_is_not_a_double_claim(self):
+        """Spotting twice is pointless but harmless; it is not "cut twice"."""
+        result = generate(self._job([
+            Operation('holes', 1, 'Spot', scope={'purpose': 'spot'}),
+            Operation('holes', 1, 'Spot again', scope={'purpose': 'spot'}),
+            Operation('holes', 2, 'Drill'),
+            Operation('perimeter', 3)]))
+        self.assertTrue(result.success, result.errors)
+
+
+class TestProfileOrderWithTabsLeftIn(unittest.TestCase):
+    """`tabs_enabled=True, remove_tabs=False` means the machine cuts tabs and LEAVES
+    them: the deferral in generate_operation is gated on remove_tabs, so no removal pass
+    is ever emitted and the part stays anchored until someone cuts it out by hand.
+
+    The order check refused that plan anyway, telling the operator the part was "cut free
+    and left loose on the table" - which is the opposite of what happens.
+    """
+
+    LEAVE_TABS = TeamConfig(
+        {'machining': {'tabs': {'enabled': True, 'remove_tabs': False}}})
+    NO_TABS = TeamConfig({'machining': {'tabs': {'enabled': False}}})
+
+    def _job(self, config, parts=None):
+        return build_job(config=config, parts=parts or [
+            PartOps(dxf_path=make_plate_dxf(), name='plate', operations=[
+                Operation('holes', 1, scope={'max_diameter': 0.4}),
+                Operation('holes', 2, scope={'min_diameter': 0.4}),
+                Operation('pockets', 2), Operation('perimeter', 2),
+                Operation('chamfer', 3,
+                          scope={'targets': ['perimeter'], 'width': 0.02})])])
+
+    def test_leaving_the_tabs_in_allows_work_after_the_profile(self):
+        self.assertEqual(tooling._validate_profile_order(self._job(self.LEAVE_TABS)), [])
+
+    def test_and_the_job_actually_generates(self):
+        result = generate(self._job(self.LEAVE_TABS))
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('CHAMFER', result.gcode)
+        self.assertNotIn('TAB REMOVAL', result.gcode)
+
+    def test_two_parts_are_fine_too_when_the_tabs_stay_in(self):
+        dxf = make_plate_dxf()
+        parts = [PartOps(dxf_path=dxf, name=f'p{i}', operations=[
+            Operation('holes', 1, scope={'max_diameter': 0.4}),
+            Operation('holes', 2, scope={'min_diameter': 0.4}),
+            Operation('pockets', 2), Operation('perimeter', 2)]) for i in (1, 2)]
+        self.assertEqual(
+            tooling._validate_profile_order(self._job(self.LEAVE_TABS, parts)), [])
+
+    def test_tabs_off_is_still_refused(self):
+        """No tabs at all, and the profile really does free the part."""
+        errors = tooling._validate_profile_order(self._job(self.NO_TABS))
+        self.assertTrue(errors)
+        self.assertIn('loose', ' '.join(errors))
+
+
+class TestSmallestToolUsesTheJobTolerance(unittest.TestCase):
+    """The survey loads with the smallest hole any tool could make, and a drill counts
+    for slightly less than its diameter because a hole a few thou UNDER the drill is a
+    stocking difference plan_drilled_holes resolves by snapping. That allowance read the
+    DEFAULT tolerance rather than the job's, so a job that had narrowed the tolerance
+    still surveyed as though it were wide - and one that widened it got no benefit.
+    """
+
+    def _job(self, tolerance):
+        return build_job(
+            tools=[Tool(1, '#10 drill', 0.1935, 2, type='drill'),
+                   Tool(2, '1/4 endmill', 0.25, 2)],
+            drill_size_tolerance=tolerance,
+            parts=[PartOps(dxf_path=make_hole_dxf(0.1935), name='p', operations=[
+                Operation('holes', 1), Operation('perimeter', 2)])])
+
+    def test_a_narrowed_tolerance_narrows_the_allowance(self):
+        self.assertAlmostEqual(self._job(0.001).smallest_tool_diameter,
+                               0.1935 - 0.001, places=6)
+
+    def test_a_widened_tolerance_widens_it(self):
+        self.assertAlmostEqual(self._job(0.020).smallest_tool_diameter,
+                               0.1935 - 0.020, places=6)
+
+    def test_the_default_is_unchanged(self):
+        self.assertAlmostEqual(
+            self._job(tooling.DEFAULT_DRILL_SIZE_TOLERANCE).smallest_tool_diameter,
+            0.1935 - tooling.DEFAULT_DRILL_SIZE_TOLERANCE, places=6)
+
+    def test_an_end_mill_gets_no_allowance(self):
+        job = build_job(
+            tools=[Tool(1, '1/4 endmill', 0.25, 2)], drill_size_tolerance=0.020,
+            parts=[PartOps(dxf_path=make_hole_dxf(0.5), name='p', operations=[
+                Operation('holes', 1), Operation('perimeter', 1)])])
+        self.assertAlmostEqual(job.smallest_tool_diameter, 0.25, places=6)
+
+
+class TestFluteLengthWarning(unittest.TestCase):
+    """A cutter's flute length is the depth it can actually reach. Nothing knew it, so a
+    program could ask a stub-length bit for a 0.5" cut and only the shank found out.
+
+    Warning, not refusal: PenguinCAM cannot see how far the tool sticks out of the
+    collet, and a shop that grinds its own reach knows better than the program does.
+    """
+
+    def _job(self, thickness, flute_length=None, diameter=0.125):
+        tool = Tool(1, 'endmill', diameter, 1, flute_length=flute_length)
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (4, 0), (4, 3), (0, 3)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        return build_job(thickness=thickness, tools=[tool],
+                         parts=[PartOps(dxf_path=path, name='plate',
+                                        operations=[Operation('perimeter', 1)])])
+
+    def test_a_cut_deeper_than_the_flutes_warns(self):
+        result = generate(self._job(0.5, flute_length=0.25))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('flute', joined)
+        self.assertIn('0.25', ' '.join(result.warnings))
+        self.assertIn('flute length', result.gcode.lower())
+
+    def test_a_cut_inside_the_flutes_stays_quiet(self):
+        result = generate(self._job(0.25, flute_length=1.0))
+        self.assertTrue(result.success, result.errors)
+        self.assertFalse([w for w in result.warnings if 'flute length' in w.lower()],
+                         result.warnings)
+
+    def test_without_a_stated_length_four_diameters_is_assumed(self):
+        """A 1/8" bit cutting 0.75" deep is six diameters; something is worth saying."""
+        result = generate(self._job(0.75))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('flute', joined)
+        self.assertIn('4x', joined.replace(' ', ''))
+
+    def test_a_shallow_cut_with_no_stated_length_stays_quiet(self):
+        result = generate(self._job(0.25))
+        self.assertFalse([w for w in result.warnings if 'flute' in w.lower()],
+                         result.warnings)
+
+    def test_the_field_is_validated_like_every_other_number(self):
+        for bad in (0, -0.5, float('nan'), 'deep'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ToolingError):
+                    Tool(1, 'endmill', 0.125, 1, flute_length=bad)
+
+    def test_it_round_trips_through_a_dict(self):
+        tool = Tool.from_dict({'slot': 1, 'name': 'em', 'diameter': 0.125,
+                               'flutes': 1, 'flute_length': 0.75})
+        self.assertAlmostEqual(tool.flute_length, 0.75)
+        self.assertAlmostEqual(Tool.from_dict(tool.to_dict()).flute_length, 0.75)
+
+    def test_a_saved_bit_can_carry_one(self):
+        cfg = TeamConfig({'tools': [
+            {'name': '1/8 stub', 'diameter': '1/8"', 'flutes': 1,
+             'flute_length': '3/8"'}]})
+        saved = cfg.saved_tools
+        self.assertEqual(len(saved), 1, saved)
+        self.assertAlmostEqual(saved[0]['flute_length'], 0.375)

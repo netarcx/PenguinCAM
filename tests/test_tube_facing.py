@@ -516,5 +516,273 @@ class TestTubeFacingToolEdgePositions(unittest.TestCase):
         self.assertAlmostEqual(phase2_finishing_edge, 0.0, places=3)
 
 
+
+class TestTubeWallHeightGuard(unittest.TestCase):
+    """Only the Flask route checked that the wall is thinner than half the tube.
+
+    The generator's own Z arithmetic depends on it - the face-2 lift is
+    (tube_height - wall thickness), and facing cuts to just over half the height - so a
+    wall thicker than half the tube puts the toolpath through the far wall and into the
+    jig. The route keeps its friendlier message; this guard covers the CLI and any
+    future caller.
+    """
+
+    def _generate(self, tube_height, wall):
+        pp = FRCPostProcessor(wall, 0.157)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = tube_height
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        return pp.generate_tube_pattern_gcode(
+            tube_height=tube_height, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0, timestamp='2026-08-27 12:00')
+
+    def test_a_wall_thicker_than_half_the_tube_is_refused(self):
+        for height, wall in ((1.0, 0.5), (1.0, 0.75), (1.0, 2.0)):
+            with self.subTest(height=height, wall=wall):
+                with self.assertRaises(ValueError) as caught:
+                    self._generate(height, wall)
+                self.assertIn('wall', str(caught.exception).lower())
+
+    def test_a_non_physical_height_is_refused(self):
+        for height in (0.0, -1.0, float('nan'), float('inf')):
+            with self.subTest(height=height):
+                with self.assertRaises(ValueError):
+                    self._generate(height, 0.0625)
+
+    def test_a_non_physical_wall_is_refused(self):
+        for wall in (0.0, -0.0625, float('nan')):
+            with self.subTest(wall=wall):
+                with self.assertRaises(ValueError):
+                    self._generate(1.0, wall)
+
+    def test_an_ordinary_tube_still_generates(self):
+        result = self._generate(1.0, 0.0625)
+        self.assertTrue(result.success, result.errors)
+
+
+
+class TestFaceTwoMirrorsAboutTheDeclaredWidth(unittest.TestCase):
+    """Face 2 is machined by mirroring: X_new = tube_width - X_old.
+
+    That width has to be the TUBE's, and the tube's width is the whitelisted size the
+    operator picked. Measuring it from the drawing's extents instead means a face whose
+    features sit inboard - the normal case for a hole pattern - mirrors about a number
+    smaller than the tube, putting every face-2 feature at the wrong X. Nothing said so
+    either way.
+    """
+
+    def _pp(self, xs):
+        pp = FRCPostProcessor(0.0625, 0.157)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.tube_pattern_mode = 'custom'
+        pp.holes = [{'center': (x, 2.0), 'diameter': 0.201, 'radius': 0.1005}
+                    for x in xs]
+        pp.pockets = []
+        pp.perimeter = None
+        return pp
+
+    def _run(self, pp, tube_width):
+        return pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=tube_width, tube_length=12.0, timestamp='2026-08-27 12:00')
+
+    @staticmethod
+    def _phase2_hole_centres(gcode, entry_radius=0.0220):
+        phase2 = gcode.split('PHASE 2')[1]
+        xs = {round(float(m.group(1)) - entry_radius, 4)
+              for line in phase2.splitlines()
+              for m in [re.search(r'; Position at entry radius', line)
+                        and re.search(r'X([\d.]+)', line)] if m}
+        return sorted(xs)
+
+    def test_a_declared_width_sets_the_mirror(self):
+        pp = self._pp([0.5, 1.0])
+        result = self._run(pp, 2.0)
+        self.assertTrue(result.success, result.errors)
+        self.assertEqual(result.stats['tube_width'], 2.0)
+        self.assertEqual(self._phase2_hole_centres(result.gcode), [1.0, 1.5])
+
+    def test_an_inboard_drawing_warns_that_the_width_was_declared(self):
+        """0.5" of features on a 2" face. The mirror is only as right as the width."""
+        pp = self._pp([0.5, 1.0])
+        result = self._run(pp, 2.0)
+        joined = ' '.join(result.warnings)
+        self.assertIn('2.0', joined)
+        self.assertIn('declared', joined.lower(), result.warnings)
+
+    def test_a_drawing_that_reaches_the_edges_stays_quiet(self):
+        pp = self._pp([0.1005, 2.0 - 0.1005])   # hole edges touch X=0 and X=2
+        result = self._run(pp, 2.0)
+        self.assertTrue(result.success, result.errors)
+        self.assertFalse([w for w in result.warnings if 'declared' in w.lower()],
+                         result.warnings)
+
+    def test_measuring_the_width_says_so(self):
+        """With no width declared the generator falls back to the extents. It may, but
+        it has to admit that face-2 X placement now rests on a guess."""
+        pp = self._pp([0.5, 1.5])
+        result = self._run(pp, None)
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('measured', joined)
+        self.assertIn('outline', joined)
+
+
+class TestTubeRouteUsesTheDeclaredWidth(unittest.TestCase):
+    """The route detected the width from the DXF bounding box and passed that."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ['PENGUINCAM_LOCAL'] = '1'
+        from frc_cam_gui_app import app, limiter
+        app.config['TESTING'] = True
+        limiter.enabled = False
+        cls.client = app.test_client()
+
+    def _post(self, dxf_bytes, **overrides):
+        import io as _io
+        data = {'material': 'aluminum_tube', 'tube_size': '2x1-flat',
+                'tube_height': '1.0', 'thickness': '0.0625',
+                'tool_diameter': '0.157', 'square_end': '0', 'cut_to_length': '0',
+                'file': (_io.BytesIO(dxf_bytes), 'face.dxf')}
+        data.update(overrides)
+        return self.client.post('/process', data=data,
+                                content_type='multipart/form-data')
+
+    @staticmethod
+    def _inboard_face_dxf():
+        import ezdxf
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        for x in (0.5, 1.0):                    # 0.5" of features on a 2" face
+            msp.add_circle((x, 2.0), 0.1005)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        with open(path, 'rb') as handle:
+            data = handle.read()
+        os.unlink(path)
+        return data
+
+    def test_the_declared_size_wins_over_the_drawing_extents(self):
+        response = self._post(self._inboard_face_dxf())
+        self.assertEqual(response.status_code, 200,
+                         response.get_data(as_text=True)[:400])
+        body = response.get_json()
+        self.assertAlmostEqual(body['parameters']['tube_width'], 2.0, places=4)
+        self.assertTrue(any('declared' in w.lower() for w in body.get('warnings', [])),
+                        body.get('warnings'))
+
+    def test_an_unknown_tube_size_is_refused_on_the_dxf_path_too(self):
+        response = self._post(self._inboard_face_dxf(), tube_size='2 x 1')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('tube size', response.get_json()['error'].lower())
+
+
+
+class TestTubeEnvelopeUsesSweptExtents(unittest.TestCase):
+    """The envelope check compared the TUBE against the travel, not the TOOLPATH.
+
+    Facing and cutting to length both overtravel: the tool starts and finishes clear of
+    the tube in X (tool radius + 0.05 each side), and the cut-to-length arc reaches past
+    the cut plane in Y by the finish stock, the arc offset and the arc radius. A tube that
+    just fits the table therefore produced a program that ran into the soft limit, and the
+    operator found out at the machine.
+    """
+
+    def _cfg(self, x_max, y_max):
+        return TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M',
+            'machine': {'dimensions': {'x_max': x_max, 'y_max': y_max, 'z_max': 8.0}}}}})
+
+    def _run(self, x_max, y_max, cut_to_length=False, width=2.0, length=12.0):
+        pp = FRCPostProcessor(0.0625, 0.157, config=self._cfg(x_max, y_max))
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(width, length, mode='lightening')
+        return pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=True, cut_to_length=cut_to_length,
+            tube_width=width, tube_length=length, timestamp='2026-08-27 12:00')
+
+    def test_x_overtravel_is_refused(self):
+        """A 2.000" tube on 2.100" of X travel: the tube fits, the toolpath does not -
+        it reaches -0.129 to 2.129 with a 0.157" cutter."""
+        result = self._run(x_max=2.1, y_max=30.0)
+        self.assertFalse(result.success, 'the X overtravel was not checked')
+        joined = ' '.join(result.errors)
+        self.assertIn('2.1', joined)
+        self.assertTrue('travel' in joined.lower() or 'reach' in joined.lower(), joined)
+
+    def test_x_overtravel_that_fits_is_allowed(self):
+        result = self._run(x_max=3.0, y_max=30.0)
+        self.assertTrue(result.success, result.errors)
+
+    def test_cut_to_length_y_overtravel_is_refused(self):
+        """A 12.000" tube on 12.200" of Y travel. The cut plane alone is at 12.14, and
+        the roughing arc peaks past it."""
+        result = self._run(x_max=6.0, y_max=12.2, cut_to_length=True)
+        self.assertFalse(result.success, 'the Y overtravel was not checked')
+        self.assertIn('12.2', ' '.join(result.errors))
+
+    def test_cut_to_length_y_that_fits_is_allowed(self):
+        result = self._run(x_max=6.0, y_max=24.0, cut_to_length=True)
+        self.assertTrue(result.success, result.errors)
+
+    def test_a_pattern_with_no_facing_is_judged_on_the_tube_alone(self):
+        """Without squaring or cutting there is no overtravel to allow for."""
+        pp = FRCPostProcessor(0.0625, 0.157, config=self._cfg(2.05, 30.0))
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        result = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0, timestamp='2026-08-27 12:00')
+        self.assertTrue(result.success, result.errors)
+
+
+
+class TestOffsetLeavesCommentsAlone(unittest.TestCase):
+    """The Y/Z offset for a tube face is applied by a regex over the whole line, so it
+    rewrote numbers inside comments too - "Depth level 1/2" became "Depth level 1/2.0000"
+    and a hole's stated diameter silently gained the offset. Comments describe the
+    PRE-offset frame; if one should reflect the offset, it gets written that way where it
+    is emitted, not patched afterwards by a regex that cannot tell prose from a word.
+    """
+
+    def setUp(self):
+        self.pp = FRCPostProcessor(0.25, 0.157)
+
+    def test_a_trailing_paren_comment_is_untouched(self):
+        line = 'G1 X1.0000 Y2.0000 F30.0 (Y2.0000 is the drawn position)'
+        result = self.pp._offset_coordinate(line, 'Y', 0.5)
+        self.assertIn('Y2.5000 F30.0', result)
+        self.assertTrue(result.endswith('(Y2.0000 is the drawn position)'), result)
+
+    def test_a_semicolon_comment_is_untouched(self):
+        line = 'G1 Z0.1000 F35.0  ; Down to Z0.1000, the engraving depth'
+        result = self.pp._offset_coordinate(line, 'Z', 0.9)
+        self.assertIn('Z1.0000 F35.0', result)
+        self.assertTrue(result.endswith('; Down to Z0.1000, the engraving depth'), result)
+
+    def test_a_whole_line_comment_is_untouched(self):
+        for line in ('(Depth level 1/2 - cutting to Z0.9647)',
+                     '(Hole 0.201" dia: helical entry at 0.0220" radius)',
+                     '; Y0.5 in a bare semicolon comment'):
+            with self.subTest(line=line):
+                self.assertEqual(self.pp._offset_coordinate(line, 'Y', 0.25), line)
+                self.assertEqual(self.pp._offset_coordinate(line, 'Z', 0.25), line)
+
+    def test_the_code_before_a_comment_is_still_offset(self):
+        line = 'G3 X1.0 Y-0.0787 I-0.1 J0. ; arc'
+        result = self.pp._offset_coordinate(line, 'Y', 0.175)
+        self.assertIn('Y0.0963', result)
+        self.assertIn('I-0.1', result)       # only the named axis moves
+        self.assertTrue(result.endswith('; arc'))
+
+    def test_an_ordinary_line_is_unaffected_by_the_change(self):
+        self.assertIn('Y0.0000',
+                      self.pp._offset_coordinate('G1 X1.0 Y-0.175 Z0.5', 'Y', 0.175))
+
+
 if __name__ == '__main__':
     unittest.main()
