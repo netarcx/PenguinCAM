@@ -339,6 +339,159 @@ class TestTubeFacingGeneration(unittest.TestCase):
             os.unlink(output_path)
 
 
+def parse_tube_moves(lines, x=0.0, z=0.0):
+    """Walk tube-frame G-code and yield (motion, x, z, line) for every motion line.
+
+    Coordinates are absolute; unspecified axes carry over from the previous move.
+    """
+    out = []
+    for raw in lines:
+        code = raw.split('(')[0].split(';')[0].strip()
+        if not code:
+            continue
+        m = re.match(r'^(G0|G1|G2|G3)\b', code)
+        if not m:
+            continue
+        motion = m.group(1)
+        mx = re.search(r'\bX(-?\d*\.?\d+)', code)
+        mz = re.search(r'\bZ(-?\d*\.?\d+)', code)
+        if mx:
+            x = float(mx.group(1))
+        if mz:
+            z = float(mz.group(1))
+        out.append((motion, x, z, code))
+    return out
+
+
+class TestTubeWallRapidPlunge(unittest.TestCase):
+    """A pass may only skip the hollow middle once the top wall is proven clear.
+
+    The top wall of box tube spans the FULL tube width. Passes after the first used
+    to assume mid-tube was hollow and rapid straight down to the next Z - through
+    whatever was left of the top wall. With a 1/8" tool on 1x1 x 1/8" wall tube the
+    first pass floor lands at Z=0.899 and the wall bottom is Z=0.875, so the second
+    pass rapided through 0.024" of solid 6061.
+    """
+
+    def _facing(self, tool=0.125, wall=0.125, tube=(1.0, 1.0)):
+        pp = FRCPostProcessor(wall, tool)
+        pp.apply_material_preset('aluminum')
+        lines = pp._generate_parametric_tube_facing(tube[0], tube[1], phase=1)
+        return pp, lines
+
+    def test_walls_only_waits_for_the_wall_to_be_cleared(self):
+        pp, lines = self._facing()
+        passes = pp._calculate_tube_operation_passes(1.0)
+        wall = passes['wall_thickness']
+
+        for kind, depth_key, count_key in (
+                ('Roughing', 'roughing_depth_per_pass', 'num_roughing_passes'),
+                ('Finishing', 'finishing_depth_per_pass', 'num_finishing_passes')):
+            depth = passes[depth_key]
+            found_walls_only = False
+            for line in lines:
+                m = re.search(rf'\( {kind} pass (\d+)/(\d+) .*- walls only \)', line)
+                if not m:
+                    continue
+                found_walls_only = True
+                pass_number = int(m.group(1))           # 1-based
+                cleared = (pass_number - 1) * depth     # depth the PREVIOUS pass reached
+                self.assertGreaterEqual(
+                    cleared, wall + 0.02 - 1e-9,
+                    f"{kind} pass {pass_number} skips mid-tube after only "
+                    f"{cleared:.4f}\" of depth, but the top wall is {wall:.4f}\" thick")
+            self.assertTrue(found_walls_only,
+                            f"expected at least one walls-only {kind.lower()} pass")
+
+    def test_no_rapid_plunge_below_the_previous_pass_floor(self):
+        """No rapid may descend past the last pass's floor while over the tube body.
+
+        Anything below that floor at mid-tube X is either top wall or the proud stub
+        of a saw cut - both solid, neither survives a rapid.
+        """
+        pp, lines = self._facing()
+        passes = pp._calculate_tube_operation_passes(1.0)
+        wall = passes['wall_thickness']
+        clearance = pp.tool_diameter / 2.0 + 0.05
+        front_inner = wall + clearance
+        back_inner = 1.0 - wall - clearance
+        z_top = 1.0 + pp.dry_run_lift
+
+        z_safe = z_top + 0.25
+
+        # Split the block into per-pass chunks so each pass knows its predecessor's floor.
+        chunks = []
+        for raw in lines:
+            m = re.search(r'\( (Roughing|Finishing) pass (\d+)/\d+ to Z=(-?[\d.]+)"', raw)
+            if m:
+                chunks.append({'num': int(m.group(2)), 'floor': float(m.group(3)),
+                               'lines': []})
+            elif chunks:
+                chunks[-1]['lines'].append(raw)
+        self.assertTrue(chunks, "no pass blocks found in the facing output")
+
+        for i, chunk in enumerate(chunks):
+            prev_floor = z_top if chunk['num'] == 1 else chunks[i - 1]['floor']
+            x, z = 0.0, z_safe
+            for motion, new_x, new_z, code in parse_tube_moves(chunk['lines'], x, z):
+                if (motion == 'G0' and new_z < z - 1e-9
+                        and front_inner - 1e-9 <= new_x <= back_inner + 1e-9):
+                    self.assertGreaterEqual(
+                        new_z, prev_floor - 1e-9,
+                        f"rapid to Z{new_z:.4f} at X{new_x:.4f} dives past the previous "
+                        f"pass floor Z{prev_floor:.4f}: {code}")
+                x, z = new_x, new_z
+
+    def test_mid_tube_reentry_uses_a_feed_move(self):
+        """Re-entering at the front wall's inner edge feeds down, never rapids.
+
+        Cheap insurance against proud saw-cut stock: at mid-span the review measured
+        only ~0.043" of clearance under the rapid.
+        """
+        pp, lines = self._facing()
+        wall = pp.material_thickness
+        clearance = pp.tool_diameter / 2.0 + 0.05
+        front_inner = f'X{wall + clearance:.4f}'
+
+        saw_reentry = False
+        for i, line in enumerate(lines):
+            if not line.strip().startswith('G0 ') or front_inner not in line:
+                continue
+            if 'Z' in line.split('(')[0]:
+                continue
+            saw_reentry = True
+            plunge = lines[i + 1]
+            self.assertTrue(plunge.startswith('G1 Z'),
+                            f"mid-tube re-entry plunges with a rapid: {plunge}")
+            self.assertIn('F', plunge)
+        self.assertTrue(saw_reentry, "expected a mid-tube re-entry move")
+
+    def test_cut_to_length_shares_the_guard(self):
+        pp = FRCPostProcessor(0.125, 0.125)
+        pp.apply_material_preset('aluminum')
+        lines = pp._generate_cut_to_length(1.0, 1.0, 12.0, phase=1, square_end=False)
+        passes = pp._calculate_tube_operation_passes(1.0)
+        wall = passes['wall_thickness']
+
+        for kind, depth_key in (('Roughing', 'roughing_depth_per_pass'),
+                                ('Finishing', 'finishing_depth_per_pass')):
+            depth = passes[depth_key]
+            for line in lines:
+                m = re.search(rf'\( {kind} pass (\d+)/(\d+) .*- walls only \)', line)
+                if not m:
+                    continue
+                cleared = (int(m.group(1)) - 1) * depth
+                self.assertGreaterEqual(cleared, wall + 0.02 - 1e-9,
+                                        f"cut-to-length {kind} pass skips mid-tube early")
+
+        wall_clearance = pp.tool_diameter / 2.0 + 0.05
+        front_inner = f'X{wall + wall_clearance:.4f}'
+        for i, line in enumerate(lines):
+            if line.strip().startswith('G0 ') and front_inner in line and 'Z' not in line:
+                self.assertTrue(lines[i + 1].startswith('G1 Z'),
+                                f"cut-to-length rapids into mid-tube: {lines[i + 1]}")
+
+
 class TestTubeFacingToolEdgePositions(unittest.TestCase):
     """Test the tool edge positions for each phase."""
 

@@ -6101,6 +6101,26 @@ class FRCPostProcessor:
             'finishing_depth_per_pass': finishing_depth_per_pass
         }
 
+    #: Extra depth a pass must have gone past the nominal wall bottom before the middle
+    #: of the tube counts as open. Extruded box tube wall thickness is a nominal figure;
+    #: 0.02" covers the usual mill tolerance on 6061 tube.
+    TUBE_WALL_CLEAR_MARGIN = 0.02
+
+    def _tube_middle_is_open(self, pass_num: int, depth_per_pass: float,
+                             wall_thickness: float) -> bool:
+        """Has a previous pass cut clear through the top wall at mid-tube?
+
+        The top wall of box tube spans the FULL width, so mid-tube is solid until some
+        pass has milled past its underside. `pass_num` is 0-based, and the pass before
+        it reached `pass_num * depth_per_pass` below the top of the tube.
+
+        Only when that is past the wall bottom with margin may a pass cut the two side
+        walls and skip the middle - otherwise it would leave an uncut web (which can
+        stop cut-to-length severing the tube) and, worse, cross that web at depth.
+        """
+        cleared_depth = pass_num * depth_per_pass
+        return cleared_depth >= wall_thickness + self.TUBE_WALL_CLEAR_MARGIN
+
     def _parse_tube_size(self, tube_size: str) -> tuple[float, float]:
         """
         Parse tube size string to width and height dimensions.
@@ -6237,16 +6257,19 @@ class FRCPostProcessor:
         for pass_num in range(num_roughing_passes):
             z_cut = z_top - (pass_num + 1) * roughing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full arc pattern across entire width
+            if not self._tube_middle_is_open(pass_num, roughing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: the top wall spans the whole tube, and nothing has proven
+                # it is gone yet at mid-tube.
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position at start
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X, so this rapid
+                # descends alongside the tube, not into it.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing pattern across tube width
                 gcode.append(f'G1 F{arc_feed}')
@@ -6263,15 +6286,15 @@ class FRCPostProcessor:
                 # Retract after this pass
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing through back wall only
                 gcode.append(f'G1 F{arc_feed}')
@@ -6285,12 +6308,14 @@ class FRCPostProcessor:
                 if current_x > back_wall_inner_x:
                     gcode.append(f'G1 X{back_wall_inner_x:.4f}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube. The earlier passes cleared this
+                # column, but a saw-cut end can leave stock proud by more than the
+                # margin, so this descent is a controlled feed, not a rapid.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Arc clearing through front wall
                 gcode.append(f'G1 F{arc_feed}')
@@ -6317,15 +6342,16 @@ class FRCPostProcessor:
         for pass_num in range(num_finishing_passes):
             z_cut = z_top - (pass_num + 1) * finishing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full cut across entire width
+            if not self._tube_middle_is_open(pass_num, finishing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: nothing has proven the top wall is gone at mid-tube yet.
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position for finishing
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Single horizontal cut across
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -6333,24 +6359,25 @@ class FRCPostProcessor:
                 # Retract
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Cut through back wall only
                 gcode.append(f'G1 X{back_wall_inner_x:.4f} F{self.feed_rate}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube, not a rapid: proud saw-cut stock
+                # can sit below the cleared floor by more than the margin allows.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Cut through front wall
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -7237,16 +7264,19 @@ class FRCPostProcessor:
         for pass_num in range(num_roughing_passes):
             z_cut = z_top - (pass_num + 1) * roughing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full arc pattern across entire width
+            if not self._tube_middle_is_open(pass_num, roughing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: the top wall spans the whole tube and no pass has yet
+                # proven it gone at mid-tube. Skipping the middle here would also leave
+                # an uncut web that stops the tube separating.
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position at start (combine X Y for cleaner G-code)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing pattern across tube width
                 gcode.append(f'G1 F{arc_feed}')
@@ -7263,15 +7293,15 @@ class FRCPostProcessor:
                 # Retract after this pass
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Roughing pass {pass_num + 1}/{num_roughing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{roughing_y:.4f}')
                 gcode.append(f'G0 Z{z_safe:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Arc clearing through back wall only
                 gcode.append(f'G1 F{arc_feed}')
@@ -7285,12 +7315,14 @@ class FRCPostProcessor:
                 if current_x > back_wall_inner_x:
                     gcode.append(f'G1 X{back_wall_inner_x:.4f}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube. Earlier passes cleared this column,
+                # but a saw-cut end can leave stock proud past the margin, so the
+                # descent is a controlled feed rather than a rapid.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Arc clearing through front wall
                 gcode.append(f'G1 F{arc_feed}')
@@ -7316,15 +7348,16 @@ class FRCPostProcessor:
         for pass_num in range(num_finishing_passes):
             z_cut = z_top - (pass_num + 1) * finishing_depth_per_pass
 
-            if pass_num == 0:
-                # First pass: full cut across entire width
+            if not self._tube_middle_is_open(pass_num, finishing_depth_per_pass,
+                                             wall_thickness):
+                # Full width: nothing has proven the top wall is gone at mid-tube yet.
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - full width )')
 
                 # Position for finishing
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Single horizontal cut across
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')
@@ -7332,24 +7365,25 @@ class FRCPostProcessor:
                 # Retract
                 gcode.append(f'G0 Z{z_safe:.4f}')
             else:
-                # Subsequent passes: cut walls only, rapid across hollow middle
+                # Subsequent passes: cut walls only, cross the (now proven open) middle
                 gcode.append(f'( Finishing pass {pass_num + 1}/{num_finishing_passes} to Z={z_cut:.3f}" - walls only )')
 
                 # Position at start (back wall)
                 gcode.append(f'G0 X{start_x:.4f} Y{finishing_y:.4f}')
 
-                # Plunge to cut depth
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Plunge to cut depth. start_x is clear of the tube in X.
+                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge, off the tube in X
 
                 # Cut through back wall only
                 gcode.append(f'G1 X{back_wall_inner_x:.4f} F{self.feed_rate}')
 
-                # Retract, rapid across hollow middle
+                # Retract, rapid across the cleared middle
                 gcode.append(f'G0 Z{z_safe:.4f}')
                 gcode.append(f'G0 X{front_wall_inner_x:.4f}')
 
-                # Plunge inside (material already removed on pass 1)
-                gcode.append(f'G0 Z{z_cut:.4f}')  # Rapid plunge (in air)
+                # Feed back down inside the tube, not a rapid: proud saw-cut stock can
+                # sit below the cleared floor by more than the margin allows.
+                gcode.append(f'G1 Z{z_cut:.4f} F{self.plunge_rate:.1f}')
 
                 # Cut through front wall
                 gcode.append(f'G1 X{end_x:.4f} F{self.feed_rate}')

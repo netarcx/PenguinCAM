@@ -188,6 +188,129 @@ def check_offset_reset_before_motion(name, lines):
 
 
 
+#: Where a facing / cut-to-length block starts, and what ends it.
+TUBE_BLOCK_START = re.compile(r'^\(\s*(?:Tube facing:|Cut to length at Y=)')
+TUBE_BLOCK_END = re.compile(
+    r'^\(\s*(?:Machine pattern|=== PHASE|=== CUT TUBE|Square tube end)|^M[0-9]')
+
+
+def check_tube_wall_rapids(name, lines, tube_width, tube_height, wall, tool_diameter):
+    """Simulate the tube cross-section and flag rapids that enter standing material.
+
+    This is the audit gap that let the walls-only rapid-plunge bug ship. The generator
+    used to treat every pass after the first as "the middle is hollow" - but the TOP
+    WALL of box tube spans the full width, and with a small cutter the first pass does
+    not necessarily reach past it. The rapid then went through solid 6061 at mid-span.
+
+    The model is a slice through the tube at the cutting plane:
+
+      * columns outside 0..tube_width are air;
+      * the two side-wall columns are solid all the way down;
+      * every other column carries the top wall, solid from the top of the tube down
+        to `tube_height - wall`, and nothing below that.
+
+    Cutting moves lower the floor of each column they sweep (tool radius included).
+    A rapid may not put the tool tip below a column's floor while material still
+    stands there.
+
+    The program's own claim is checked too: a pass labelled "walls only" is asserting
+    that the middle is open, and that assertion has to be earned by a previous pass
+    having reached past the wall.
+    """
+    radius = tool_diameter / 2.0
+    step = 0.005
+    eps = 1e-6
+
+    for kind, count, depth in re.findall(
+            r'\( (Roughing|Finishing): (\d+) passes of ([\d.]+)" each', '\n'.join(lines)):
+        depth = float(depth)
+        for raw in lines:
+            m = re.search(rf'\( {kind} pass (\d+)/{count} .*- walls only \)', raw)
+            if not m:
+                continue
+            cleared = (int(m.group(1)) - 1) * depth
+            if cleared < wall + eps:
+                fail(name,
+                     f'{kind.lower()} pass {m.group(1)} claims walls only after '
+                     f'{cleared:.4f}" of depth, but the top wall is {wall:.4f}" thick')
+
+    blocks = []
+    current = None
+    for raw in lines:
+        text = raw.strip()
+        if TUBE_BLOCK_START.match(text):
+            current = []
+            blocks.append(current)
+            continue
+        if current is not None and TUBE_BLOCK_END.match(text):
+            current = None
+            continue
+        if current is not None:
+            current.append(raw)
+
+    for block in blocks:
+        moves = []
+        x = z = None
+        max_z = -1e9
+        for raw in block:
+            code = re.sub(r'\(.*?\)', '', raw).split(';')[0].strip()
+            if not code:
+                continue
+            head = code.split()[0]
+            if head not in ('G0', 'G1', 'G2', 'G3'):
+                continue
+            words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+            nx = words.get('X', x if x is not None else 0.0)
+            nz = words.get('Z', z if z is not None else 0.0)
+            max_z = max(max_z, nz)
+            moves.append((head, nx, nz, code))
+            x, z = nx, nz
+        if not moves:
+            continue
+
+        # z_safe is the block's own retract height, 0.25" above the tube. Deriving the
+        # tube top from the program keeps this honest for dry runs, where the whole
+        # tube frame is lifted.
+        z_top = max_z - 0.25
+        wall_bottom = z_top - wall
+
+        def columns(a, b):
+            lo, hi = min(a, b) - radius, max(a, b) + radius
+            lo = max(lo, 0.0)
+            hi = min(hi, tube_width)
+            if hi < lo:
+                return []
+            n = int((hi - lo) / step) + 1
+            return [lo + i * step for i in range(n)]
+
+        floors = {}
+
+        def floor_of(c):
+            return floors.get(round(c / step), z_top)
+
+        def set_floor(c, value):
+            key = round(c / step)
+            floors[key] = min(floors.get(key, z_top), value)
+
+        x, z = moves[0][1], max_z
+        for head, nx, nz, code in moves:
+            tip = min(z, nz)
+            if head == 'G0':
+                for c in columns(x, nx):
+                    f = floor_of(c)
+                    side_wall = c <= wall + eps or c >= tube_width - wall - eps
+                    standing = f > wall_bottom + eps
+                    if tip < f - eps and (side_wall or standing):
+                        fail(name,
+                             f'rapid to Z{nz:.4f} at X{nx:.4f} enters standing tube '
+                             f'material, that column is only cleared to Z{f:.4f}: {code}')
+                        break
+            else:
+                for c in columns(x, nx):
+                    set_floor(c, tip)
+            x, z = nx, nz
+
+
 def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
                cut_to_length=False, mode='holes', tool=None, wall=0.0625):
     """Audit a pre-designed tube pattern program.
@@ -219,10 +342,11 @@ def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
     if not result.success:
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
-    _check_tube_program(name, result)
+    _check_tube_program(name, result, face_width, tube_height, wall, tool)
 
 
-def _check_tube_program(name, result):
+def _check_tube_program(name, result, tube_width=None, tube_height=None, wall=None,
+                        tool_diameter=None):
     """The frame-independent checks every tube program must pass, whichever path built
     it. Shared by the fixed patterns and by custom designs so neither can drift into
     being audited less than the other."""
@@ -231,6 +355,9 @@ def _check_tube_program(name, result):
 
     check_text_rules(name, lines)
     check_offset_reset_before_motion(name, lines)
+    if None not in (tube_width, tube_height, wall, tool_diameter):
+        check_tube_wall_rapids(name, lines, tube_width, tube_height, wall,
+                               tool_diameter)
     if 'REQUIRED ALUMINUM PREFLIGHT' not in g:
         fail(name, 'tube aluminum program has no mandatory preflight')
     if 'continuous manual air blast' not in g and 'flow is aimed and chips can escape' not in g:
@@ -302,7 +429,7 @@ def audit_tube_design(name, design, face_width, tube_length, tube_height,
         fail(name, 'FAILED TO GENERATE: ' + '; '.join(result.errors)[:120])
         return
 
-    _check_tube_program(name, result)
+    _check_tube_program(name, result, face_width, tube_height, wall, tool)
 
     g = result.gcode
     if 'twist drill' in g:
@@ -796,6 +923,12 @@ def main():
                            height, mode=mode, square_end=mill)
     audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, mode='lightening',
                square_end=True, cut_to_length=True)
+    # Thick-wall 1x1 with a small cutter: the per-pass depth (0.101") is LESS than the
+    # 0.125" wall, so the first pass does not clear the top wall. This is the geometry
+    # that made the walls-only branch rapid through solid 6061 at mid-span, and it is
+    # here so the cross-section check has something real to prove.
+    audit_tube('tube/1x1/thick-wall/facing+cut', 1.0, 12.0, 1.0, mode='lightening',
+               tool=0.125, wall=0.125, square_end=True, cut_to_length=True)
 
     # Custom designs: a mixed-size face (which no single drill could make), the same
     # design on a narrow face, and one that also squares the end - allowed here because
