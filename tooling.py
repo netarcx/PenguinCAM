@@ -1792,6 +1792,7 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     ] if (header_pp.pause_before_perimeter and first_perimeter is not None) else []
 
     current_tool: Optional[Tool] = None
+    current_rpm: Optional[int] = None   # what the spindle was last actually commanded
     change_number = 0
     for i, body in enumerate(bodies):
         pp, tool, op, part = body['pp'], body['tool'], body['op'], body['part']
@@ -1812,7 +1813,20 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                 gcode.append(f"(Load {tool.label}, {tool.kind}, before starting "
                              f"this program)")
                 gcode.append("")
+            elif int(pp.spindle_speed) != current_rpm:
+                # Same tool, different operation, different derived RPM. The feeds model
+                # quotes a slot, a pocket and a profile differently, and each body's
+                # header printed its own number - but S was only ever emitted at a tool
+                # change, so the spindle kept turning at the FIRST body's speed while
+                # later bodies fed to their own. Verified: a pockets body announcing
+                # 12000 RPM ran at 9320, putting the chipload 29% above what the
+                # aluminum guard validated. S alone is legal with M3 already active.
+                gcode.append("")
+                gcode.append(f"S{int(pp.spindle_speed)}  ; Spindle to "
+                             f"{int(pp.spindle_speed)} RPM for this operation")
+                gcode.append("G4 P1  ; Wait for the spindle to settle")
         current_tool = tool
+        current_rpm = int(pp.spindle_speed)
 
         gcode.append("")
         gcode.append(f"(===== {sanitize_comment(op.label).upper()} - "

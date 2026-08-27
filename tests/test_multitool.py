@@ -11,6 +11,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -2295,3 +2296,67 @@ class TestLocalMode(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSpindleSpeedFollowsTheOperation(unittest.TestCase):
+    """One tool, several operations, several derived RPMs - and only the first was ever
+    commanded.
+
+    The feeds model quotes a different spindle speed per operation (a slot, a pocket and
+    a profile are not the same cut), and the section header prints the number it derived.
+    But S is only emitted at a tool change, so the pockets body announced 12000 RPM and
+    fed F30 while the spindle was still turning 9320 - 29% over the chipload the aluminum
+    guard had validated. Reversed, the same gap lands in the rubbing regime.
+    """
+
+    def _job(self):
+        return build_job(
+            material='aluminum', thickness=0.25,
+            tools=[Tool(1, '1/8 in 1-flute endmill', 0.125, 1)],
+            parts=[PartOps(dxf_path=make_plate_dxf(), name='plate', operations=[
+                Operation('holes', 1), Operation('pockets', 1),
+                Operation('perimeter', 1)])])
+
+    def test_each_body_runs_at_the_rpm_it_announces(self):
+        result = generate(self._job())
+        self.assertTrue(result.success, result.errors)
+
+        commanded = None
+        for line in result.gcode.splitlines():
+            code = line.split('(')[0].split(';')[0].strip()
+            spoken = re.match(r'^S(\d+)\b', code)
+            if spoken:
+                commanded = int(spoken.group(1))
+                continue
+            announced = re.search(r'\(Tool [\d.]+ in diameter, feed [\d.]+ ipm, '
+                                  r'spindle (\d+) rpm\)', line)
+            if announced:
+                self.assertEqual(
+                    commanded, int(announced.group(1)),
+                    f"the section claims {announced.group(1)} RPM but the spindle was "
+                    f"last commanded {commanded}: {line}")
+
+    def test_a_changed_speed_is_given_time_to_settle(self):
+        result = generate(self._job())
+        lines = result.gcode.splitlines()
+        for i, line in enumerate(lines):
+            if re.match(r'^S\d+\s*$', line.split(';')[0].strip()):
+                self.assertTrue(
+                    any(l.strip().startswith('G4 P') for l in lines[i:i + 3]),
+                    f'no dwell after the spindle change at line {i + 1}')
+
+    def test_one_speed_for_the_whole_job_emits_no_extra_s_words(self):
+        """Nothing changed means nothing to re-issue - no noise in the common case."""
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (6, 0), (6, 4), (0, 4)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        job = build_job(
+            tools=[Tool(1, '1/8 in 1-flute endmill', 0.125, 1)],
+            parts=[PartOps(dxf_path=path, name='plate',
+                           operations=[Operation('perimeter', 1)])])
+        result = generate(job)
+        self.assertTrue(result.success, result.errors)
+        speeds = [l for l in result.gcode.splitlines()
+                  if re.match(r'^S\d+', l.split(';')[0].strip())]
+        self.assertEqual(len(speeds), 1, speeds)
