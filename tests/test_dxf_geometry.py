@@ -239,5 +239,65 @@ class TestHostileTextInHeaders(unittest.TestCase):
             self.assertNotIn('e+', line)
 
 
+
+class TestCircleClassification(unittest.TestCase):
+    """`_path_as_circle` turns a tessellated boundary back into a hole so the hole
+    classifier can pick peck / helical / contour by size. At 0.97 circularity it also
+    accepted stadiums up to about 1.3:1 - a 0.20 x 0.26 adjustment slot in a 2.5D or
+    STEP part was machined as a 0.235 round hole at its centroid.
+    """
+
+    @staticmethod
+    def circle_coords(cx, cy, r, n=64):
+        return [(cx + r * math.cos(2 * math.pi * i / n),
+                 cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+    @staticmethod
+    def stadium_coords(length, width, n=48):
+        """A slot: two straight sides and two semicircular ends, overall `length` long."""
+        r = width / 2.0
+        straight = length - width
+        points = []
+        for i in range(n // 2 + 1):                       # right cap
+            a = -math.pi / 2 + math.pi * i / (n // 2)
+            points.append((straight / 2 + r * math.cos(a), r * math.sin(a)))
+        for i in range(n // 2 + 1):                       # left cap
+            a = math.pi / 2 + math.pi * i / (n // 2)
+            points.append((-straight / 2 + r * math.cos(a), r * math.sin(a)))
+        return points
+
+    def setUp(self):
+        with redirect_stdout(io.StringIO()):
+            self.pp = FRCPostProcessor(0.25, 0.125)
+
+    def test_a_tessellated_circle_is_still_a_hole(self):
+        for radius in (0.1, 0.375, 1.0):
+            with self.subTest(radius=radius):
+                found = self.pp._path_as_circle(self.circle_coords(1.0, 1.0, radius))
+                self.assertIsNotNone(found, 'a real circle stopped being recognised')
+                # Tessellation loses a hair of area; the tolerance is the chord one.
+                self.assertAlmostEqual(found['diameter'], radius * 2, delta=0.005)
+
+    def test_a_short_slot_is_not_a_hole(self):
+        """0.20 x 0.26: only 1.3:1, and it used to pass."""
+        self.assertIsNone(self.pp._path_as_circle(self.stadium_coords(0.26, 0.20)))
+
+    def test_longer_slots_are_not_holes_either(self):
+        for length, width in ((0.30, 0.20), (0.5, 0.25), (1.25, 0.25)):
+            with self.subTest(length=length, width=width):
+                self.assertIsNone(
+                    self.pp._path_as_circle(self.stadium_coords(length, width)))
+
+    def test_polygons_are_not_holes(self):
+        for sides in (8, 12, 16):
+            with self.subTest(sides=sides):
+                # A regular polygon IS close to a circle at high side counts; the point
+                # of the radius test is that it must stay inside the same tolerance.
+                coords = self.circle_coords(0, 0, 0.5, n=sides)
+                found = self.pp._path_as_circle(coords)
+                if found is not None:
+                    self.assertAlmostEqual(found['diameter'], 1.0, delta=0.05)
+
+
 if __name__ == '__main__':
     unittest.main()

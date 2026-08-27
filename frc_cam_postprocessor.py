@@ -1196,13 +1196,26 @@ class FRCPostProcessor:
             return None
         if not poly.is_valid or poly.is_empty or poly.length == 0:
             return None
-        # Isoperimetric quotient: 1.0 for a circle, ~0.95 octagon, ~0.79 square.
-        # 0.97 admits tessellated circles (~0.998) while excluding octagons/rounded rects.
+        # Isoperimetric quotient: 1.0 for a circle, ~0.95 octagon, ~0.79 square. On its
+        # own it is not enough - a stadium up to about 1.3:1 clears 0.97, so a
+        # 0.20 x 0.26 adjustment slot was machined as a 0.235 round hole at its
+        # centroid. A tessellated true circle measures ~0.998, so the bar can be much
+        # higher without losing any real hole.
         circularity = 4 * math.pi * poly.area / (poly.length ** 2)
-        if circularity < 0.97:
+        if circularity < 0.99:
+            return None
+        # ...and every vertex has to be the same distance from the middle. This is what
+        # separates a circle from a short slot: the slot's radius swings from its half
+        # width at the flats to its half length at the ends, while a tessellated circle
+        # holds its radius to a fraction of a percent.
+        centroid = poly.centroid
+        radii = [math.hypot(x - centroid.x, y - centroid.y) for x, y in coords]
+        mean_radius = sum(radii) / len(radii)
+        if mean_radius <= 0:
+            return None
+        if any(abs(r - mean_radius) > 0.015 * mean_radius for r in radii):
             return None
         diameter = 2 * math.sqrt(poly.area / math.pi)
-        centroid = poly.centroid
         return {'center': (centroid.x, centroid.y),
                 'radius': diameter / 2, 'diameter': diameter}
 
