@@ -226,6 +226,10 @@ class Tool:
     flutes: int = 1
     type: str = 'endmill'
     included_angle: float = 90.0        # V-tools only: full included angle, degrees
+    #: Usable cutting length, inches. Optional, because most tool listings state it and
+    #: most tool boxes do not. It is the depth this cutter can actually reach; past it
+    #: the shank is rubbing the wall, which is how a bit is snapped in a deep pocket.
+    flute_length: Optional[float] = None
     spindle_speed: Optional[int] = None  # explicit overrides; None = derive
     feed_rate: Optional[float] = None
     plunge_rate: Optional[float] = None
@@ -265,6 +269,12 @@ class Tool:
             if checked > limit:
                 raise ToolingError(f"Tool T{self.slot} has a {field_name} of {checked:g}, "
                                    f"which is past any plausible machine limit ({limit:g}).")
+        if self.flute_length is not None:
+            try:
+                self.flute_length = _positive_finite(self.flute_length, 'flute length')
+            except (TypeError, ValueError) as exc:
+                raise ToolingError(
+                    f"Tool T{self.slot} has a bad flute length: {exc}") from exc
         if self.spindle_speed is not None:
             self.spindle_speed = int(float(self.spindle_speed))
         if self.feed_rate is not None:
@@ -285,7 +295,8 @@ class Tool:
                     f"{required}. A blank row in the tool table cannot be used.")
         known = {f: data[f] for f in
                  ('slot', 'name', 'diameter', 'flutes', 'type', 'included_angle',
-                  'spindle_speed', 'feed_rate', 'plunge_rate') if f in data}
+                  'flute_length', 'spindle_speed', 'feed_rate', 'plunge_rate')
+                 if f in data}
         known.setdefault('name', f"T{known.get('slot', '?')}")
         return cls(**known)
 
@@ -293,6 +304,7 @@ class Tool:
         return {'slot': self.slot, 'name': self.name, 'diameter': self.diameter,
                 'flutes': self.flutes, 'type': self.type,
                 'included_angle': self.included_angle,
+                'flute_length': self.flute_length,
                 'spindle_speed': self.spindle_speed, 'feed_rate': self.feed_rate,
                 'plunge_rate': self.plunge_rate}
 
@@ -316,12 +328,15 @@ class Tool:
 
     def description(self) -> str:
         """The line this tool gets in the header's tool table."""
-        return ', '.join([
+        bits = [
             f"T{self.slot} - {sanitize_comment(self.name, 'tool')}",
             f"{self.diameter:.4f} in diameter",
             f"{self.flutes} flute" + ('s' if self.flutes != 1 else ''),
             self.kind,
-        ])
+        ]
+        if self.flute_length:
+            bits.append(f"{self.flute_length:.3f} in flute length")
+        return ', '.join(bits)
 
 
 @dataclass
@@ -1453,6 +1468,10 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     if depth_warning:
         warnings.append(depth_warning)
 
+    reach_warning = _check_tool_reach(pp, tool)
+    if reach_warning:
+        warnings.append(reach_warning)
+
     errors: List[str] = []
     lines: List[str] = []
     deferred: Optional[Dict[str, Any]] = None
@@ -1791,6 +1810,17 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
         entry_notes=entry_notes,
     )
 
+    # A tool that cannot reach the bottom of its own cut is something the operator has
+    # to read at the machine, not only in the browser response - they may be running a
+    # file someone else generated.
+    reach_notes = [w for w in dict.fromkeys(all_warnings)
+                   if 'flute' in w.lower() and 'deep' in w.lower()]
+    if reach_notes:
+        gcode.append('')
+        gcode.append('(** CHECK TOOL REACH **)')
+        for note in reach_notes:
+            gcode.append(f'({sanitize_comment(note)})')
+
     # The fixturing pause belongs immediately before the first cut that frees a part from
     # the stock. When that boundary is also a tool change, fold the instructions into the
     # change rather than stopping the operator twice in a row.
@@ -2004,6 +2034,41 @@ def _validate_profile_order(job: MultiToolJob) -> List[str]:
                 f"parts on the sheet are still being machined. Enable tabs, or run this "
                 f"part as its own job.")
     return errors
+
+
+#: When a tool does not state its flute length, this many diameters is taken as the
+#: point past which the cut is worth mentioning. Stub-length end mills are commonly
+#: around 3xD and standard ones 3-4xD, so a cut deeper than 4xD is past most cutters.
+ASSUMED_FLUTE_LENGTH_DIAMETERS = 4.0
+
+
+def _check_tool_reach(pp: FRCPostProcessor, tool: Tool) -> Optional[str]:
+    """Warn when the cut is deeper than the cutter can reach. Never refuses.
+
+    Flute length is the depth a cutter can actually cut to; past it the shank is rubbing
+    the wall, which is how a bit gets snapped in a deep pocket. Nothing in PenguinCAM
+    knew the number, so a program could ask a stub-length bit for a half-inch cut and
+    only the shank found out.
+
+    Advice rather than refusal on purpose: PenguinCAM cannot see how far the tool sticks
+    out of the collet, and a shop that knows its own reach knows better than the program.
+    """
+    depth = pp.material_top - pp.cut_depth
+    if depth <= 0:
+        return None
+    if tool.flute_length:
+        if depth <= tool.flute_length + 1e-9:
+            return None
+        return (f"{tool.label} cuts {depth:.3f} in deep but its flutes are only "
+                f"{tool.flute_length:.3f} in long. Past that the shank rubs the wall. "
+                f"Use a longer cutter, or machine the part in two setups.")
+    assumed = tool.diameter * ASSUMED_FLUTE_LENGTH_DIAMETERS
+    if depth <= assumed + 1e-9:
+        return None
+    return (f"{tool.label} cuts {depth:.3f} in deep, which is more than 4x its "
+            f"{tool.diameter:.3f} in diameter. Most end mills that size do not have "
+            f"that much flute. Check the cutter reaches, and set its flute length in "
+            f"the tool list so PenguinCAM can check for you.")
 
 
 def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):

@@ -206,11 +206,17 @@ machines:
 # (0.25, '1/4"', '6mm'), `type` is endmill, vbit or drill, and `included_angle`
 # only means anything on a vbit.
 #
+# `flute_length` is optional and is the depth this cutter can actually reach. Set it
+# and PenguinCAM warns when a job asks for a deeper cut than the flutes are long -
+# past that the shank is rubbing the wall, which is how a bit gets snapped in a deep
+# pocket. Left unset, anything past 4x the diameter is flagged instead.
+#
 # tools:
 #   - name: "1/4 in 2-flute endmill"
 #     diameter: "1/4\""
 #     flutes: 2
 #     type: endmill
+#     flute_length: "3/4\""
 #   - name: "1/2 in 90 deg V-bit"
 #     diameter: "1/2\""
 #     flutes: 2

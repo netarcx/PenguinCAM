@@ -732,6 +732,15 @@ class TeamConfig:
             'type': tool_type,
             'source': 'team',
         }
+        # Optional: the depth this cutter can actually reach. Parsed with the same
+        # length reader as the diameter so "3/8\"" and "10mm" both work.
+        flute_length = parse_length(entry.get('flute_length'))
+        if entry.get('flute_length') is not None and not (flute_length and flute_length > 0):
+            print(f"⚠️  saved bit \"{name}\" has an unreadable flute length "
+                  f"({entry.get('flute_length')!r}); ignoring it")
+            flute_length = None
+        tool['flute_length'] = flute_length
+
         angle = entry.get('included_angle')
         if tool_type == 'vbit':
             try:

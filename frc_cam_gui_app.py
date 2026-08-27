@@ -1484,7 +1484,6 @@ def process_file():
                         config=team_config,
                         tool_flutes=tool_flutes,
                     )
-                    face_pp.tube_height = tube_height  # Store for Z-offset calculations
                     if dry_run:
                         face_pp.set_dry_run(DRY_RUN_LIFT_IN)
                     face_pp.apply_material_preset(material, machine_id)
@@ -1518,7 +1517,6 @@ def process_file():
                         # count is not part of the milling model for that branch.
                         tool_flutes=1 if pattern_mode == 'holes' else tool_flutes,
                     )
-                    pp.tube_height = tube_height
                     # The generated-pattern branch builds its own post-processor, so it
                     # needs the dry run applied here too. Without it a tube holes /
                     # truss / custom-design job drilled at full depth under a setup

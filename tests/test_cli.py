@@ -285,5 +285,54 @@ class TestExplicitFeedFlagsSurviveTheLoader(unittest.TestCase):
         self.assertNotIn('F9.0', gcode)
 
 
+
+class TestShippedExampleJob(unittest.TestCase):
+    """The example is what someone reads to learn the format, so every operation in it
+    has to do something. It pointed at sample_part.dxf, which has no holes and no
+    pockets, so three of its five operations emitted nothing at all."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='example_')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_every_operation_emits_toolpath(self):
+        out = os.path.join(self.tmp, 'out.nc')
+        code, text = run_cli('--ops-file',
+                             os.path.join(self.ROOT, 'examples', 'multitool_job.json'),
+                             out)
+        self.assertIn(code, (None, 0), text[-800:])
+        produced = [os.path.join(self.tmp, f) for f in os.listdir(self.tmp)
+                    if f.endswith('.nc')]
+        self.assertTrue(produced, text[-800:])
+        with open(produced[0]) as handle:
+            gcode = handle.read()
+        for banner in ('SMALL HOLES', 'LARGE BORES', 'LIGHTENING POCKETS',
+                       'PROFILE', 'EDGE BREAK'):
+            with self.subTest(banner=banner):
+                self.assertIn(banner, gcode)
+
+    def test_the_example_plate_can_be_regenerated(self):
+        """The DXF is script-generated so its shapes stay readable and adjustable."""
+        import importlib.util
+
+        script = os.path.join(self.ROOT, 'examples', 'make_example_plate.py')
+        spec = importlib.util.spec_from_file_location('make_example_plate', script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rebuilt = module.build(os.path.join(self.tmp, 'plate.dxf'))
+
+        doc = ezdxf.readfile(rebuilt)
+        msp = doc.modelspace()
+        circles = sorted(round(e.dxf.radius * 2, 4)
+                         for e in msp.query('CIRCLE'))
+        self.assertEqual(circles, [0.201, 0.201, 0.201, 0.201, 0.875])
+        self.assertEqual(len(list(msp.query('LWPOLYLINE'))), 2)   # outline + pocket
+
+
 if __name__ == '__main__':
     unittest.main()

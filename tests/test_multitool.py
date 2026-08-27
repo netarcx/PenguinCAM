@@ -2570,3 +2570,69 @@ class TestSmallestToolUsesTheJobTolerance(unittest.TestCase):
             parts=[PartOps(dxf_path=make_hole_dxf(0.5), name='p', operations=[
                 Operation('holes', 1), Operation('perimeter', 1)])])
         self.assertAlmostEqual(job.smallest_tool_diameter, 0.25, places=6)
+
+
+class TestFluteLengthWarning(unittest.TestCase):
+    """A cutter's flute length is the depth it can actually reach. Nothing knew it, so a
+    program could ask a stub-length bit for a 0.5" cut and only the shank found out.
+
+    Warning, not refusal: PenguinCAM cannot see how far the tool sticks out of the
+    collet, and a shop that grinds its own reach knows better than the program does.
+    """
+
+    def _job(self, thickness, flute_length=None, diameter=0.125):
+        tool = Tool(1, 'endmill', diameter, 1, flute_length=flute_length)
+        doc = ezdxf.new('R2010')
+        doc.modelspace().add_lwpolyline([(0, 0), (4, 0), (4, 3), (0, 3)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        return build_job(thickness=thickness, tools=[tool],
+                         parts=[PartOps(dxf_path=path, name='plate',
+                                        operations=[Operation('perimeter', 1)])])
+
+    def test_a_cut_deeper_than_the_flutes_warns(self):
+        result = generate(self._job(0.5, flute_length=0.25))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('flute', joined)
+        self.assertIn('0.25', ' '.join(result.warnings))
+        self.assertIn('flute length', result.gcode.lower())
+
+    def test_a_cut_inside_the_flutes_stays_quiet(self):
+        result = generate(self._job(0.25, flute_length=1.0))
+        self.assertTrue(result.success, result.errors)
+        self.assertFalse([w for w in result.warnings if 'flute length' in w.lower()],
+                         result.warnings)
+
+    def test_without_a_stated_length_four_diameters_is_assumed(self):
+        """A 1/8" bit cutting 0.75" deep is six diameters; something is worth saying."""
+        result = generate(self._job(0.75))
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings).lower()
+        self.assertIn('flute', joined)
+        self.assertIn('4x', joined.replace(' ', ''))
+
+    def test_a_shallow_cut_with_no_stated_length_stays_quiet(self):
+        result = generate(self._job(0.25))
+        self.assertFalse([w for w in result.warnings if 'flute' in w.lower()],
+                         result.warnings)
+
+    def test_the_field_is_validated_like_every_other_number(self):
+        for bad in (0, -0.5, float('nan'), 'deep'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ToolingError):
+                    Tool(1, 'endmill', 0.125, 1, flute_length=bad)
+
+    def test_it_round_trips_through_a_dict(self):
+        tool = Tool.from_dict({'slot': 1, 'name': 'em', 'diameter': 0.125,
+                               'flutes': 1, 'flute_length': 0.75})
+        self.assertAlmostEqual(tool.flute_length, 0.75)
+        self.assertAlmostEqual(Tool.from_dict(tool.to_dict()).flute_length, 0.75)
+
+    def test_a_saved_bit_can_carry_one(self):
+        cfg = TeamConfig({'tools': [
+            {'name': '1/8 stub', 'diameter': '1/8"', 'flutes': 1,
+             'flute_length': '3/8"'}]})
+        saved = cfg.saved_tools
+        self.assertEqual(len(saved), 1, saved)
+        self.assertAlmostEqual(saved[0]['flute_length'], 0.375)

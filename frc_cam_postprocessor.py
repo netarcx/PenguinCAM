@@ -6659,7 +6659,6 @@ class FRCPostProcessor:
         # frame, so the tool traces the same path in the air above the jig.
         z_top = tube_height + self.dry_run_lift        # Top of tube
         z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
-        z_final = z_top - total_depth  # Final depth (just over half height)
 
         chord_face = roughing_y + tool_radius  # Face position at chord (start/end of arc)
         gcode.append(f'( Tube facing: {tube_width:.2f}" wide x {tube_height:.2f}" tall )')
@@ -7718,7 +7717,6 @@ class FRCPostProcessor:
         # frame, so the tool traces the same path in the air above the jig.
         z_top = tube_height + self.dry_run_lift        # Top of tube
         z_safe = tube_height + self.dry_run_lift + 0.25  # Safe height above tube
-        z_final = z_top - total_depth  # Final depth (just over half height)
 
         gcode.append(f'( Tube width: {tube_width:.2f}" x height: {tube_height:.2f}" )')
         gcode.append(f'( Tool: {self.tool_diameter:.3f}" )')
@@ -8541,9 +8539,6 @@ def main():
                               tool_flutes=(1 if use_pattern and args.tube_pattern == 'holes'
                                            else args.tool_flutes))
 
-        # Store tube height for Z-offset calculations
-        pp.tube_height = args.tube_height
-
         # Apply material preset and user parameters (shared logic). Scaled to the
         # actual tool - a no-op for the drilled pattern's 0.201" bit, a derate for a
         # custom design milled with a small cutter. Explicit feed flags come last.
@@ -8574,7 +8569,6 @@ def main():
             args.tube_width = face_width
             if not any(a.startswith('--tube-height') for a in sys.argv):
                 args.tube_height = size_height
-                pp.tube_height = size_height
             pattern_warnings = pp.load_tube_pattern(
                 face_width, args.tube_length, mode=args.tube_pattern)
         else:
@@ -8741,7 +8735,9 @@ def main():
         print(f"  Tool radius: {pp.tool_radius:.4f}\"")
         print(f"  Perimeter: offset OUTWARD by {pp.tool_radius:.4f}\"")
         print(f"  Pockets: offset INWARD by {pp.tool_radius:.4f}\"")
-        print(f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" (holes < {pp.min_millable_hole:.3f}\" skipped)")
+        print(f"  Holes: toolpath radius reduced by {pp.tool_radius:.4f}\" "
+              f"(holes under {pp.min_millable_hole:.3f}\" are peck-drilled at the "
+              f"tool size, not milled)")
 
 
 if __name__ == '__main__':
