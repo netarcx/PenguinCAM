@@ -354,7 +354,40 @@ class Operation:
                 self.scope['width'] = _positive_finite(self.scope.get('width', 0.02), 'width')
             except (TypeError, ValueError) as exc:
                 raise ToolingError(f"Chamfer {self.label!r} has a bad width: {exc}") from exc
+        self._validate_scope_numbers()
         self.name = str(self.name or OP_LABELS[self.op_type])
+
+    #: Included point angles a real twist drill is ground to. 118 is the general-purpose
+    #: default and 135 the split point; outside this band the tip-length compensation
+    #: stops being a small correction and starts driving the tool through the table.
+    MIN_POINT_ANGLE = 60.0
+    MAX_POINT_ANGLE = 150.0
+
+    def _validate_scope_numbers(self) -> None:
+        """Check every number in `scope` before anything downstream reads it."""
+        raw = self.scope.get('point_angle')
+        if raw is not None:
+            self.scope['point_angle'] = self._checked_point_angle(raw)
+
+    def _checked_point_angle(self, raw: Any) -> float:
+        """One message for every way a point angle can be wrong, and it names the range.
+
+        The tip-length compensation divides by tan(angle / 2), so a small angle is not a
+        small error: `point_angle: 5` computed a tip 1.4 in long and put the final peck
+        at G1 Z-2.2239, two inches below the sacrifice board, in a program that reported
+        success.
+        """
+        bad = (f"Operation {self.label!r} has a point_angle of {raw!r}. A twist drill's "
+               f"included point angle must be a number between {self.MIN_POINT_ANGLE:g} "
+               f"and {self.MAX_POINT_ANGLE:g} degrees; 118 is the general-purpose grind "
+               f"and 135 the split point.")
+        try:
+            angle = _finite(raw, 'point_angle')
+        except (TypeError, ValueError) as exc:
+            raise ToolingError(bad) from exc
+        if not (self.MIN_POINT_ANGLE <= angle <= self.MAX_POINT_ANGLE):
+            raise ToolingError(bad)
+        return angle
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Operation':
@@ -416,9 +449,9 @@ class Operation:
 
         It sets how much deeper than the stock a through hole must go for the exit to be
         full diameter, so a 135 deg split point drills measurably shallower than a 118.
+        Range-checked at parse time - see `_validate_scope_numbers`.
         """
-        raw = self.scope.get('point_angle')
-        return float(raw) if raw else None
+        return self.scope.get('point_angle')
 
 
 @dataclass

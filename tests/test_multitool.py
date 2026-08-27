@@ -127,6 +127,29 @@ class TestToolValidation(unittest.TestCase):
         self.assertEqual([t.slot for t in job.used_tools], [2])
 
 
+class TestDrillPointAngleValidation(unittest.TestCase):
+    """Numbers in `scope` go straight into Z arithmetic. Every one of them is checked at
+    the door, because past it there is nothing between a typo and a commanded move.
+
+    `point_angle: 5` was verified as generating a "successful" program whose last peck
+    landed at G1 Z-2.2239 - 2.2 inches below the sacrifice board.
+    """
+
+    def test_point_angle_must_be_a_real_drill_point(self):
+        for angle in (5, 0, -118, 200, float('nan'), float('inf')):
+            with self.subTest(angle=angle):
+                with self.assertRaises(ToolingError) as ctx:
+                    Operation('holes', 1, scope={'point_angle': angle})
+                message = str(ctx.exception)
+                self.assertIn('point_angle', message)
+                self.assertIn('118', message)      # says what a normal value looks like
+
+    def test_ordinary_point_angles_are_accepted(self):
+        for angle in (118, 135, 90, 60, 150):
+            with self.subTest(angle=angle):
+                op = Operation('holes', 1, scope={'point_angle': angle})
+                self.assertAlmostEqual(op.drill_point_angle, float(angle))
+
 class TestOperationOrdering(unittest.TestCase):
     """order_operations groups work by tool but must never reorder a part's own list."""
 
