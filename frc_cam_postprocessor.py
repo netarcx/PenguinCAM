@@ -8235,6 +8235,22 @@ def main():
         parser.error('--chamfer-width is only supported in standard mode. Multi-tool '
                      'jobs (--ops-file) describe a chamfer as an operation instead.')
 
+    # Tube modes are inch-only, all the way through: the tube frame, the jig geometry
+    # and the emitted G20 are all inches, and load_tube_pattern / load_tube_design
+    # already refuse millimetres. The CLI did not, so `--units mm` built a millimetre
+    # post-processor and then emitted inch tube geometry under a hard-coded G20.
+    if args.mode.startswith('tube-'):
+        if args.units != 'inch':
+            parser.error(f'--mode {args.mode} is inch-only. Tube jigs, tube sizes and '
+                         f'the tube coordinate frame are all in inches; drop '
+                         f'--units mm and give the dimensions in inches.')
+        # Silently ignoring --z-zero hid a real mistake: a tube job zeroes on the JIG,
+        # not on a sheet lying on a spoilboard, so neither datum choice means anything.
+        if args.z_zero is not None:
+            parser.error(f'--z-zero does not apply to --mode {args.mode}. A tube job is '
+                         f'zeroed at the jig in G54, with Z=0 at the bottom of the tube; '
+                         f'there is no stock top or sacrifice board to choose between.')
+
     # A multi-tool job describes its own tools and operations, so it bypasses the
     # single-tool mode branching below entirely.
     if args.ops_file:
