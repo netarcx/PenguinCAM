@@ -90,6 +90,11 @@ machines:
         # it well inside that.
         # safe_height: 2.0
 
+        # Manual bit changes lift to this G54 height when no verified G53 park is
+        # configured. This gives the Omio collet and wrenches room above the work
+        # without changing the height of every routine retract.
+        tool_change_height: 2.0
+
       tabs:
         enabled: true
         remove_tabs: true
@@ -151,8 +156,8 @@ machines:
         name: "Aluminum"
         # Derated 2026-08-24: the old 55 IPM / 0.2" slot numbers were never proven -
         # what the shop actually produced at them was snapped 1/8" end mills. These
-        # match Omio-class community practice: ~0.4 x D per pass, light chipload, dry.
-        description: "6061 on the Omio X8 - 18K RPM, 30 IPM, 0.06 in max pass, 4 deg ramp"
+        # are a protected 6061/6063 Omio envelope and require continuous chip evacuation.
+        description: "6061/6063 on the Omio X8 - protected tool-adjusted cutting envelope"
         spindle_speed: 18000
         feed_rate: 30.0
         ramp_feed_rate: 19.0
@@ -164,7 +169,8 @@ machines:
         stepover_percentage: 0.25      # conservative radial engagement
         helix_radius_multiplier: 0.5
         max_slotting_depth: 0.06       # 0.38 x the 4mm reference tool; scaled per tool
-        corner_min_feed_scale: 0.4     # force-limited: ease hard through corners
+        peck_drill_depth: 0.05
+        corner_min_feed_scale: 0.6     # ease corners without crossing into rubbing
         tab_width: 0.25
         tab_height: 0.15
 

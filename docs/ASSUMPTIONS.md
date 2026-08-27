@@ -9,7 +9,7 @@ These assumptions are **independent of user-configurable inputs** such as materi
 ## 1. Controller & Motion Stack
 
 By **default** the output is **G54 work-coordinate only** and uses a common, portable
-subset of G-code (`G0 G1 G2 G3 G4 G17 G20/G21 G40 G49 G54 G80 G90 G91.1 G94`, `M0 M3 M5
+subset of G-code (`G0 G1 G2 G3 G4 G17 G20/G21 G40 G49 G54 G80 G90 G91.1 G92.1 G94`, `M0 M3 M5
 M30`). It is designed to run on **GRBL, WinCNC, Mach3/Mach4, LinuxCNC** and similar
 controllers without machine-coordinate moves.
 

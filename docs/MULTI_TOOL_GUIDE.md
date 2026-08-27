@@ -161,20 +161,24 @@ so the output contains **no `T`/`M6` and no `G43`**. A change is a pause:
 
 ```
 ( === TOOL CHANGE - T2 1/4 in 1-flute endmill === )
-G0 Z0.7500  ; Safe Z clearance
+G0 Z2.0000  ; Safe Z clearance
 M5  ; Spindle off
 G4 P5.0  ; 5 second dwell
 
 ( *** OPERATOR ACTION REQUIRED *** )
 ( Remove T1 1/8 in 1-flute endmill )
 ( Install T2 1/4 in 1-flute endmill, 0.2500 in diameter )
-( Re-zero Z to the sacrifice board surface with the new tool )
+( Re-zero G54 Z to the sacrifice board surface with the new tool, not with G92 )
 ( Do NOT change the X or Y zero )
 ( Press CYCLE START to continue )
 M0  ; Program pause
 
-( === RESTART AFTER PAUSE === )
-G90  ; Ensure absolute positioning mode
+( === RESUME CHECKPOINT TC01 - T2 1/4 in 1-flute endmill === )
+G90 G94 G91.1 G40 G49 G17  ; Reset positioning and cutting modes
+G20  ; Inches
+G92.1  ; Cancel any temporary coordinate offset
+G54  ; Restore job work coordinate system
+G0 Z0.7500  ; Safe Z before resumed XY motion
 S18000 M3  ; Spindle on
 G4 P3.0  ; 3 second spindle spin-up
 ```
@@ -183,6 +187,20 @@ This is the same `_generate_pause_and_park_gcode` sequence every other operator 
 uses, so a tool change parks and restarts exactly the way a fixturing pause does. The
 spindle restarts at the **incoming** tool's speed, because the block is emitted from the
 post-processor built for the operation that follows it.
+
+When `machining.z_reference.tool_change_height` is configured, a tool change without a
+verified G53 park retracts to that roomier height instead of stopping just above the
+stock. PenguinCAM also creates a standalone resume file at every `TCxx` checkpoint and a
+one-click ZIP containing the main program plus all of those recovery files. A
+resume file begins stopped, asks the operator to reference or home the machine if needed,
+verify the unchanged G54 X/Y zero, load the named tool, and re-zero G54 Z. Only then does it
+reset all modal state, retract, start the incoming tool, and run the remaining operations.
+This avoids depending on Mach3's state reconstruction and preparatory move in **Run From
+Here**.
+
+Set the new tool's length with the controller's **G54 Z zero**, not a temporary G92
+offset. Every normal and resume program deliberately issues `G92.1` before motion so a
+stale local offset from an earlier run cannot shift the whole job.
 
 **Re-zeroing Z is mandatory** and X/Y must not be touched: each tool sticks out of the
 collet by a different amount, but the part hasn't moved.

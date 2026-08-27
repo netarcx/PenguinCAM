@@ -808,6 +808,19 @@ fieldset.field { border: 1px solid var(--line); border-radius: var(--r); padding
 }
 #preview-stats:empty { display: none; }
 
+#resume-programs {
+  margin: 0 0 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--r);
+  background: var(--accent-wash);
+  color: var(--ink);
+  font-size: 12px;
+}
+#resume-programs strong { display: block; margin-bottom: 3px; }
+#resume-programs p { margin: 0 0 7px; color: var(--ink-2); line-height: 1.4; }
+.resume-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
 #viewer-container {
   position: relative;
   width: 100%;

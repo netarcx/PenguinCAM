@@ -217,7 +217,7 @@ class ZDatumProgramTest(unittest.TestCase):
         spec = {'width': 0.02, 'bit_diameter': 0.5, 'bit_angle': 90, 'targets': ['perimeter']}
         from frc_cam_postprocessor import parse_chamfer_spec
         top = self._program(Z_DATUM_STOCK_TOP, parse_chamfer_spec(spec))
-        self.assertIn('Re-zero Z to the top of the stock', top)
+        self.assertIn('Re-zero G54 Z to the top of the stock', top)
         self.assertNotIn('sacrifice board surface with the new tool', top)
 
 
@@ -334,11 +334,11 @@ class ZDatumMultiToolTest(unittest.TestCase):
 
     def test_tool_change_names_the_stock_top(self):
         gcode = self._job('stock_top')
-        self.assertIn('Re-zero Z to the top of the stock with the new tool', gcode)
-        self.assertNotIn('Re-zero Z to the sacrifice board surface', gcode)
+        self.assertIn('Re-zero G54 Z to the top of the stock with the new tool', gcode)
+        self.assertNotIn('Re-zero G54 Z to the sacrifice board surface', gcode)
 
     def test_tool_change_defaults_to_the_board(self):
-        self.assertIn('Re-zero Z to the sacrifice board surface with the new tool',
+        self.assertIn('Re-zero G54 Z to the sacrifice board surface with the new tool',
                       self._job(None))
 
     def test_multi_tool_job_shifts_by_the_thickness(self):

@@ -150,11 +150,17 @@ Tick **Use several tools** on the Setup step to plan an operation list per part 
 the small holes with a small cutter, clear pockets and profile with a big one, break the
 edges with a V-bit. The program stops and tells you what to swap at each change.
 
-**At every tool change: swap the tool, re-zero Z to the job's zero surface, and leave X
+**At every tool change: swap the tool, re-zero G54 Z to the job's zero surface, and leave X
 and Y alone.** That is the sacrifice board unless the job was generated with *Zero Z on:
 Stock top* - each pause names the surface, as does the program header. See
 [Multi-Tool Operations](docs/MULTI_TOOL_GUIDE.md) and
 [the Z coordinate system](docs/Z_COORDINATE_SYSTEM.md).
+
+The configured `tool_change_height` lifts the Omio collet to a roomy work-coordinate Z
+before the pause. Multi-tool downloads also offer one standalone **Resume TCxx** program
+per tool boundary, plus a recovery ZIP containing the main program and every checkpoint;
+use the matching file after verifying the machine reference, G54 X/Y, the installed tool,
+and the new G54 Z zero. Do not use a temporary G92 zero; restart blocks cancel G92 offsets.
 
 ### Running on the CNC
 
@@ -306,7 +312,7 @@ PenguinCAM uses Team 6238 defaults optimized for FRC robotics:
 
 **Feeds & Speeds:**
 - Plywood: 75 IPM cutting, 18,000 RPM
-- Aluminum: 55 IPM cutting, 18,000 RPM
+- 6061/6063 aluminum: at most 30 IPM, tool-adjusted RPM, 0.060" maximum full-width pass
 - Polycarbonate: 75 IPM cutting, 18,000 RPM
 
 **Tabs:**

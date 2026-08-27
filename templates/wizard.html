@@ -110,6 +110,12 @@
                                placeholder='1/4" or 6mm' value="{{ default_tool_diameter_text }}">
                     </label>
 
+                    <label class="field" id="tool-flutes-field">
+                        <span>Cutting flutes</span>
+                        <input type="number" id="f-tool-flutes" inputmode="numeric" autocomplete="off"
+                               min="1" max="12" step="1" value="1">
+                    </label>
+
                     <label class="field" id="tool-bit-field">
                         <span>Saved bits</span>
                         <select id="f-tool-bit" autocomplete="off"></select>
@@ -429,6 +435,7 @@
                 </div>
                 <div id="preview-result" hidden>
                     <div id="preview-stats"></div>
+                    <div id="resume-programs" hidden></div>
                     <div id="viewer-container">
                         <div class="empty-state" id="viewer-empty">Toolpath appears here once the program is generated.</div>
                         <canvas id="gcode-canvas"></canvas>

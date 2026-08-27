@@ -501,7 +501,7 @@ class TestGeneratedProgram(unittest.TestCase):
         """A design mixing 0.1695", 0.1935", 0.2656" and 1.125" cannot be drilled with
         one bit, and the operator loads whatever the header names."""
         self.assertNotIn('twist drill', self.gcode)
-        self.assertIn(f'( Tool: {TOOL:.3f}" end mill )', self.gcode)
+        self.assertIn(f'( Tool: {TOOL:.3f}" 1-flute end mill )', self.gcode)
 
     def test_the_header_says_what_the_design_contains(self):
         self.assertIn('( Custom design: 4 holes, 1 pocket )', self.gcode)
@@ -620,7 +620,7 @@ class TestCustomDesignRoute(unittest.TestCase):
         body = self._post(tool_diameter='0.25',
                           tube_design=json.dumps(bore)).get_json()
         self.assertAlmostEqual(body['parameters']['tool_diameter'], 0.25, places=6)
-        self.assertIn('( Tool: 0.250" end mill )', body['gcode'])
+        self.assertIn('( Tool: 0.250" 1-flute end mill )', body['gcode'])
 
     def test_bad_json_is_a_400_not_a_500(self):
         response = self._post(tube_design='{"features": [')

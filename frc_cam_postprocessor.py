@@ -88,7 +88,7 @@ MATERIAL_PRESETS = {
         'stepover_percentage': 0.25,    # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
         'helix_radius_multiplier': 0.5,  # Helix entry radius as fraction of tool radius (conservative for aluminum)
         'max_slotting_depth': 0.06,     # Maximum depth per pass for slotting (0.38 x reference diameter)
-        'corner_min_feed_scale': 0.4,   # Corner-slowdown feed floor (aggressive; aluminum is force-limited)
+        'corner_min_feed_scale': 0.6,   # Corner-slowdown feed floor (see apply_material_preset)
         'tab_width': 0.25,        # Tab width (inches) - same as plywood
         'tab_height': 0.15,       # Tab height (inches) - same as plywood
         'description': 'Aluminum - 18K RPM, 30 IPM cutting, 0.06" max pass, 4° ramp'
@@ -177,6 +177,71 @@ def build_output_filename(suggested_filename: str, timestamp: str, fallback: str
     return f"{base_name}{'_DRYRUN' if dry_run else ''}_{stamped}.nc"
 
 
+_RESUME_CHECKPOINT_RE = re.compile(
+    r'^\( === RESUME CHECKPOINT ([A-Za-z0-9_-]+) - (.+?) === \)$')
+
+
+def build_resume_programs(gcode: str, main_filename: str) -> List[Dict[str, str]]:
+    """Build standalone, tail-only programs for every manual tool-change boundary.
+
+    Mach3's Run From Here reconstructs modal state by dummy-running earlier code and
+    then proposes a preparatory move. A standalone tail is less ambiguous: its first
+    executable block is the checkpoint's explicit modal reset and safe-Z move. The
+    operator confirmation deliberately precedes that block, so loading a resume file
+    cannot move the machine before the setup has been checked.
+    """
+    lines = (gcode or '').splitlines()
+    material_header = next((line.lower() for line in lines
+                            if line.startswith('(Material:')), '')
+    aluminum_program = 'aluminum' in material_header
+    aluminum_6063 = aluminum_program and '6063' in material_header
+    uses_coolant = any(
+        re.match(r'^\s*M0?[78]\b', re.sub(r'\(.*?\)', '', line).split(';')[0], re.I)
+        for line in lines
+    )
+    stem = os.path.splitext(os.path.basename(main_filename or 'program.nc'))[0]
+    programs = []
+    for index, line in enumerate(lines):
+        match = _RESUME_CHECKPOINT_RE.match(line.strip())
+        if not match:
+            continue
+        checkpoint, description = match.groups()
+        safe_description = sanitize_comment(description, 'tool change')
+        filename = sanitize_filename_base(
+            f'{stem}_RESUME_{checkpoint}', f'RESUME_{checkpoint}') + '.nc'
+        preamble = [
+            '(PENGUINCAM STANDALONE RESUME PROGRAM)',
+            f'(Checkpoint {checkpoint} - {safe_description})',
+            '(Use only at this tool boundary, never in the middle of an operation)',
+            '(Reference or home the machine if position may have been lost)',
+            '(Verify G54 X and Y still match the original job zero)',
+            '(Install the named tool and re-zero G54 Z on the stated surface, not with G92)',
+        ]
+        if aluminum_program:
+            preamble += [
+                '(Confirm cutter is sharp, clean, aluminum-approved, and at minimum stickout)',
+                '(Confirm clean collet, low runout, continuous directed air, and chip escape)',
+            ]
+            if aluminum_6063:
+                preamble.append(
+                    '(Confirm proven aluminum-compatible lubricant or MQL is ready for 6063)')
+        if uses_coolant:
+            preamble.append('M9  ; Keep coolant off during resume setup')
+        preamble += [
+            'M5  ; Keep spindle stopped during resume setup',
+            '( Press CYCLE START only after every resume check is complete )',
+            'M0  ; Confirm standalone resume setup',
+            '',
+        ]
+        programs.append({
+            'checkpoint': checkpoint,
+            'description': safe_description,
+            'filename': filename,
+            'gcode': '\n'.join(preamble + lines[index:]) + '\n',
+        })
+    return programs
+
+
 # Where the operator sets Z zero. 'board' (the default, and what every program this
 # tool has ever produced used) means Z0 is the sacrifice board, so the stock top is at
 # +thickness and a through-cut is a shallow negative. 'stock_top' means Z0 is the top
@@ -218,13 +283,16 @@ def normalize_z_datum(value, default: str = Z_DATUM_BOARD) -> str:
 
 class FRCPostProcessor:
     def __init__(self, material_thickness: float, tool_diameter: float, units: str = "inch",
-                 config: Optional[TeamConfig] = None, z_datum: Optional[str] = None):
+                 config: Optional[TeamConfig] = None, z_datum: Optional[str] = None,
+                 tool_flutes: int = 1):
         """
         Initialize the post-processor
 
         Args:
             material_thickness: Thickness of material in inches
             tool_diameter: Diameter of cutting tool in inches (e.g., 4mm = 0.157")
+            tool_flutes: Number of cutting flutes. The aluminum safety checks need this;
+                   omitting it retains the safe single-flute default.
             units: "inch" or "mm"
             config: Optional TeamConfig instance for team-specific settings.
                    If not provided, uses Team 6238 defaults.
@@ -247,10 +315,24 @@ class FRCPostProcessor:
         if not math.isfinite(material_thickness) or material_thickness <= 0:
             raise ValueError(f'Material thickness must be a positive finite number, '
                              f'got {material_thickness!r}')
+        if isinstance(tool_flutes, bool):
+            raise ValueError(f'Tool flutes must be a whole number from 1 to 12, '
+                             f'got {tool_flutes!r}')
+        try:
+            flute_number = float(tool_flutes)
+            parsed_flutes = int(flute_number)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'Tool flutes must be a whole number from 1 to 12, '
+                             f'got {tool_flutes!r}') from exc
+        if (not math.isfinite(flute_number) or parsed_flutes != flute_number
+                or not 1 <= parsed_flutes <= 12):
+            raise ValueError(f'Tool flutes must be a whole number from 1 to 12, '
+                             f'got {tool_flutes!r}')
 
         self.material_thickness = material_thickness
         self.tool_diameter = tool_diameter
         self.tool_radius = tool_diameter / 2
+        self.tool_flutes = parsed_flutes
         self.units = units
 
         # Corner slowdown for contour-parallel pocket clearing. At a sharp interior corner the
@@ -260,7 +342,7 @@ class FRCPostProcessor:
         # `corner_min_feed_scale` x feed at the sharpest corners, easing back to full feed on
         # the straights. Only collinear waypoints are added, so the path is unchanged.
         self.corner_slowdown_zone = tool_diameter        # reduced-feed distance on each side of a corner
-        self.corner_min_feed_scale = 0.4                 # default; set per-material in apply_material_preset
+        self.corner_min_feed_scale = 0.6                 # default; set per-material in apply_material_preset
 
         # Hole detection tolerance from config
         self.tolerance = config.hole_detection_tolerance
@@ -352,6 +434,8 @@ class FRCPostProcessor:
         # portable across controllers.
         self.park_position = config.park_position  # (x, y, z) machine coords, or None
         self.safe_clearance_height = config.safe_clearance_height  # configured G54 ceiling, or None
+        self.tool_change_height = config.tool_change_height  # roomy manual-change Z, or None
+        self._resume_checkpoint_counter = 0
         # Work coordinate system for tube ops. 'G54' (default) = operator zeros G54 to the
         # tube per job (portable); an alternate fixed WCS (e.g. 'G55') is opt-in for a
         # permanently-fixtured jig so its zero persists alongside the flat-work G54 zero.
@@ -388,18 +472,81 @@ class FRCPostProcessor:
             material: Material name ('plywood', 'aluminum', 'polycarbonate', or custom)
             machine_id: Optional machine ID for machine-specific settings
         """
-        # Get material preset from config (merges user config with Team 6238 defaults)
-        preset = self.config.get_material_preset(material, machine_id)
+        import feeds_speeds
+
+        requested_material = material
+        model_material = feeds_speeds.canonical_material_key(material)
+        is_aluminum = feeds_speeds.is_aluminum_material(material)
+        # 6061/6063 are grade identities in the feeds model; team configs intentionally
+        # share one conservative aluminum preset. Resolve before TeamConfig can treat an
+        # unknown grade spelling as plywood.
+        preset_material = 'aluminum' if is_aluminum else material
+        preset = self.config.get_material_preset(preset_material, machine_id)
 
         # Check if we got a valid preset (config returns empty dict for unknown materials)
         if not preset:
             print(f"Warning: Unknown material '{material}'. Using default plywood settings.")
             preset = self.config.get_material_preset('plywood', machine_id)
 
+        # A material preset is shop-owned data and may be years older than this code.
+        # The old PenguinCAM config template itself persisted 55 IPM / 0.200 in for
+        # aluminum, so merely changing the built-in defaults did not protect any team
+        # already carrying that file. Clamp the built-in aluminum id to the router
+        # safety envelope at the point every normal G-code path shares. Lower team
+        # values remain untouched; custom material ids remain fully configurable.
+        safety_clamps = []
+        if is_aluminum:
+            preset = dict(preset)
+            for key, ceiling in feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX.items():
+                value = preset.get(key)
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    value = float('nan')
+                if not math.isfinite(value) or value <= 0:
+                    safety_clamps.append(f"{key} invalid->{ceiling:g}")
+                    preset[key] = ceiling
+                elif value > ceiling:
+                    safety_clamps.append(f"{key} {value:g}->{ceiling:g}")
+                    preset[key] = ceiling
+                else:
+                    preset[key] = value
+
+            try:
+                corner_floor = float(preset.get('corner_min_feed_scale', 0.6))
+            except (TypeError, ValueError):
+                corner_floor = float('nan')
+            if not math.isfinite(corner_floor) or not 0.6 <= corner_floor <= 1.0:
+                protected_floor = min(1.0, max(0.6, corner_floor)) if math.isfinite(corner_floor) else 0.6
+                safety_clamps.append(
+                    f"corner_min_feed_scale {preset.get('corner_min_feed_scale')!r}"
+                    f"->{protected_floor:g}")
+                preset['corner_min_feed_scale'] = protected_floor
+
+            machine_key = machine_id if machine_id in feeds_speeds.MACHINES else 'omio_x8'
+            machine = feeds_speeds.MACHINES[machine_key]
+            try:
+                configured_rpm = float(preset.get('spindle_speed'))
+            except (TypeError, ValueError):
+                configured_rpm = float('nan')
+            if (not math.isfinite(configured_rpm)
+                    or not machine['rpm_min'] <= configured_rpm <= machine['rpm_max']):
+                safety_clamps.append(
+                    f"spindle_speed {preset.get('spindle_speed')!r}->{15000}")
+                preset['spindle_speed'] = 15000
+
         self._material_preset_applied = True
-        self.material_name = preset.get('name', material.capitalize())  # Store material name for header
-        self.material_id = material            # preset key, for scale_feeds_to_tool
+        self._tool_scaling_applied = False
+        self.material_name = (feeds_speeds.MATERIALS[model_material]['name']
+                              if model_material in ('aluminum_6061', 'aluminum_6063')
+                              and str(requested_material).lower() not in
+                              ('aluminum', 'aluminium', 'aluminum_tube', 'aluminium_tube')
+                              else preset.get('name', str(material).capitalize()))
+        self.material_id = model_material or material
         self.machine_preset_id = machine_id    # machine key, for the spindle-power clamp
+        if safety_clamps:
+            self.feed_scale_note = ('aluminum safety envelope clamped stale or unsafe '
+                                    'config: ' + ', '.join(safety_clamps))
 
         # Preset values are defined in IPM - convert to mm/min if needed
         if self.units == 'mm':
@@ -440,9 +587,11 @@ class FRCPostProcessor:
         else:
             self.peck_drill_depth = preset['peck_drill_depth']
 
-        # Corner-slowdown floor (material-aware, dimensionless). Aluminum is force-limited and
-        # wants an aggressive slowdown (0.4); softer, heat-limited materials keep more feed to
-        # preserve chip load and avoid rubbing (0.7). Falls back to the __init__ default.
+        # Corner-slowdown floor (material-aware, dimensionless). Aluminum is force-limited, so a
+        # corner does want less feed - but below ~0.6 the chip stops shearing and the edge welds,
+        # which is how bits die in 6061. 0.6 is the floor the aluminum safety envelope protects
+        # above, and the RPM coordination in scale_feeds_to_tool is computed against it. Softer,
+        # heat-limited materials keep even more feed (0.7). Falls back to the __init__ default.
         self.corner_min_feed_scale = preset.get('corner_min_feed_scale', self.corner_min_feed_scale)
 
         print(f"\nApplied material preset: {preset.get('name', material.capitalize())}")
@@ -461,10 +610,17 @@ class FRCPostProcessor:
         print(f"  Ramp angle: {self.ramp_angle}°")
         print(f"  Stepover: {self.stepover_percentage*100:.0f}% of tool diameter")
         print(f"  Tab size: {preset['tab_width']}\" x {preset['tab_height']}\" (W x H)")
+        # Aluminum safety must not depend on every caller remembering a second method.
+        # The public scale method is idempotent, so existing explicit calls remain safe.
+        if is_aluminum:
+            self.scale_feeds_to_tool()
 
     #: Preset ids mapped onto the feeds_speeds material table (custom team materials
     #: have no entry there; they get the geometric scaling but no power clamp).
-    _FEEDS_MODEL_MATERIALS = {'plywood': 'plywood', 'aluminum': 'aluminum_6061',
+    _FEEDS_MODEL_MATERIALS = {'plywood': 'plywood', 'aluminum': 'aluminum_6063',
+                              'aluminum_tube': 'aluminum_6063',
+                              'aluminum_6061': 'aluminum_6061',
+                              'aluminum_6063': 'aluminum_6063',
                               'polycarbonate': 'polycarbonate', 'hdpe': 'hdpe',
                               'srpp': 'srpp'}
 
@@ -499,6 +655,8 @@ class FRCPostProcessor:
         if not self._material_preset_applied:
             # No preset applied yet - there is nothing tested to scale down from.
             return []
+        if getattr(self, '_tool_scaling_applied', False):
+            return list(getattr(self, '_tool_scale_notes', []))
 
         to_inch = (1.0 / 25.4) if self.units == 'mm' else 1.0
         diameter_in = self.tool_diameter * to_inch
@@ -506,6 +664,22 @@ class FRCPostProcessor:
             return []
         d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
         notes = []
+
+        # High-RPM router slotting needs flute space to get gummy aluminum chips out.
+        # The model has always warned about 3/4-flute tools, but the standard workflow
+        # never even asked for flute count and still emitted a runnable program. Refuse
+        # that known failure mode; use a purpose-made 1- or 2-flute aluminum cutter.
+        material_key = (feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', None)) or self._FEEDS_MODEL_MATERIALS.get(
+                (getattr(self, 'material_id', None) or '').lower()))
+        if material_key:
+            flute_cap = feeds_speeds.MATERIALS[material_key].get('feed_flutes_max')
+            if flute_cap and self.tool_flutes > flute_cap:
+                raise ValueError(
+                    f'{self.tool_flutes}-flute cutters are not supported for '
+                    f'{feeds_speeds.MATERIALS[material_key]["name"]} on a router. '
+                    f'Use a 1- or 2-flute aluminum end mill so chips can evacuate; '
+                    f'packed chips weld to the tool and snap it.')
 
         def _floor_tenth(value: float) -> float:
             # Emitted verbatim as F words; floored so rounding can never nudge a
@@ -521,6 +695,51 @@ class FRCPostProcessor:
             notes.append(f"feed scaled to {self.feed_rate:.1f} {unit} for the "
                          f"{diameter_in:.3f} in tool, from the 4 mm reference")
 
+        # The aluminum ceiling is a proven one-flute feed. With two flutes at the same
+        # RPM each tooth receives half the chip, rubs, builds heat, and welds aluminum
+        # to the edge. We deliberately do not raise the unproven feed; lower RPM just
+        # enough to preserve the material's minimum chipload, but never below the
+        # machine's spindle floor.
+        if feeds_speeds.is_aluminum_material(material_key):
+            minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+            machine_key = (self.machine_preset_id
+                           if self.machine_preset_id in feeds_speeds.MACHINES
+                           else 'omio_x8')
+            spindle_floor = feeds_speeds.MACHINES[machine_key]['rpm_min']
+            base_rpm_ceiling = ((self.feed_rate * to_inch)
+                                / (self.tool_flutes * minimum))
+            rpm_ceiling = ((self.feed_rate * to_inch) * self.corner_min_feed_scale
+                           / (self.tool_flutes * minimum))
+            if base_rpm_ceiling < spindle_floor - 1e-9:
+                raise ValueError(
+                    f'{diameter_in:.3f} in {self.tool_flutes}-flute cutter cannot make '
+                    f'the minimum aluminum chip at the {spindle_floor} RPM spindle '
+                    f'floor and the protected feed. Use a larger or 1-flute cutter.')
+            protected_rpm = max(spindle_floor, min(self.spindle_speed,
+                                                   math.floor(rpm_ceiling)))
+            if protected_rpm < self.spindle_speed:
+                old_rpm = self.spindle_speed
+                self.spindle_speed = int(protected_rpm)
+                notes.append(f"spindle reduced from {old_rpm} to {self.spindle_speed} RPM "
+                             f"for {self.tool_flutes} flutes so straight and corner "
+                             f"chipload stay above {minimum:.4f} in/tooth")
+
+        # Pocket corners deliberately run below base_feed. Do not let that force
+        # protection cross into rubbing: the lowest emitted F word must still make the
+        # minimum chip at the selected RPM/flute count. This can soften or disable the
+        # corner slowdown for a 2F cutter whose straight feed is already at the floor;
+        # a 1F cutter retains more margin and is therefore still the preferred tool.
+        if feeds_speeds.is_aluminum_material(material_key):
+            minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+            min_feed_native = (self.spindle_speed * self.tool_flutes * minimum) / to_inch
+            required_corner_scale = min(1.0, min_feed_native / self.feed_rate)
+            if required_corner_scale > self.corner_min_feed_scale + 1e-9:
+                old_scale = self.corner_min_feed_scale
+                self.corner_min_feed_scale = required_corner_scale
+                notes.append(
+                    f"corner feed floor raised from {old_scale:.2f} to "
+                    f"{required_corner_scale:.2f} so corner moves do not rub")
+
         depth_factor = min(1.0, diameter_in / d_ref)
         if depth_factor < 1.0 - 1e-9:
             self.max_slotting_depth *= depth_factor
@@ -533,8 +752,9 @@ class FRCPostProcessor:
         # LARGER than the reference, but power does: cutting power is MRR x unit power,
         # and a wide cutter slotting at full preset feed can ask for more than the
         # spindle delivers - it bogs, grabs, and snaps the tool.
-        material_key = self._FEEDS_MODEL_MATERIALS.get(
-            (getattr(self, 'material_id', None) or '').lower())
+        material_key = (feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', None)) or self._FEEDS_MODEL_MATERIALS.get(
+                (getattr(self, 'material_id', None) or '').lower()))
         machine_key = getattr(self, 'machine_preset_id', None)
         if material_key and machine_key in feeds_speeds.MACHINES:
             limit_in = feeds_speeds.max_depth_for_power(
@@ -547,22 +767,30 @@ class FRCPostProcessor:
                     notes.append(f"max depth per pass held to {limit:.3f} {unit} "
                                  f"by spindle power")
 
-        # A tiny cutter at the preset RPM can end up below the material's minimum
-        # chipload, where it rubs instead of cutting - in aluminum that work-hardens
-        # the wall and breaks the tool anyway. Nothing safe to do automatically
-        # (raising feed defeats the derate), so say it out loud.
+        # Refuse any remaining chipload violation. A runnable warning is not protection:
+        # too little chip rubs/welds aluminum and too much overloads the edge.
         if material_key and self.spindle_speed > 0:
             chipload_min = feeds_speeds.MATERIALS[material_key].get('chipload_min')
-            chipload = (self.feed_rate * to_inch) / self.spindle_speed  # 1 flute assumed
+            chipload_max = feeds_speeds.MATERIALS[material_key].get('chipload_max')
+            chipload = ((self.feed_rate * to_inch)
+                        / (self.spindle_speed * self.tool_flutes))
             if chipload_min and chipload < chipload_min:
-                notes.append(f"chipload {chipload:.4f} is below the material minimum "
-                             f"{chipload_min:.4f} - the cutter may rub; use a larger "
-                             f"tool or a single-flute cutter for this material")
+                raise ValueError(
+                    f'chipload {chipload:.4f} is below the material minimum '
+                    f'{chipload_min:.4f}; use a larger tool, fewer flutes, or lower RPM.')
+            if chipload_max and chipload > chipload_max:
+                raise ValueError(
+                    f'chipload {chipload:.4f} is above the material maximum '
+                    f'{chipload_max:.4f}; raise RPM or lower feed.')
 
         if notes:
-            self.feed_scale_note = '; '.join(notes)
+            existing = getattr(self, 'feed_scale_note', None)
+            scaled = '; '.join(notes)
+            self.feed_scale_note = f"{existing}; {scaled}" if existing else scaled
             for note in notes:
                 print(f"  Tool-scaled: {note}")
+        self._tool_scale_notes = list(notes)
+        self._tool_scaling_applied = True
         return notes
 
     def apply_max_pass_depth(self, depth: float) -> None:
@@ -587,6 +815,104 @@ class FRCPostProcessor:
         existing = getattr(self, 'feed_scale_note', None)
         self.feed_scale_note = f"{existing}; {note}" if existing else note
         print(f"  Operator limit: {note}")
+
+    def validate_aluminum_cutting_parameters(self) -> None:
+        """Final, post-override guard for a runnable aluminum milling program."""
+        import feeds_speeds
+
+        material_key = feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', None))
+        if not feeds_speeds.is_aluminum_material(material_key) or self.is_dry_run:
+            return
+        values = {
+            'spindle speed': self.spindle_speed,
+            'cutting feed': self.feed_rate,
+            'ramp feed': self.ramp_feed_rate,
+            'plunge feed': self.plunge_rate,
+            'depth per pass': self.max_slotting_depth,
+        }
+        for name, value in values.items():
+            if (not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or value <= 0):
+                raise ValueError(f'Aluminum {name} must be a positive finite number, '
+                                 f'got {value!r}.')
+
+        machine_key = (self.machine_preset_id
+                       if self.machine_preset_id in feeds_speeds.MACHINES
+                       else 'omio_x8')
+        machine = feeds_speeds.MACHINES[machine_key]
+        if not machine['rpm_min'] <= self.spindle_speed <= machine['rpm_max']:
+            raise ValueError(
+                f'Aluminum spindle speed {self.spindle_speed:g} RPM is outside '
+                f'{machine["name"]} limits {machine["rpm_min"]:g}-'
+                f'{machine["rpm_max"]:g} RPM.')
+
+        if getattr(self, 'tool_has_drill_point', False):
+            plunge_ipm = self.plunge_rate * ((1.0 / 25.4) if self.units == 'mm' else 1.0)
+            if plunge_ipm > feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] + 1e-9:
+                raise ValueError(
+                    f'Aluminum drill feed {plunge_ipm:.1f} IPM exceeds the protected '
+                    f'{feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX["plunge_rate"]:.1f} IPM.')
+            return
+        flute_cap = feeds_speeds.MATERIALS[material_key]['feed_flutes_max']
+        if self.tool_flutes > flute_cap:
+            raise ValueError(
+                f'{self.tool_flutes}-flute cutters are not supported in aluminum on '
+                f'this router; use a 1- or 2-flute aluminum end mill.')
+
+        to_inch = (1.0 / 25.4) if self.units == 'mm' else 1.0
+        diameter_in = self.tool_diameter * to_inch
+        factor = min(1.0, (diameter_in / feeds_speeds.REFERENCE_TOOL['diameter'])
+                     ** feeds_speeds.DIAMETER_EXPONENT)
+        for attr, label in (('feed_rate', 'cutting feed'),
+                            ('ramp_feed_rate', 'ramp feed'),
+                            ('plunge_rate', 'plunge feed')):
+            ceiling_key = {'feed_rate': 'feed_rate',
+                           'ramp_feed_rate': 'ramp_feed_rate',
+                           'plunge_rate': 'plunge_rate'}[attr]
+            actual_ipm = getattr(self, attr) * to_inch
+            ceiling = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX[ceiling_key] * factor
+            if actual_ipm > ceiling + 1e-9:
+                raise ValueError(
+                    f'Aluminum {label} {actual_ipm:.1f} IPM exceeds the '
+                    f'diameter-scaled ceiling {ceiling:.1f} IPM.')
+
+        chipload = ((self.feed_rate * to_inch)
+                    / (self.spindle_speed * self.tool_flutes))
+        minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+        maximum = feeds_speeds.MATERIALS[material_key]['chipload_max']
+        if not minimum <= chipload <= maximum:
+            raise ValueError(
+                f'Aluminum chipload {chipload:.4f} in/tooth is outside the protected '
+                f'{minimum:.4f}-{maximum:.4f} range.')
+        corner_chipload = chipload * self.corner_min_feed_scale
+        if corner_chipload + 1e-12 < minimum:
+            raise ValueError(
+                f'Aluminum corner chipload {corner_chipload:.4f} in/tooth is below '
+                f'the {minimum:.4f} minimum.')
+
+    def apply_twist_drill_feeds(self) -> None:
+        """Apply the drilling model to a generated tube hole pattern."""
+        import feeds_speeds
+
+        material_key = (feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', None)) or 'plywood')
+        machine_key = (self.machine_preset_id
+                       if self.machine_preset_id in feeds_speeds.MACHINES
+                       else 'omio_x8')
+        result = feeds_speeds.calculate_drill_feeds(
+            machine_key, material_key, {'diameter': self.tool_diameter})
+        to_native = 25.4 if self.units == 'mm' else 1.0
+        plunge_ipm = result['plunge_feed']
+        if feeds_speeds.is_aluminum_material(material_key):
+            plunge_ipm = min(
+                plunge_ipm,
+                feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'])
+        self.spindle_speed = int(result['rpm'])
+        self.feed_rate = plunge_ipm * to_native
+        self.ramp_feed_rate = plunge_ipm * to_native
+        self.plunge_rate = plunge_ipm * to_native
+        self.peck_drill_depth = self.tool_diameter / 3.0
 
     def _distance_2d(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """Calculate 2D Euclidean distance between two points"""
@@ -618,7 +944,9 @@ class FRCPostProcessor:
         self.errors.append(error_msg)
 
     def _generate_pause_and_park_gcode(self, title: str, instructions: List[str],
-                                       safe_z: float = None) -> List[str]:
+                                       safe_z: float = None, *, tool_change: bool = False,
+                                       resume_checkpoint: str = None,
+                                       resume_description: str = None) -> List[str]:
         """
         Generate G-code for a safe pause-and-restart sequence with operator instructions.
 
@@ -642,8 +970,16 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append(f'( === {title} === )')
         # Callers with a taller safe height (e.g. tube facing must clear the full tube)
-        # pass safe_z; otherwise the material-based work clearance is used.
-        z = safe_z if safe_z is not None else self._safe_z()
+        # pass safe_z. A manual tool change gets its own roomy work-coordinate height
+        # when no verified G53 park exists. If a G53 park does exist, retract only to the
+        # ordinary safe plane first; _park_gcode then raises in machine coordinates and
+        # moves the gantry clear of the work.
+        if safe_z is not None:
+            z = safe_z
+        elif tool_change and not self.park_position:
+            z = self._tool_change_safe_z()
+        else:
+            z = self._safe_z()
         gcode.append(f'G0 Z{z:.4f}  ; Safe Z clearance')
         gcode.extend(self._park_gcode('Park'))  # G53 park only if configured
         coolant_off = self._coolant_off_gcode()
@@ -658,12 +994,21 @@ class FRCPostProcessor:
         gcode.append('( Press CYCLE START to continue )')
         gcode.append('M0  ; Program pause')
         gcode.append('')
-        gcode.append('( === RESTART AFTER PAUSE === )')
-        gcode.append('G90  ; Ensure absolute positioning mode')
-        gcode.extend(self._spindle_start_gcode())
-        coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
-        if coolant_on:
-            gcode.append(coolant_on)
+        if resume_checkpoint:
+            checkpoint = sanitize_comment(resume_checkpoint, 'TC')
+            description = sanitize_comment(resume_description or title, 'tool change')
+            gcode.append(f'( === RESUME CHECKPOINT {checkpoint} - {description} === )')
+            gcode.append('( Standalone resume: verify machine referenced, G54 X and Y unchanged, )')
+            gcode.append(
+                f'( correct tool installed, and G54 Z zeroed to {self.z_zero_surface()}, not G92 )')
+            gcode.extend(self._resume_state_gcode())
+        else:
+            gcode.append('( === RESTART AFTER PAUSE === )')
+            gcode.append('G90  ; Ensure absolute positioning mode')
+            gcode.extend(self._spindle_start_gcode())
+            coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
+            if coolant_on:
+                gcode.append(coolant_on)
         # Lift before the next feature moves in XY. The pre-pause retract left Z safe,
         # but the operator has just had their hands in the envelope to flip or fixture the
         # work and jogging Z is the normal thing to do while there. Resuming into a
@@ -676,6 +1021,53 @@ class FRCPostProcessor:
         # the clearance plane before its slow plunge feed (see _approach_ramp_start).
         self._pending_clearance_rapid = True
         return gcode
+
+    def _next_resume_checkpoint(self) -> str:
+        """Return a stable, visible checkpoint id for this generated program."""
+        self._resume_checkpoint_counter += 1
+        return f'TC{self._resume_checkpoint_counter:02d}'
+
+    def _tool_change_safe_z(self) -> float:
+        """Roomy work-coordinate Z for changing a manual tool.
+
+        The configured value is a physical height over the sacrifice board; ``z_shift``
+        expresses that same height in the selected G54 datum. Never descend below the
+        ordinary collision-safe retract. A bad value is refused instead of becoming an
+        unexpected machine move.
+        """
+        if self.tool_change_height is None:
+            return self._safe_z()
+        try:
+            height = float(self.tool_change_height)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('tool_change_height must be a number of inches') from exc
+        if not math.isfinite(height) or height <= 0:
+            raise ValueError('tool_change_height must be a positive finite number of inches')
+        machine_z = getattr(self.config, 'machine_z_max', None)
+        if machine_z and height > machine_z:
+            raise ValueError(
+                f'tool_change_height {height:.3f} in exceeds the configured machine Z '
+                f'travel of {machine_z:.3f} in')
+        return max(self._safe_z(), height + self.z_shift)
+
+    def _resume_state_gcode(self) -> List[str]:
+        """A complete modal reset at a tool-boundary restart point.
+
+        These lines are intentionally sufficient when they are the first executable
+        block in a standalone resume file. No prior G-code state is trusted.
+        """
+        lines = [
+            'G90 G94 G91.1 G40 G49 G17  ; Reset positioning and cutting modes',
+            'G20  ; Inches' if self.units == 'inch' else 'G21  ; Millimeters',
+            'G92.1  ; Cancel any temporary coordinate offset',
+            'G54  ; Restore job work coordinate system',
+            f'G0 Z{self._safe_z():.4f}  ; Safe Z before resumed XY motion',
+        ]
+        lines.extend(self._spindle_start_gcode())
+        coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
+        if coolant_on:
+            lines.append(coolant_on)
+        return lines
 
     def _parse_layer_depth(self, layer_name: str) -> Optional[float]:
         """
@@ -1442,6 +1834,8 @@ class FRCPostProcessor:
         # A drilled pattern is cut with a twist drill (the generator refuses to combine
         # it with any milling operation), so its through holes need the point allowance.
         self.tool_has_drill_point = (mode == 'holes')
+        if self.tool_has_drill_point:
+            self.apply_twist_drill_feeds()
 
         print(f"\nLoaded tube pattern ({mode}): {len(self.holes)} holes, "
               f"{len(self.pockets)} lightening pockets")
@@ -1906,6 +2300,11 @@ class FRCPostProcessor:
         Returns:
             PostProcessorResult with gcode string and stats
         """
+        try:
+            self.validate_aluminum_cutting_parameters()
+        except ValueError as exc:
+            return PostProcessorResult(success=False, errors=[str(exc)])
+
         # Check for validation errors first
         if self.errors:
             print(f"\n❌ Cannot generate G-code: {len(self.errors)} validation error(s) found")
@@ -2237,6 +2636,40 @@ class FRCPostProcessor:
         coolant = (self.machine_coolant or '').strip().lower()
         return 'M9  ; Coolant off' if coolant in ('air', 'mist', 'flood') else None
 
+    def _aluminum_preflight_gcode(self, tube_reach: float = None) -> List[str]:
+        """Mandatory operator acknowledgement for hazards CAM cannot measure."""
+        import feeds_speeds
+
+        material_key = feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', None))
+        if not feeds_speeds.is_aluminum_material(material_key) or self.is_dry_run:
+            return []
+        lines = [
+            '( === REQUIRED ALUMINUM PREFLIGHT === )',
+            '( Fresh aluminum-specific 1 or 2 flute cutter; inspect cutting edges )',
+            '( Clean collet; shortest practical stickout; verify low runout at cutter )',
+            '( Stock and spoilboard rigidly clamped; toolpath and clamps clear )',
+        ]
+        coolant = (self.machine_coolant or '').strip().lower()
+        if coolant in ('air', 'mist', 'flood'):
+            lines.append(
+                f'( Verify configured {sanitize_comment(self.machine_coolant)} flow is aimed and chips can escape )')
+        else:
+            lines.append('( Start and verify continuous manual air blast before cutting )')
+        if material_key == 'aluminum_6063':
+            lines.append('( 6063 requires proven aluminum-compatible lubricant or MQL )')
+        else:
+            lines.append('( Aluminum-compatible lubricant or MQL is strongly recommended )')
+        if tube_reach is not None:
+            lines.append(
+                f'( Verify usable flute length and tool reach exceed {tube_reach:.3f} in )')
+        lines.extend([
+            '( Run a supervised coupon first after any tool, alloy, fixture, or setup change )',
+            'M0  ; Confirm aluminum preflight before spindle start',
+            '',
+        ])
+        return lines
+
     def _park_gcode(self, comment: str = 'Park'):
         """G53 machine-coordinate park (raise Z, then move the gantry to the fixed park
         spot) - ONLY when park_position is configured. Returns [] otherwise, keeping the
@@ -2550,10 +2983,11 @@ class FRCPostProcessor:
             for line in tool_table:
                 gcode.append(f"(  {line})")
             gcode.append("(The program pauses and parks at each change - swap the tool,)")
-            gcode.append(f"(re-zero Z to {self.z_zero_surface()}, then press CYCLE START.)")
+            gcode.append(
+                f"(re-zero G54 Z to {self.z_zero_surface()}, then press CYCLE START.)")
             gcode.append("(** Do NOT touch the X or Y zero between tools **)")
         else:
-            gcode.append(f"(Tool: {self.tool_diameter}\" diam Flat End Mill)")
+            gcode.append(f"(Tool: {self.tool_diameter}\" diam {self.tool_flutes}-flute Flat End Mill)")
             gcode.append(f"(Spindle: {self.spindle_speed} RPM)")
         if getattr(self, 'feed_scale_note', None):
             # The program derated itself for this tool; the operator deserves to know
@@ -2626,6 +3060,7 @@ class FRCPostProcessor:
 
         # Modal G-code setup
         gcode.append("G90 G94 G91.1 G40 G49 G17")
+        gcode.append("G92.1  ; Cancel any temporary coordinate offset")
 
         if not is_multilayer:
             gcode.append("(G90=Absolute, G94=Feed/min, G91.1=Arc centers incremental - IJK relative to start point, G40=Cutter comp cancel, G49=Tool length comp cancel, G17=XY plane)")
@@ -2639,6 +3074,8 @@ class FRCPostProcessor:
         # Ensure absolute positioning mode
         gcode.append("G90  ; Absolute positioning mode")
         gcode.append("")
+
+        gcode.extend(self._aluminum_preflight_gcode())
 
         # Spindle on
         gcode.extend(self._spindle_start_gcode(
@@ -5541,6 +5978,8 @@ class FRCPostProcessor:
 
     def _chamfer_tool_change_gcode(self, to_vbit: bool) -> List[str]:
         """The pause-and-park block that swaps between the milling cutter and the V-bit."""
+        import feeds_speeds
+
         spec = self.chamfer_pass
         bit_desc = f"{spec['bit_diameter']:.4f} in {spec['bit_angle']:.0f} deg V-bit"
         mill_desc = f"{self.tool_diameter:.4f} in end mill"
@@ -5553,10 +5992,25 @@ class FRCPostProcessor:
             instructions = [f"Remove the {bit_desc}",
                             f"Install the {mill_desc} for tab removal"]
         instructions += [
-            f'Re-zero Z to {self.z_zero_surface()} with the new tool',
+            f'Re-zero G54 Z to {self.z_zero_surface()} with the new tool, not with G92',
             'Do NOT change the X or Y zero',
         ]
-        return self._generate_pause_and_park_gcode(title, instructions)
+        material_key = feeds_speeds.canonical_material_key(
+            getattr(self, 'material_id', getattr(self, 'material_name', '')))
+        if feeds_speeds.is_aluminum_material(material_key):
+            instructions += [
+                'Confirm incoming cutter is sharp, clean, and approved for aluminum',
+                'Clean collet, minimize stickout, and verify low runout',
+                'Confirm continuous directed air and a clear chip escape path before restart',
+            ]
+            if material_key == 'aluminum_6063':
+                instructions.append(
+                    'Confirm proven aluminum-compatible lubricant or MQL is ready for 6063')
+        return self._generate_pause_and_park_gcode(
+            title, instructions, tool_change=True,
+            resume_checkpoint=self._next_resume_checkpoint(),
+            resume_description=(bit_desc if to_vbit else mill_desc),
+        )
 
     def _chamfer_pass_tool_table(self) -> List[str]:
         """Header tool list for a single-tool program that ends with the V-bit pass."""
@@ -5622,13 +6076,19 @@ class FRCPostProcessor:
 
         # Roughing: respects flute length limit (max per pass from params)
         # 1" tube (0.505"): 2 passes, 2" tube (1.005"): 4 passes
-        max_roughing_depth = self.tube_facing_params['max_roughing_depth']
+        # Side-facing is low radial engagement, but its former 0.300/0.510 in axial
+        # levels reached 1.6D/3.2D with the default 4 mm cutter. Keep each fresh axial
+        # engagement to at most 1D; exact tooling may authorize more, but generic CAM
+        # must not assume it. The operator preflight separately confirms total reach.
+        max_roughing_depth = min(
+            self.tube_facing_params['max_roughing_depth'], self.tool_diameter)
         num_roughing_passes = max(1, int(math.ceil(total_depth / max_roughing_depth)))
         roughing_depth_per_pass = total_depth / num_roughing_passes
 
         # Finishing: light stepover allows deeper passes (max per pass from params)
         # 1" tube (0.505"): 1 pass, 2" tube (1.005"): 2 passes
-        max_finishing_depth = self.tube_facing_params['max_finishing_depth']
+        max_finishing_depth = min(
+            self.tube_facing_params['max_finishing_depth'], self.tool_diameter)
         num_finishing_passes = max(1, int(math.ceil(total_depth / max_finishing_depth)))
         finishing_depth_per_pass = total_depth / num_finishing_passes
 
@@ -5944,6 +6404,10 @@ class FRCPostProcessor:
         Returns:
             PostProcessorResult with gcode string and stats
         """
+        try:
+            self.validate_aluminum_cutting_parameters()
+        except ValueError as exc:
+            return PostProcessorResult(success=False, errors=[str(exc)])
         self._force_board_datum_for_tube()
 
         # Parse tube dimensions
@@ -5987,7 +6451,7 @@ class FRCPostProcessor:
         gcode.append('( PENGUINCAM TUBE FACING OPERATION )')
         gcode.append(f'( Generated: {timestamp_display} )')
         gcode.append(f'( Tube size: {tube_size} )')
-        gcode.append(f'( Tool: {self.tool_diameter:.3f}" end mill )')
+        gcode.append(f'( Tool: {self.tool_diameter:.3f}" {self.tool_flutes}-flute end mill )')
         gcode.append('( )')
         gcode.extend(self._dry_run_banner())
         gcode.append('( SETUP INSTRUCTIONS: )')
@@ -6001,9 +6465,12 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === INITIALIZATION === )')
         gcode.append('G90 G94 G91.1 G40 G49 G17')
+        gcode.append('G92.1  ; Cancel any temporary coordinate offset')
         gcode.append('G20')
         gcode.append('G90  ; Absolute positioning mode')
         gcode.append('')
+        facing_reach = self._calculate_tube_operation_passes(tube_height)['total_depth']
+        gcode.extend(self._aluminum_preflight_gcode(tube_reach=facing_reach))
         gcode.append('( Spindle )')
         gcode.extend(self._spindle_start_gcode())
         tube_coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
@@ -6201,6 +6668,13 @@ class FRCPostProcessor:
                 'Cutting to length needs a tube length; none was given or it could not '
                 'be measured from the drawing.'])
 
+        try:
+            self.validate_aluminum_cutting_parameters()
+            if second_face_pp is not None:
+                second_face_pp.validate_aluminum_cutting_parameters()
+        except ValueError as exc:
+            return PostProcessorResult(success=False, errors=[str(exc)])
+
         # Check for validation errors first (both faces, in two-face mode).
         combined_errors = list(self.errors)
         if second_face_pp is not None:
@@ -6234,7 +6708,9 @@ class FRCPostProcessor:
         # what the operator reads before loading a tool.
         _tool_kind = ('twist drill' if getattr(self, 'tube_pattern_mode', None) == 'holes'
                       else 'end mill')
-        gcode.append(f'( Tool: {self.tool_diameter:.3f}" {_tool_kind} )')
+        flute_text = ('' if _tool_kind == 'twist drill'
+                      else f' {self.tool_flutes}-flute')
+        gcode.append(f'( Tool: {self.tool_diameter:.3f}"{flute_text} {_tool_kind} )')
         if getattr(self, 'tube_pattern_mode', None) == 'custom':
             # A custom face is whatever the operator drew, so the header has to say what
             # is in it - "tube pattern" alone tells them nothing about this program.
@@ -6262,9 +6738,13 @@ class FRCPostProcessor:
         gcode.append('')
         gcode.append('( === INITIALIZATION === )')
         gcode.append('G90 G94 G91.1 G40 G49 G17')
+        gcode.append('G92.1  ; Cancel any temporary coordinate offset')
         gcode.append('G20')
         gcode.append('G90  ; Absolute positioning mode')
         gcode.append('')
+        side_reach = (self._calculate_tube_operation_passes(tube_height)['total_depth']
+                      if square_end or cut_to_length else None)
+        gcode.extend(self._aluminum_preflight_gcode(tube_reach=side_reach))
         gcode.append('( Spindle )')
         gcode.extend(self._spindle_start_gcode())
         pattern_coolant_on = None if self.is_dry_run else self._coolant_on_gcode()
@@ -6525,17 +7005,17 @@ class FRCPostProcessor:
         # Generate toolpaths for holes
         if hasattr(self, 'holes') and self.holes:
             for hole in self.holes:
-                toolpath.extend(self._generate_hole_gcode(
-                    hole['center'][0],  # cx
-                    hole['center'][1],  # cy
-                    hole['diameter'],   # diameter
-                    needs_peck_drill=hole.get('needs_peck_drill', False)
-                ))
+                emit = lambda hole=hole: self._generate_hole_gcode(
+                    hole['center'][0], hole['center'][1], hole['diameter'],
+                    needs_peck_drill=hole.get('needs_peck_drill', False))
+                toolpath.extend(emit() if getattr(self, 'tool_has_drill_point', False)
+                                else self._clear_in_depth_levels(emit))
 
         # Generate toolpaths for pockets
         if hasattr(self, 'pockets') and self.pockets:
             for pocket in self.pockets:
-                toolpath.extend(self._generate_pocket_gcode(pocket))
+                toolpath.extend(self._clear_in_depth_levels(
+                    lambda pocket=pocket: self._generate_pocket_gcode(pocket)))
 
         # Perimeter (only for standard mode, not tube faces)
         if not skip_perimeter and hasattr(self, 'perimeter') and self.perimeter:
@@ -6586,17 +7066,19 @@ class FRCPostProcessor:
 
                 # Generate fresh toolpath for the mirrored hole
                 # This preserves helical entry + outward spiral safety
-                toolpath.extend(self._generate_hole_gcode(
-                    mirrored_cx, mirrored_cy, hole['diameter'],
-                    needs_peck_drill=hole.get('needs_peck_drill', False)
-                ))
+                emit = lambda hole=hole, x=mirrored_cx, y=mirrored_cy: self._generate_hole_gcode(
+                    x, y, hole['diameter'],
+                    needs_peck_drill=hole.get('needs_peck_drill', False))
+                toolpath.extend(emit() if getattr(self, 'tool_has_drill_point', False)
+                                else self._clear_in_depth_levels(emit))
 
         # Generate toolpaths for mirrored pockets
         if hasattr(self, 'pockets') and self.pockets:
             for pocket in self.pockets:
                 # Mirror all pocket points around tube centerline and apply Y offset
                 mirrored_pocket = [(tube_width - x, y + y_offset) for x, y in pocket]
-                toolpath.extend(self._generate_pocket_gcode(mirrored_pocket))
+                toolpath.extend(self._clear_in_depth_levels(
+                    lambda pocket=mirrored_pocket: self._generate_pocket_gcode(pocket)))
 
         # Perimeter is not machined on tube faces (skip)
 
@@ -7366,6 +7848,9 @@ def main():
                        help='Material thickness in inches (default: 0.25)')
     parser.add_argument('--tool-diameter', type=float, default=0.25,
                        help='Tool diameter in inches (default: 0.25 = 1/4 in endmill)')
+    parser.add_argument('--tool-flutes', type=int, default=1,
+                       help='Number of cutting flutes (default: 1; aluminum router jobs '
+                            'require a 1- or 2-flute cutter)')
     parser.add_argument('--sacrifice-depth', type=float, default=0.02,
                        help='How far to cut into sacrifice board in inches (default: 0.02")')
     parser.add_argument('--z-zero', choices=['board', 'stock-top'], default=None,
@@ -7412,6 +7897,28 @@ def main():
     
     args = parser.parse_args()
 
+    if args.tool_flutes < 1 or args.tool_flutes > 12:
+        parser.error('--tool-flutes must be a whole number from 1 to 12')
+    import feeds_speeds as _feeds_speeds
+    if _feeds_speeds.is_aluminum_material(args.material):
+        safety = _feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX
+        to_ipm = (1.0 / 25.4) if args.units == 'mm' else 1.0
+        diameter_in = args.tool_diameter * to_ipm
+        factor = min(1.0, (diameter_in / _feeds_speeds.REFERENCE_TOOL['diameter'])
+                     ** _feeds_speeds.DIAMETER_EXPONENT)
+        if (args.feed_rate is not None
+                and (not math.isfinite(args.feed_rate) or args.feed_rate <= 0
+                     or args.feed_rate * to_ipm > safety['feed_rate'] * factor)):
+            parser.error(f"--feed-rate {args.feed_rate:g} exceeds the aluminum router "
+                         f"diameter-scaled safety ceiling of "
+                         f"{safety['feed_rate'] * factor:g} IPM")
+        if (args.plunge_rate is not None
+                and (not math.isfinite(args.plunge_rate) or args.plunge_rate <= 0
+                     or args.plunge_rate * to_ipm > safety['plunge_rate'] * factor)):
+            parser.error(f"--plunge-rate {args.plunge_rate:g} exceeds the aluminum router "
+                         f"diameter-scaled safety ceiling of "
+                         f"{safety['plunge_rate'] * factor:g} IPM")
+
     # The chamfer pass belongs to standard mode only. Refuse it loudly elsewhere: a
     # deburr flag silently dropped from a tube program would read as a promise kept.
     if args.chamfer_width is not None and (args.ops_file or args.mode != 'standard'):
@@ -7431,8 +7938,16 @@ def main():
             parser.error("output_gcode is required for tube-facing mode")
 
         pp = FRCPostProcessor(args.thickness, args.tool_diameter,
-                              config=load_cli_config(args.config))
-        pp.apply_material_preset('aluminum')  # Tube facing is always aluminum
+                              config=load_cli_config(args.config),
+                              tool_flutes=args.tool_flutes)
+        pp.apply_material_preset(args.material)  # Tube facing is always aluminum family
+        pp.scale_feeds_to_tool()
+        if args.spindle_speed != 18000:
+            pp.spindle_speed = args.spindle_speed
+        if args.feed_rate is not None:
+            pp.feed_rate = args.feed_rate
+        if args.plunge_rate is not None:
+            pp.plunge_rate = args.plunge_rate
 
         # Call API to generate G-code
         base_name = os.path.splitext(os.path.basename(args.output_gcode))[0]
@@ -7490,7 +8005,9 @@ def main():
         pp = FRCPostProcessor(material_thickness=args.thickness,
                               tool_diameter=args.tool_diameter,
                               units=args.units,
-                              config=load_cli_config(args.config))
+                              config=load_cli_config(args.config),
+                              tool_flutes=(1 if use_pattern and args.tube_pattern == 'holes'
+                                           else args.tool_flutes))
 
         # Store tube height for Z-offset calculations
         pp.tube_height = args.tube_height
@@ -7582,7 +8099,8 @@ def main():
                               tool_diameter=args.tool_diameter,
                               units=args.units,
                               config=load_cli_config(args.config),
-                              z_datum=args.z_zero)
+                              z_datum=args.z_zero,
+                              tool_flutes=args.tool_flutes)
 
         # Apply material preset and user parameters (shared logic). The preset is tuned
         # for the 4 mm reference tool; scale it to the tool actually specified. An

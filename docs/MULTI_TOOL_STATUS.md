@@ -51,9 +51,9 @@ repeated here.
 
 | Check | Covers | Blind to |
 |---|---|---|
-| 352 unit tests | Model, scoping, ordering, drilling, guards | Anything the author assumed wrong — they encode the same premises as the code |
+| 732 unit tests | Model, scoping, ordering, drilling, guards, feeds/speeds, resume programs | Anything the author assumed wrong — they encode the same premises as the code |
 | `gcode_test.py` | Output vs Fusion 360 fixtures | Only the fixture parts |
-| `gcode_audit.py` | **Simulates** 20 programs: ZMIN vs real depth, rapids through material, lateral drill moves, canned cycles, comment rules | Geometry correctness; anything not modelled |
+| `gcode_audit.py` | **Simulates** 66 programs: ZMIN vs real depth, rapids through material, lateral drill moves, per-pass engagement, canned cycles, comment rules, every standalone resume file, and refusals that must yield no program | Geometry correctness; anything not modelled |
 | `check_js.py` | JS syntax damage, bracket balance | Behaviour, layout, everything visual |
 
 **`gcode_audit.py` earns its place.** It is deliberately built on different premises from
@@ -77,6 +77,26 @@ Each exists because it was actually violated at some point in development:
 - **Feature coverage** — every hole and pocket must be cut exactly once.
 - **No canned cycles** — GRBL 1.1 has no G81–G89, and PenguinCAM's own estimator, preview
   and simulator all parse only G0–G3.
+- **Flute count in aluminum** — 3+ flute cutters are refused outright, not derated. The
+  gullets pack, the packed chips weld, and the tool snaps; this is the WCP-0543 failure.
+- **Aluminum safety envelope** — a shop's own preset is clamped to the router ceiling at
+  the point every G-code path shares, because the old config template shipped 55 IPM and
+  a 0.200" pass and changing the built-in defaults did not protect anyone carrying that
+  file. Feed, pass depth, plunge and RPM are clamped down only; the corner feed floor is
+  held at or above 0.6 so a slowed corner still shears a chip instead of rubbing.
+- **Tool-scaled feeds** — presets are referenced to a 4mm cutter, so a smaller tool is
+  derated (`scale_feeds_to_tool`), and spindle RPM is lowered as needed to keep the
+  chipload at the *corner* floor above the rubbing threshold.
+- **Drill feeds are not milling feeds** — every drilled hole, tube patterns included,
+  goes through `feeds_speeds.calculate_drill_feeds`. Running a twist drill at the
+  milling preset's 18,000 RPM is ~4x the surface speed HSS tolerates.
+- **Chip evacuation is stated, not assumed** — every aluminum program opens with a
+  mandatory preflight pause, and every tool change rechecks collet, stickout, runout and
+  the air blast before restarting.
+- **No inherited modal state** — `G92.1` is issued before the first motion of every
+  program, so a stale temporary offset from an earlier run cannot shift the job. Each
+  tool boundary also emits a standalone resume file that starts stopped, states what to
+  verify, and only then rebuilds full modal state.
 
 ---
 
@@ -97,11 +117,16 @@ Each exists because it was actually violated at some point in development:
    the roadmap. (Tubing has since gained *pre-designed patterns* - see
    `TUBE_PATTERNS.md` - but those still run the fixed single-tool tube program.)
 
-4b. **Nothing from `tube_patterns.py` has been cut on real stock either**, and tube
-   programs get only the frame-independent half of `gcode_audit.py`: the ZMIN and
-   rapid-below-top checks assume the plate Z-frame and do not run on a tube job. So the
-   warning at the top of this file applies to generated tube patterns with full force -
-   the depth claims in a tube header are checked by nothing.
+4b. **Nothing from `tube_patterns.py` has been cut on real stock either.** The audit gap
+   is narrower than it was: tube programs now also get the G92-cancellation check, the
+   aluminum preflight and chip-evacuation checks, and a rule that no axial facing level
+   exceeds one cutter diameter. Their ZMIN and rapid-below-top claims are still outside
+   `gcode_audit.py` - those checks assume the plate Z-frame - and are covered instead by
+   tube-frame unit tests (`test_a_drilled_hole_goes_fully_through_the_wall`,
+   `test_no_rapid_traverses_inside_the_tube`, and
+   `test_a_hole_job_reports_the_drill_in_its_header`). That is a weaker instrument than
+   the simulator: it shares the code's own premises. The warning at the top of this
+   file still applies to tube patterns.
 5. **Unauthenticated CPU-heavy endpoints** — `/process`, `/process-job`,
    `/process-multitool`, `/part-outline`, `/part-features` have never been behind the
    OAuth gate, which only ever covered the two HTML page routes. Pre-existing; flagged and
@@ -140,16 +165,13 @@ Each exists because it was actually violated at some point in development:
    by the contour generator; **(c)** the audit permanently carries this program
    shape plus the engagement checker, which fails any future path that escapes the
    per-pass limit by more than the checker's error band.
-11. **The drilled tube pattern runs its 0.201" twist drill at the material preset's
+11. **FIXED: the drilled tube pattern ran its 0.201" twist drill at the material preset's
    18,000 RPM with a 15 IPM plunge** — about 950 SFM at 0.0008 IPR in aluminum, i.e.
    ~4× the surface speed HSS tolerates while feeding ~4× too lightly. That is the
    rubbing/work-hardening regime that burns and snaps drills.
-   `feeds_speeds.calculate_drill_feeds` already computes the right numbers (clamped to
-   the spindle's 6,000 RPM floor, ~21 IPM plunge) and the multi-tool drill path uses
-   it; the fixed tube program does not. Found 2026-08-24 while chasing snapped end
-   mills (which turned out to be the 4mm-referenced presets, since fixed by
-   `scale_feeds_to_tool`); left alone because changing a tube program's spindle speed
-   deserves its own decision and a dry run.
+   The tube pattern now uses `feeds_speeds.calculate_drill_feeds`, clamps to the
+   spindle's 6,000 RPM floor and the aluminum 15 IPM plunge ceiling, and pecks at D/3.
+   Generated drilling is regression-tested separately from milling.
 
 ---
 

@@ -69,7 +69,7 @@ except ImportError:
 from frc_cam_postprocessor import (
     ENGRAVE_DEPTH_IN, ENGRAVE_HEIGHT_IN,
     FRCPostProcessor, PostProcessorResult, assemble_job_gcode, validate_job_layout,
-    parse_chamfer_spec, normalize_z_datum,
+    parse_chamfer_spec, normalize_z_datum, build_resume_programs,
 )
 
 # Import team config management
@@ -323,15 +323,63 @@ def get_current_user_id():
     return session.get('user_email', 'default_user')
 
 def normalize_material(material):
-    """Canonicalize a material id from the request form. 'aluminum_tube' -> 'aluminum' (a
-    UI-only id that uses the aluminum preset) and 'polycarb' -> 'polycarbonate' (legacy);
-    everything else, including custom materials, passes through unchanged."""
-    m = str(material).lower()
-    if m == 'aluminum_tube':
+    """Canonicalize public material aliases without allowing 606x to become plywood."""
+    m = str(material).strip().lower()
+    if m in ('aluminum_tube', 'aluminium_tube'):
         return 'aluminum'
+    model_key = feeds_speeds.canonical_material_key(material)
+    if model_key in ('aluminum_6061', 'aluminum_6063'):
+        if m in ('aluminum', 'aluminium'):
+            return 'aluminum'
+        return model_key
     if m == 'polycarb':
         return 'polycarbonate'
     return material
+
+
+def parse_tool_flutes(value) -> int:
+    """Strict cutter flute-count parsing shared by form and JSON job routes."""
+    if isinstance(value, bool):
+        raise ValueError('Tool flutes must be a whole number from 1 to 12.')
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Tool flutes must be a whole number from 1 to 12.') from exc
+    if not math.isfinite(number) or not number.is_integer() or not 1 <= number <= 12:
+        raise ValueError('Tool flutes must be a whole number from 1 to 12.')
+    return int(number)
+
+
+def register_resume_programs(result: PostProcessorResult):
+    """Register standalone resumes and one durable all-files recovery bundle."""
+    public = []
+    programs = build_resume_programs(result.gcode, result.filename)
+    for program in programs:
+        # build_resume_programs already sanitizes this, but basename is a final boundary
+        # before joining user-derived program names to the server's output directory.
+        filename = os.path.basename(program['filename'])
+        path = os.path.join(OUTPUT_FOLDER, filename)
+        with open(path, 'w') as fh:
+            fh.write(program['gcode'])
+        token = file_token_manager.register_file(path, filename)
+        public.append({
+            'checkpoint': program['checkpoint'],
+            'description': program['description'],
+            'filename': token,
+            'filename_display': filename,
+        })
+    if not programs:
+        return public, None
+
+    main_filename = os.path.basename(result.filename)
+    bundle_filename = (os.path.splitext(main_filename)[0] + '_RECOVERY.zip')
+    bundle_path = os.path.join(OUTPUT_FOLDER, bundle_filename)
+    with zipfile.ZipFile(bundle_path, 'w', zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr(main_filename, result.gcode)
+        for program in programs:
+            bundle.writestr(os.path.basename(program['filename']), program['gcode'])
+    bundle_token = file_token_manager.register_file(bundle_path, bundle_filename)
+    return public, {'filename': bundle_token, 'filename_display': bundle_filename}
 
 def get_onshape_client_or_401():
     """
@@ -1235,6 +1283,7 @@ def process_file():
         material = normalize_material(material)  # aluminum_tube->aluminum, polycarb->polycarbonate
 
         tool_diameter = float(request.form.get('tool_diameter', DEFAULT_TOOL_DIAMETER_IN))
+        tool_flutes = parse_tool_flutes(request.form.get('tool_flutes', 1))
         origin_corner = request.form.get('origin_corner', 'bottom-left')
         rotation = int(request.form.get('rotation', 0))
         mirror = request.form.get('mirror', '0') == '1'  # "flip over" (horizontal mirror)
@@ -1418,7 +1467,8 @@ def process_file():
                         material_thickness=thickness,
                         tool_diameter=tool_diameter,
                         units='inch',
-                        config=team_config
+                        config=team_config,
+                        tool_flutes=tool_flutes,
                     )
                     face_pp.tube_height = tube_height  # Store for Z-offset calculations
                     if dry_run:
@@ -1449,7 +1499,10 @@ def process_file():
                         material_thickness=thickness,
                         tool_diameter=pattern_tool,
                         units='inch',
-                        config=team_config
+                        config=team_config,
+                        # The generated hole pattern substitutes a twist drill; flute
+                        # count is not part of the milling model for that branch.
+                        tool_flutes=1 if pattern_mode == 'holes' else tool_flutes,
                     )
                     pp.tube_height = tube_height
                     # The generated-pattern branch builds its own post-processor, so it
@@ -1533,7 +1586,8 @@ def process_file():
                     tool_diameter=tool_diameter,
                     units='inch',
                     config=team_config,
-                    z_datum=z_datum
+                    z_datum=z_datum,
+                    tool_flutes=tool_flutes,
                 )
                 if dry_run:
                     pp.set_dry_run(DRY_RUN_LIFT_IN)
@@ -1587,6 +1641,7 @@ def process_file():
             # Register file with token manager for secure access
             actual_filename = result.filename
             output_token = file_token_manager.register_file(output_path, actual_filename)
+            restart_files, restart_bundle = register_resume_programs(result)
 
         except ValueError:
             # A rejected input, not a crash. This handler used to swallow every
@@ -1613,6 +1668,7 @@ def process_file():
         parameters = {
             'thickness': thickness,
             'tool_diameter': tool_diameter,
+            'tool_flutes': tool_flutes,
             'origin_corner': origin_corner,
             'rotation': rotation
         }
@@ -1640,6 +1696,8 @@ def process_file():
             # guess - dropping the _DRYRUN marker the row above it was about, and
             # sending someone hunting for a file that does not exist.
             'filename_display': result.filename,
+            'restart_files': restart_files,
+            'restart_bundle': restart_bundle,
             'gcode': result.gcode,
             'console': console_output,
             'parameters': parameters
@@ -1757,6 +1815,7 @@ def process_job():
         # aluminum_tube->aluminum, polycarb->polycarbonate
         material = normalize_material(job.get('material') or _session_default_material())
         tool_diameter = float(job.get('tool_diameter', DEFAULT_TOOL_DIAMETER_IN))
+        tool_flutes = parse_tool_flutes(job.get('tool_flutes', 1))
         thickness = float(job.get('thickness', 0.25))
         tab_spacing = float(job.get('tab_spacing', 6.0))
         machine_id = job.get('machine_id')
@@ -1869,7 +1928,8 @@ def process_job():
             mirror = bool(part.get('mirror'))
 
             pp = FRCPostProcessor(material_thickness=thickness, tool_diameter=tool_diameter,
-                                  units='inch', config=team_config, z_datum=z_datum)
+                                  units='inch', config=team_config, z_datum=z_datum,
+                                  tool_flutes=tool_flutes)
             if dry_run:
                 pp.set_dry_run(DRY_RUN_LIFT_IN)
             if engrave:
@@ -1958,6 +2018,7 @@ def process_job():
         with open(output_path, 'w') as fh:
             fh.write(result.gcode)
         output_token = file_token_manager.register_file(output_path, result.filename)
+        restart_files, restart_bundle = register_resume_programs(result)
 
         log(f"[JOB] assembled {result.stats['num_parts']} parts, "
             f"{result.stats['total_lines']} lines, {result.stats['cycle_time_display']}")
@@ -1971,6 +2032,8 @@ def process_job():
             'success': True,
             'filename': output_token,
             'filename_display': result.filename,
+            'restart_files': restart_files,
+            'restart_bundle': restart_bundle,
             'gcode': result.gcode,
             'cycle_time': result.stats.get('cycle_time_display'),
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),
@@ -2388,6 +2451,7 @@ def process_multitool():
         with open(output_path, 'w') as fh:
             fh.write(result.gcode)
         output_token = file_token_manager.register_file(output_path, result.filename)
+        restart_files, restart_bundle = register_resume_programs(result)
 
         boxes = [p['bbox'] for p in placed if p.get('bbox')]
         if sheet:
@@ -2411,6 +2475,8 @@ def process_multitool():
             'success': True,
             'filename': output_token,
             'filename_display': result.filename,
+            'restart_files': restart_files,
+            'restart_bundle': restart_bundle,
             'gcode': result.gcode,
             'cycle_time': result.stats.get('cycle_time_display'),
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),

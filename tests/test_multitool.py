@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,7 +25,9 @@ import drill_sizes
 import feeds_speeds
 import tooling
 from tooling import MultiToolJob, Operation, PartOps, Tool, ToolingError
-from frc_cam_postprocessor import FRCPostProcessor, build_output_filename, sanitize_comment
+from frc_cam_postprocessor import (
+    FRCPostProcessor, build_output_filename, build_resume_programs, sanitize_comment,
+)
 from team_config import TeamConfig
 
 
@@ -231,7 +234,7 @@ class TestFeeds(unittest.TestCase):
         # rubbing check must say so and point at the actual fix.
         self.assertTrue(any('below the recommended minimum' in w
                             for w in four['warnings']), four['warnings'])
-        self.assertEqual(two['warnings'], [])     # 2F is the limit, not past it
+        self.assertFalse(any('2-flute rate' in w for w in two['warnings']))
 
     def test_job_level_max_pass_depth_reaches_every_operation(self):
         """The operator's depth-per-pass ceiling: more, shallower passes for fragile
@@ -246,18 +249,16 @@ class TestFeeds(unittest.TestCase):
         normal = generate(build_job())
         self.assertEqual(loose.gcode, normal.gcode)
 
-    def test_metal_feed_is_anchored_to_the_tested_preset(self):
-        """The chipload model quoted a 1/8" cutter 85.9 IPM in 6061 - 56% above the
-        55 IPM the preset was actually tested at - and a real bit broke. In metal the
-        model may only DERATE the preset's diameter-scaled rate, never exceed it."""
+    def test_metal_feed_is_anchored_to_the_safe_preset(self):
+        """The chipload model may only derate the router's aluminum ceiling."""
         import re
         job = build_job(material='aluminum', thickness=0.125,
-                        tools=[Tool(1, '8th', 0.125, 4)],
+                        tools=[Tool(1, '8th', 0.125, 2)],
                         parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
                                        operations=[Operation('perimeter', 1)])])
         result = generate(job)
         self.assertTrue(result.success, result.errors)
-        anchor = 55.0 * (0.125 / 0.157) ** feeds_speeds.DIAMETER_EXPONENT
+        anchor = 30.0 * (0.125 / 0.157) ** feeds_speeds.DIAMETER_EXPONENT
         for feed in set(float(f) for f in
                         re.findall(r'X-?[\d.]+ Y-?[\d.]+ F([\d.]+)', result.gcode)):
             if feed >= 199.0:
@@ -271,6 +272,16 @@ class TestFeeds(unittest.TestCase):
                                                  operations=[Operation('perimeter', 1)])]))
         self.assertFalse(any('tested' in w and 'held to' in w for w in wood.warnings),
                          wood.warnings)
+
+    def test_high_flute_aluminum_tool_is_refused(self):
+        job = build_job(material='aluminum', thickness=0.125,
+                        tools=[Tool(1, 'wrong cutter', 0.125, 4)],
+                        parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
+                                       operations=[Operation('perimeter', 1)])])
+        result = generate(job)
+        self.assertFalse(result.success)
+        self.assertTrue(any('1- or 2-flute' in e and 'snap' in e for e in result.errors),
+                        result.errors)
 
     def test_flutes_still_scale_feed_in_wood(self):
         """Wood clears chips; the evacuation cap is a property of gummy metals and
@@ -304,7 +315,7 @@ class TestFeeds(unittest.TestCase):
         self.assertLess(pp.plunge_rate, pp.feed_rate)
 
     def test_material_alias_maps_to_the_feeds_model(self):
-        self.assertEqual(tooling.resolve_feeds_material('aluminum'), 'aluminum_6061')
+        self.assertEqual(tooling.resolve_feeds_material('aluminum'), 'aluminum_6063')
         self.assertEqual(tooling.resolve_feeds_material('polycarb'), 'polycarbonate')
         self.assertEqual(tooling.resolve_feeds_material('something_custom'), 'plywood')
 
@@ -488,10 +499,8 @@ class TestSpindlePowerGuard(unittest.TestCase):
     spindle than it has. On a router that is how end mills break: the spindle bogs, the
     cutter grabs, the tool snaps."""
 
-    #: A team config still running the pre-derate aluminum numbers (55 IPM, 0.2" slot).
-    #: The 2026-08-24 derate made the stock presets shallow enough that the spindle
-    #: power guard can no longer bind on them - it remains the backstop for configs
-    #: like this one.
+    #: A team config still carrying the pre-derate aluminum numbers. The shared safety
+    #: envelope now catches this before the power guard needs to.
     HOT_ALUMINUM = TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
         'materials': {'aluminum': {'feed_rate': 55.0, 'ramp_feed_rate': 35.0,
                                    'max_slotting_depth': 0.2}}}}})
@@ -508,13 +517,12 @@ class TestSpindlePowerGuard(unittest.TestCase):
                 getattr(pp, 'power_limited_depth', False), feeds)
 
     def test_a_big_cutter_in_aluminium_is_depth_limited(self):
-        # Under a hot config, a 1/2" 4-flute's full-width pass would out-demand the
-        # spindle at the config's 0.2" depth; the guard must clamp it well below.
+        # A stale config cannot restore the old 0.2" full-width pass.
         preset, applied, bound, _ = self._applied('aluminum', 0.5, 4,
                                                   config=self.HOT_ALUMINUM)
-        self.assertTrue(bound)
-        self.assertLess(applied, 0.15)
-        self.assertLess(applied, preset)
+        self.assertFalse(bound)
+        self.assertLessEqual(preset, 0.06)
+        self.assertLessEqual(applied, preset)
 
     def test_the_resulting_load_is_inside_the_spindle(self):
         for diameter, flutes in ((0.25, 2), (0.375, 2), (0.5, 3), (0.5, 4)):
@@ -557,17 +565,14 @@ class TestSpindlePowerGuard(unittest.TestCase):
             {'rpm_min': 6000, 'rpm_max': 24000, 'xy_feed_max': 150.0, 'z_feed_max': 60.0},
             'aluminum_6061', 0.375, 150.0))
 
-    def test_the_operator_is_told_why_the_job_got_slower(self):
-        # Needs the hot config: the derated stock presets are shallow enough that the
-        # power guard cannot bind on them, which is the point of the derate.
+    def test_the_operator_is_told_the_high_flute_tool_is_unsafe(self):
         job = build_job(material='aluminum', tools=[Tool(1, '1/2 4F', 0.5, 4)],
                         config=self.HOT_ALUMINUM,
                         parts=[PartOps(dxf_path=make_bare_dxf(), name='P',
                                        operations=[Operation('perimeter', 1)])])
         result = generate(job)
-        self.assertTrue(result.success, result.errors)
-        self.assertTrue(any('spindle can drive' in w for w in result.warnings),
-                        result.warnings)
+        self.assertFalse(result.success)
+        self.assertTrue(any('1- or 2-flute' in e for e in result.errors), result.errors)
 
     def test_achieved_chipload_stays_above_the_rubbing_floor(self):
         """Too little chip per tooth in aluminium means rubbing, heat, built-up edge and
@@ -1643,12 +1648,79 @@ class TestGeneratedProgram(unittest.TestCase):
     def test_tool_change_stops_the_spindle_and_restarts_it(self):
         text = self.result.gcode
         change_at = text.index('=== TOOL CHANGE')
-        block = text[change_at:change_at + 800]
+        next_change = text.find('=== TOOL CHANGE', change_at + 1)
+        block = text[change_at:next_change if next_change >= 0 else len(text)]
         self.assertIn('M5', block)                     # spindle off before hands go in
         self.assertIn('M0', block)                     # wait for CYCLE START
-        self.assertIn('Re-zero Z', block)              # the new tool has a new length
+        self.assertIn('Re-zero G54 Z', block)          # the new tool has a new length
         self.assertIn('Do NOT change the X or Y zero', block)
         self.assertIn('M3', block.split('M0', 1)[1])   # spindle back on after the pause
+
+    def test_each_tool_change_has_a_complete_resume_checkpoint(self):
+        checkpoints = [l for l in self.lines if '=== RESUME CHECKPOINT' in l]
+        self.assertEqual(len(checkpoints), self.result.stats['tool_changes'])
+        self.assertEqual(len(checkpoints), len(set(checkpoints)))
+        for checkpoint in checkpoints:
+            after = self.result.gcode.split(checkpoint, 1)[1][:600]
+            self.assertIn('G90 G94 G91.1 G40 G49 G17', after)
+            self.assertIn('G20', after)
+            self.assertIn('G92.1', after)
+            self.assertIn('G54', after)
+            self.assertIn('Safe Z before resumed XY motion', after)
+            self.assertIn('M3', after)
+
+    def test_standalone_resume_files_are_safe_tail_programs(self):
+        programs = build_resume_programs(self.result.gcode, self.result.filename)
+        self.assertEqual(len(programs), self.result.stats['tool_changes'])
+        for program in programs:
+            gcode = program['gcode']
+            self.assertTrue(program['filename'].endswith(
+                f"_RESUME_{program['checkpoint']}.nc"))
+            self.assertLess(gcode.index('M0  ; Confirm standalone resume setup'),
+                            gcode.index('=== RESUME CHECKPOINT'))
+            self.assertIn('Reference or home the machine', gcode)
+            self.assertIn('Verify G54 X and Y', gcode)
+            self.assertIn('M30', gcode)
+
+    def test_standalone_resume_turns_configured_coolant_off_before_pause(self):
+        source = '\n'.join([
+            '(Material: 6061 Aluminum)',
+            'M7  ; Air on',
+            '( === RESUME CHECKPOINT TC01 - test tool === )',
+            'G90 G94 G91.1 G40 G49 G17',
+            'G92.1',
+            'G54',
+            'M30',
+        ])
+        setup = build_resume_programs(source, 'test.nc')[0]['gcode'].split(
+            'M0  ; Confirm standalone resume setup', 1)[0]
+        self.assertLess(setup.index('M9  ; Keep coolant off during resume setup'),
+                        setup.index('M5  ; Keep spindle stopped during resume setup'))
+
+    def test_configured_tool_change_height_creates_wrench_clearance(self):
+        cfg = TeamConfig({'machining': {'z_reference': {'tool_change_height': 2.0}}})
+        result = generate(build_job(config=cfg))
+        self.assertTrue(result.success, result.errors)
+        for block in result.gcode.split('( === TOOL CHANGE')[1:]:
+            before_pause = block.split('M0', 1)[0]
+            self.assertIn('G0 Z2.0000  ; Safe Z clearance', before_pause)
+
+    def test_aluminum_rechecks_the_new_tool_at_every_change_and_resume(self):
+        result = generate(build_job(material='6063', machine_id='omio_x8'))
+        self.assertTrue(result.success, result.errors)
+        changes = result.gcode.split('( === TOOL CHANGE')[1:]
+        self.assertTrue(changes)
+        for block in changes:
+            before_pause = block.split('M0', 1)[0]
+            self.assertIn('Clean collet, minimize stickout, and verify low runout',
+                          before_pause)
+            self.assertIn('continuous directed air and a clear chip escape path',
+                          before_pause)
+            self.assertIn('lubricant or MQL is ready for 6063', before_pause)
+        for program in build_resume_programs(result.gcode, result.filename):
+            setup = program['gcode'].split('M0  ; Confirm standalone resume setup', 1)[0]
+            self.assertIn('clean collet, low runout, continuous directed air', setup)
+            self.assertIn('lubricant or MQL is ready for 6063', setup)
 
     def test_no_automatic_tool_change_codes(self):
         """These routers have no changer and no tool-length table; a T/M6 or G43 would be
@@ -1984,6 +2056,20 @@ class TestMultiToolRoutes(unittest.TestCase):
         self.assertEqual(body['tool_changes'], 1)
         self.assertIn('M30', body['gcode'])
         self.assertEqual(len(body['tools']), 2)
+        self.assertEqual(len(body['restart_files']), 1)
+        resume = body['restart_files'][0]
+        self.assertEqual(resume['checkpoint'], 'TC01')
+        downloaded = self.client.get('/download/' + resume['filename'])
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertIn(b'PENGUINCAM STANDALONE RESUME PROGRAM', downloaded.data)
+        self.assertIn(b'G90 G94 G91.1 G40 G49 G17', downloaded.data)
+        self.assertIn(b'G92.1', downloaded.data)
+        bundle = self.client.get('/download/' + body['restart_bundle']['filename'])
+        self.assertEqual(bundle.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(bundle.data)) as archive:
+            names = archive.namelist()
+            self.assertIn(body['filename_display'], names)
+            self.assertIn(resume['filename_display'], names)
 
     def test_reports_plan_errors_as_part_errors(self):
         r = self._post_job([{'op_type': 'holes', 'tool_slot': 2,

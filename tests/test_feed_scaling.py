@@ -13,6 +13,7 @@ The contract under test:
   - the derate reaches the actual G-code, not just the attributes.
 """
 import io
+import math
 import os
 import sys
 import tempfile
@@ -25,25 +26,26 @@ import ezdxf
 
 import feeds_speeds
 from frc_cam_postprocessor import FRCPostProcessor
+from team_config import CONFIG_TEMPLATE, TeamConfig
 
 
-def _pp(tool, material='aluminum', units='inch', machine=None):
+def _pp(tool, material='aluminum', units='inch', machine=None, flutes=1, config=None):
     with redirect_stdout(io.StringIO()):
-        pp = FRCPostProcessor(material_thickness=0.25, tool_diameter=tool, units=units)
+        pp = FRCPostProcessor(material_thickness=0.25, tool_diameter=tool, units=units,
+                              tool_flutes=flutes, config=config)
         pp.apply_material_preset(material, machine)
         notes = pp.scale_feeds_to_tool()
     return pp, notes
 
 
 class TestScaleFeedsToTool(unittest.TestCase):
-    def test_reference_tool_is_untouched(self):
-        # The presets ARE the tested numbers for the 4 mm tool; changing them for it
-        # would silently rewrite feeds the team has cut with.
+    def test_reference_tool_keeps_base_feed_and_depth(self):
+        # The proven 4 mm base feed/depth stay fixed. The corner-only floor may rise so
+        # those deliberately slower moves do not fall below minimum chipload.
         pp, notes = _pp(0.157)
-        self.assertEqual(notes, [])
         self.assertEqual(pp.feed_rate, 30.0)
         self.assertEqual(pp.max_slotting_depth, 0.06)
-        self.assertIsNone(getattr(pp, 'feed_scale_note', None))
+        self.assertTrue(any('spindle reduced' in n for n in notes), notes)
 
     def test_small_tool_is_derated_on_both_axes(self):
         pp, _ = _pp(0.125)
@@ -74,16 +76,126 @@ class TestScaleFeedsToTool(unittest.TestCase):
         self.assertAlmostEqual(pp_mm.max_slotting_depth,
                                pp_in.max_slotting_depth * 25.4, places=3)
 
-    def test_tiny_tool_warns_about_rubbing(self):
-        # A 1 mm cutter derates to a chipload below aluminum's minimum: it will rub
-        # and work-harden the wall. Nothing safe to raise automatically - warn.
+    def test_tiny_tool_lowers_rpm_instead_of_rubbing(self):
+        # A 1 mm one-flute cutter can still make a chip above the Omio spindle floor.
         pp, notes = _pp(1.0 / 25.4)
-        self.assertTrue(any('rub' in n for n in notes), notes)
+        floor = feeds_speeds.MATERIALS['aluminum_6063']['chipload_min']
+        self.assertGreaterEqual(
+            pp.feed_rate * pp.corner_min_feed_scale / pp.spindle_speed, floor)
+        self.assertTrue(any('spindle reduced' in n for n in notes), notes)
 
     def test_without_a_preset_it_is_a_noop(self):
         with redirect_stdout(io.StringIO()):
             pp = FRCPostProcessor(material_thickness=0.25, tool_diameter=0.125)
         self.assertEqual(pp.scale_feeds_to_tool(), [])
+
+    def test_stale_team_config_cannot_restore_broken_aluminum_values(self):
+        stale = TeamConfig({'materials': {'aluminum': {
+            'feed_rate': 55.0, 'ramp_feed_rate': 35.0, 'plunge_rate': 25.0,
+            'ramp_angle': 12.0, 'stepover_percentage': 0.5,
+            'helix_radius_multiplier': 0.8, 'max_slotting_depth': 0.2,
+        }}})
+        pp, _ = _pp(0.157, config=stale)
+        safety = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX
+        self.assertEqual(pp.feed_rate, safety['feed_rate'])
+        self.assertEqual(pp.ramp_feed_rate, safety['ramp_feed_rate'])
+        self.assertEqual(pp.plunge_rate, safety['plunge_rate'])
+        self.assertEqual(pp.max_slotting_depth, safety['max_slotting_depth'])
+        self.assertEqual(pp.ramp_angle, safety['ramp_angle'])
+        self.assertIn('aluminum safety envelope', pp.feed_scale_note)
+
+    def test_high_flute_aluminum_cutter_is_refused(self):
+        with self.assertRaisesRegex(ValueError, '1- or 2-flute'):
+            _pp(0.125, flutes=4)
+
+    def test_two_flute_aluminum_cutter_is_explicit_and_allowed(self):
+        pp, notes = _pp(0.125, flutes=2)
+        self.assertEqual(pp.tool_flutes, 2)
+        self.assertLess(pp.spindle_speed, 18000)
+        self.assertGreaterEqual(pp.feed_rate / (pp.spindle_speed * 2),
+                                feeds_speeds.MATERIALS['aluminum_6061']['chipload_min'])
+        self.assertTrue(any('spindle reduced' in n for n in notes), notes)
+        corner_feed = pp.feed_rate * pp.corner_min_feed_scale
+        self.assertGreaterEqual(corner_feed / (pp.spindle_speed * 2),
+                                feeds_speeds.MATERIALS['aluminum_6061']['chipload_min'])
+
+    def test_generated_config_uses_the_same_aluminum_envelope(self):
+        import yaml
+        generated = yaml.safe_load(CONFIG_TEMPLATE)['materials']['aluminum']
+        for key, ceiling in feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX.items():
+            self.assertLessEqual(generated[key], ceiling, key)
+
+    def test_every_6061_6063_spelling_gets_the_aluminum_guard(self):
+        aliases = ('aluminum', 'aluminum_tube', '6061', '6061-T6',
+                   'aluminum_6061', '6063', '6063 T5', 'aluminium-6063')
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                pp, _ = _pp(0.125, material=alias)
+                self.assertLessEqual(pp.feed_rate, 30.0)
+                self.assertIn(pp.material_id, ('aluminum_6061', 'aluminum_6063'))
+                with self.assertRaisesRegex(ValueError, '1- or 2-flute'):
+                    _pp(0.125, material=alias, flutes=4)
+
+    def test_hostile_aluminum_config_is_replaced_by_safe_values(self):
+        hostile = TeamConfig({'materials': {'aluminum': {
+            'feed_rate': float('nan'), 'ramp_feed_rate': -2,
+            'plunge_rate': 0, 'max_slotting_depth': -1,
+            'spindle_speed': 50000, 'corner_min_feed_scale': -4,
+        }}})
+        pp, _ = _pp(0.157, config=hostile)
+        self.assertTrue(math.isfinite(pp.feed_rate))
+        self.assertGreater(pp.max_slotting_depth, 0)
+        self.assertGreaterEqual(pp.spindle_speed, 6000)
+        self.assertLessEqual(pp.spindle_speed, 24000)
+        self.assertGreaterEqual(pp.corner_min_feed_scale, 0.6)
+
+    def test_final_validator_rejects_post_scaling_overrides(self):
+        pp, _ = _pp(0.125)
+        pp.spindle_speed = 1000
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            pp.validate_aluminum_cutting_parameters()
+        pp, _ = _pp(0.125)
+        pp.plunge_rate = 2000
+        with self.assertRaisesRegex(ValueError, 'plunge'):
+            pp.validate_aluminum_cutting_parameters()
+        pp, _ = _pp(0.0625)
+        pp.feed_rate = 30
+        with self.assertRaisesRegex(ValueError, 'diameter-scaled'):
+            pp.validate_aluminum_cutting_parameters()
+
+    def test_aluminum_header_requires_operator_preflight(self):
+        pp, _ = _pp(0.157, material='6063')
+        pp.holes, pp.pockets, pp.perimeter = [], [], None
+        header = '\n'.join(pp._generate_gcode_header('2026-08-25 12:00'))
+        self.assertIn('REQUIRED ALUMINUM PREFLIGHT', header)
+        self.assertIn('continuous manual air blast', header)
+        self.assertIn('6063 requires proven aluminum-compatible lubricant', header)
+        self.assertLess(header.index('M0  ; Confirm aluminum preflight'),
+                        header.index('M3  ; Spindle on'))
+
+    def test_tube_side_facing_uses_at_most_one_diameter_per_level(self):
+        pp, _ = _pp(0.157, material='6063')
+        passes = pp._calculate_tube_operation_passes(2.0)
+        self.assertLessEqual(passes['roughing_depth_per_pass'], pp.tool_diameter + 1e-9)
+        self.assertLessEqual(passes['finishing_depth_per_pass'], pp.tool_diameter + 1e-9)
+
+    def test_tube_endmill_features_are_split_into_depth_levels(self):
+        pp, _ = _pp(0.157, material='6063')
+        pp.material_thickness = 0.125
+        pp._apply_z_frame()
+        pp.pockets = [[(0, 0), (1, 0), (1, 1), (0, 1)]]
+        pp.holes = []
+        gcode = '\n'.join(pp._generate_toolpath_gcode(skip_perimeter=True))
+        self.assertIn('(Depth levels: 3 ', gcode)
+
+    def test_generated_tube_drill_uses_drilling_model(self):
+        pp, _ = _pp(0.201, material='6063')
+        pp.tool_has_drill_point = True
+        pp.apply_twist_drill_feeds()
+        self.assertGreaterEqual(pp.spindle_speed, 6000)
+        self.assertLessEqual(pp.spindle_speed, 24000)
+        self.assertLessEqual(pp.plunge_rate, 15.0)
+        self.assertAlmostEqual(pp.peck_drill_depth, pp.tool_diameter / 3.0)
 
 
 class TestMaxPassDepth(unittest.TestCase):
@@ -180,6 +292,11 @@ class TestMaxPassDepthRoutes(unittest.TestCase):
     def test_bad_ceiling_is_a_400(self):
         response = self._post_job({'max_pass_depth': -1})
         self.assertEqual(response.status_code, 400)
+
+    def test_job_route_refuses_high_flute_aluminum_cutter(self):
+        response = self._post_job({'tool_flutes': 4})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('1- or 2-flute', response.get_json()['error'])
 
 
 class TestTabRemovalRespectsDepthLimit(unittest.TestCase):
@@ -285,6 +402,10 @@ class TestDerateReachesTheProgram(unittest.TestCase):
         self.assertIn('F25.5', result.gcode)          # scaled cutting feed in the moves
         self.assertNotIn('F30.0', result.gcode)       # the 4 mm feed must be gone
         self.assertIn('feed scaled to 25.5 ipm', result.gcode)   # header note
+
+    def test_program_header_states_flute_count(self):
+        result = self._generate(0.157)
+        self.assertIn('1-flute Flat End Mill', result.gcode)
 
     def test_reference_tool_program_is_unchanged(self):
         result = self._generate(0.157)

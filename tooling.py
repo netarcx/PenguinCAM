@@ -123,8 +123,8 @@ FEEDS_OPERATION = {
 
 #: `feeds_speeds` material keys differ slightly from PenguinCAM's material ids.
 FEEDS_MATERIAL_ALIASES = {
-    'aluminum': 'aluminum_6061',
-    'aluminum_tube': 'aluminum_6061',
+    'aluminum': 'aluminum_6063',
+    'aluminum_tube': 'aluminum_6063',
     'polycarb': 'polycarbonate',
     'plywood': 'plywood',
 }
@@ -536,8 +536,9 @@ class MultiToolJob:
 
 def resolve_feeds_material(material: str) -> str:
     """Map a PenguinCAM material id onto a `feeds_speeds` material key."""
-    key = str(material or '').lower()
-    key = FEEDS_MATERIAL_ALIASES.get(key, key)
+    key = feeds_speeds.canonical_material_key(material)
+    if key is None:
+        key = FEEDS_MATERIAL_ALIASES.get(str(material or '').lower(), '')
     return key if key in feeds_speeds.MATERIALS else 'plywood'
 
 
@@ -620,14 +621,13 @@ def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
     """In metal, hold the model's feed to the material preset's TESTED rate, scaled
     for this tool's diameter. Mutates `feeds` in place; returns a warning when it binds.
 
-    The chipload model is theory; the preset feed is the one number this machine has
-    actually cut aluminium at (55 IPM for the 4 mm reference on the stock config, or
-    whatever the team tuned it to). The model was quoting a 1/8 in cutter 85.9 IPM -
-    56% over anything the machine had ever demonstrated - and a real bit broke at it.
+    The chipload model is theory; the preset feed is bounded by the router safety
+    envelope (30 IPM for the 4 mm reference). The model once quoted a 1/8 in cutter
+    85.9 IPM, and a real bit broke at it.
     The same never-raise-above-tested doctrine that already governs depth of cut now
     governs feed in the materials that seize (those with feed_flutes_max); wood and
-    plastics keep the model's numbers, and an explicit per-tool feed override still
-    wins - pinning a feed is the operator overriding the anchor on purpose.
+    plastics keep the model's numbers. Explicit per-tool overrides are accepted only
+    inside the aluminum safety envelope.
 
     Must run BEFORE apply_tool_feeds: pp.feed_rate still holds the material preset's
     feed at that point, and the power-limited depth inside apply_tool_feeds must be
@@ -636,25 +636,45 @@ def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
     material_key = feeds.get('material_key')
     is_metal = bool(feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max'))
     preset_feed = getattr(pp, 'feed_rate', None)
+    if feeds_speeds.is_aluminum_material(material_key) and preset_feed:
+        # Defense in depth: apply_material_preset already clamps the generic aluminum
+        # id, but this makes the tool overlay safe even if a caller supplies a partially
+        # initialized post-processor or that shared clamp is ever refactored.
+        preset_feed = min(
+            preset_feed,
+            feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['feed_rate'])
     if not is_metal or not preset_feed or tool.type == 'drill' or tool.feed_rate:
         return None
     d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
     # Floored, not rounded: a clamp must never nudge itself upward, and the single-tool
     # path's scale_feeds_to_tool floors identically (46.8, not 46.9, for a 1/8" tool).
     anchor = math.floor(preset_feed
-                        * (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT
+                        * min(1.0, (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT)
                         * 10.0) / 10.0
-    if anchor >= feeds['feed_xy']:
-        return None
-    scale = anchor / feeds['feed_xy']
     original = feeds['feed_xy']
-    feeds['feed_xy'] = anchor
-    feeds['ramp_feed'] = round(feeds['ramp_feed'] * scale, 1)
-    feeds['peck_feed'] = round(feeds['peck_feed'] * scale, 1)
-    return (f"{tool.label}: feed held to {anchor:.1f} ipm, the tested "
-            f"{feeds_speeds.MATERIALS[material_key]['name']} preset rate scaled for "
-            f"this diameter. The chipload model wanted {original:.1f} ipm, but the "
-            f"preset is the only feed this machine has proven in metal.")
+    feed_note = ''
+    if anchor < feeds['feed_xy']:
+        scale = anchor / feeds['feed_xy']
+        feeds['feed_xy'] = anchor
+        feeds['ramp_feed'] = round(feeds['ramp_feed'] * scale, 1)
+        feeds['peck_feed'] = round(feeds['peck_feed'] * scale, 1)
+        feed_note = (f"feed held to {anchor:.1f} ipm, the tested "
+                     f"{feeds_speeds.MATERIALS[material_key]['name']} preset rate "
+                     f"scaled for this diameter. The model wanted {original:.1f} ipm.")
+    rpm_note = ''
+    minimum = feeds_speeds.MATERIALS[material_key].get('chipload_min')
+    if minimum and not tool.spindle_speed:
+        machine = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
+        spindle_floor = feeds_speeds.MACHINES[machine]['rpm_min']
+        corner_floor = getattr(pp, 'corner_min_feed_scale', 1.0)
+        rpm_ceiling = feeds['feed_xy'] * corner_floor / (tool.flutes * minimum)
+        protected_rpm = max(spindle_floor, min(feeds['rpm'], math.floor(rpm_ceiling)))
+        if protected_rpm < feeds['rpm']:
+            feeds['rpm'] = int(protected_rpm)
+            rpm_note = (f"spindle reduced to {feeds['rpm']} RPM so {tool.flutes} flutes "
+                        f"stay at or above {minimum:.4f} in/tooth.")
+    notes = ' '.join(n for n in (feed_note, rpm_note) if n)
+    return f"{tool.label}: {notes}" if notes else None
 
 
 def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) -> None:
@@ -666,6 +686,32 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
     them, because those describe the material and the fixture, not the cutter.
     """
     d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
+    material_key = feeds.get('material_key')
+
+    # Final defense in depth: callers outside generate_operation historically skipped
+    # the anchoring helper. Mutate the shared feed record so every downstream consumer
+    # sees the exact protected values that will be emitted.
+    if feeds_speeds.is_aluminum_material(material_key):
+        diameter_factor = min(
+            1.0, (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT)
+        if tool.type == 'endmill' and tool.feed_rate is None:
+            ceiling = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['feed_rate'] * diameter_factor
+            if feeds['feed_xy'] > ceiling:
+                scale = ceiling / feeds['feed_xy']
+                feeds['feed_xy'] = math.floor(ceiling * 10.0) / 10.0
+                feeds['ramp_feed'] *= scale
+                feeds['peck_feed'] *= scale
+        if tool.plunge_rate is None:
+            feeds['peck_feed'] = min(
+                feeds['peck_feed'],
+                feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] * diameter_factor)
+        if tool.type == 'endmill' and tool.spindle_speed is None:
+            minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+            machine = feeds_speeds.MACHINES[feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE]
+            rpm_ceiling = (feeds['feed_xy'] * pp.corner_min_feed_scale
+                           / (tool.flutes * minimum))
+            feeds['rpm'] = int(max(machine['rpm_min'],
+                                   min(feeds['rpm'], math.floor(rpm_ceiling))))
 
     pp.spindle_speed = int(tool.spindle_speed or feeds['rpm'])
     pp.feed_rate = float(tool.feed_rate or feeds['feed_xy'])
@@ -699,7 +745,11 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
     # bogs, the cutter grabs, the tool snaps. The reference 4 mm cutter asks for 0.33 hp,
     # so a big end mill in aluminium is where this bites and nowhere else - in plywood the
     # unit power is six times lower and this never binds.
-    power_limit = _power_limited_depth(tool, feeds)
+    # Use the feed the program will ACTUALLY command. An explicit tool override is
+    # applied to pp.feed_rate just above; calculating power from feeds['feed_xy'] here
+    # let a 100 IPM override keep the depth limit computed for 30 IPM.
+    power_inputs = dict(feeds, feed_xy=pp.feed_rate)
+    power_limit = _power_limited_depth(tool, power_inputs)
     if power_limit and power_limit < stepdown:
         pp.max_slotting_depth = power_limit
         pp.power_limited_depth = True
@@ -717,6 +767,19 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
         if not tool.plunge_rate:
             pp.plunge_rate = round(pp.plunge_rate * scale, 1)
 
+    if feeds_speeds.is_aluminum_material(material_key):
+        diameter_factor = min(
+            1.0,
+            (tool.diameter / feeds_speeds.REFERENCE_TOOL['diameter'])
+            ** feeds_speeds.DIAMETER_EXPONENT)
+        pp.ramp_feed_rate = min(
+            pp.ramp_feed_rate,
+            feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['ramp_feed_rate'] * diameter_factor)
+        if tool.plunge_rate is None:
+            pp.plunge_rate = min(
+                pp.plunge_rate,
+                feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] * diameter_factor)
+
     # Peck depth per plunge is a fraction of the cutter's diameter; the preset value is
     # quoted for the 4 mm reference tool, so scale it to this one.
     if hasattr(pp, 'peck_drill_depth'):
@@ -730,6 +793,15 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
         # a diameter per peck clears chips from a deep hole in wood or aluminium without
         # making the cycle needlessly slow.
         pp.peck_drill_depth = tool.diameter / 3.0
+
+    if tool.type == 'endmill' and feeds_speeds.is_aluminum_material(material_key):
+        minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+        required_corner_scale = min(
+            1.0, pp.spindle_speed * tool.flutes * minimum / pp.feed_rate)
+        if required_corner_scale > pp.corner_min_feed_scale + 1e-9:
+            old_scale = pp.corner_min_feed_scale
+            pp.corner_min_feed_scale = required_corner_scale
+            pp.chipload_corner_floor_adjusted = (old_scale, required_corner_scale)
 
     # Corner slowdown reaches one tool diameter either side of a corner (set in __init__
     # from the constructor diameter, so it is already right - restated here so the
@@ -1218,6 +1290,13 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
             f"spindle can drive. The cut takes more passes; a bigger cutter is not "
             f"always a faster one on a router.")
 
+    if getattr(pp, 'chipload_corner_floor_adjusted', None):
+        old_floor, new_floor = pp.chipload_corner_floor_adjusted
+        warnings.append(
+            f"{tool.label}: corner slowdown floor raised from {old_floor:.2f} to "
+            f"{new_floor:.2f} so the cutter still makes a chip instead of rubbing at "
+            f"{pp.spindle_speed} RPM.")
+
     depth_warning = _apply_depth(pp, op)
     if depth_warning:
         warnings.append(depth_warning)
@@ -1228,6 +1307,57 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     pp._pending_clearance_rapid = True
 
     mismatch = _check_tool_suits_operation(op, tool)
+    material_key = resolve_feeds_material(job.material)
+    flute_cap = feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max')
+    if (not mismatch and tool.type == 'endmill' and flute_cap
+            and tool.flutes > flute_cap):
+        mismatch = (
+            f"{op.label} uses {tool.label}, a {tool.flutes}-flute cutter in "
+            f"{feeds_speeds.MATERIALS[material_key]['name']}. Use a 1- or 2-flute "
+            f"aluminum end mill on this router so chips can evacuate; packed chips "
+            f"weld to the cutter and snap it.")
+    if not mismatch and feeds_speeds.is_aluminum_material(material_key):
+        machine_key = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
+        machine = feeds_speeds.MACHINES[machine_key]
+        actual_feed = float(pp.feed_rate)
+        actual_rpm = int(pp.spindle_speed)
+        actual_plunge = float(pp.plunge_rate)
+        diameter_factor = min(
+            1.0,
+            (tool.diameter / feeds_speeds.REFERENCE_TOOL['diameter'])
+            ** feeds_speeds.DIAMETER_EXPONENT)
+        feed_ceiling = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['feed_rate'] * diameter_factor
+        plunge_ceiling = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] * diameter_factor
+        if not machine['rpm_min'] <= actual_rpm <= machine['rpm_max']:
+            mismatch = (
+                f"{op.label} asks {tool.label} for {actual_rpm} RPM; {machine['name']} "
+                f"must stay between {machine['rpm_min']} and {machine['rpm_max']} RPM.")
+        elif tool.type == 'endmill' and actual_feed > feed_ceiling + 1e-9:
+            mismatch = (
+                f"{op.label} asks {tool.label} to cut aluminum at {actual_feed:g} ipm, "
+                f"above its diameter-scaled {feed_ceiling:.1f} ipm router ceiling.")
+        elif actual_plunge > plunge_ceiling + 1e-9:
+            mismatch = (
+                f"{op.label} asks {tool.label} to plunge at {actual_plunge:g} ipm, "
+                f"above its aluminum ceiling of {plunge_ceiling:.1f} ipm.")
+
+    if (not mismatch and feeds_speeds.is_aluminum_material(material_key)
+            and tool.type == 'endmill'):
+        actual_feed = float(pp.feed_rate)
+        actual_rpm = int(pp.spindle_speed)
+        minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+        maximum = feeds_speeds.MATERIALS[material_key]['chipload_max']
+        actual_chipload = actual_feed / (actual_rpm * tool.flutes)
+        if actual_chipload + 1e-12 < minimum:
+            mismatch = (
+                f"{op.label} would run {tool.label} at {actual_chipload:.4f} in/tooth, "
+                f"below the aluminum minimum {minimum:.4f}. That rubs and heats instead "
+                f"of making a chip. Lower RPM, use fewer flutes, or remove the tool "
+                f"override.")
+        elif actual_chipload > maximum + 1e-12:
+            mismatch = (
+                f"{op.label} would run {tool.label} at {actual_chipload:.4f} in/tooth, "
+                f"above the aluminum maximum {maximum:.4f}. Raise RPM or lower feed.")
     if mismatch:
         # A hard error, not a warning: every one of these produces a program that looks
         # correct and cuts wrongly, so there is nothing useful to hand the operator.
@@ -1418,7 +1548,8 @@ def build_tool_table(bodies: Sequence[Dict[str, Any]]) -> List[str]:
 # ------------------------------------------------------------------------------ assembly
 
 def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool,
-                       extra_instructions: Sequence[str] = ()) -> List[str]:
+                       extra_instructions: Sequence[str] = (),
+                       checkpoint_id: str = None) -> List[str]:
     """The manual tool-change block between two operations.
 
     Reuses the standard pause-and-park sequence, so a tool change parks and stops exactly
@@ -1429,12 +1560,27 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
     instructions = [f"Remove {previous.label}" ] if previous else []
     instructions += [
         f"Install {nxt.label}, {nxt.diameter:.4f} in diameter",
-        f"Re-zero Z to {pp.z_zero_surface()} with the new tool",
+        f"Re-zero G54 Z to {pp.z_zero_surface()} with the new tool, not with G92",
         "Do NOT change the X or Y zero",
     ]
+    material_key = feeds_speeds.canonical_material_key(
+        getattr(pp, 'material_id', getattr(pp, 'material_name', '')))
+    if feeds_speeds.is_aluminum_material(material_key):
+        instructions += [
+            'Confirm incoming cutter is sharp, clean, and approved for aluminum',
+            'Clean collet, minimize stickout, and verify low runout',
+            'Confirm continuous directed air and a clear chip escape path before restart',
+        ]
+        if material_key == 'aluminum_6063':
+            instructions.append(
+                'Confirm proven aluminum-compatible lubricant or MQL is ready for 6063')
     instructions.extend(sanitize_comment(i) for i in extra_instructions)
     title = sanitize_comment(f"TOOL CHANGE - {nxt.label}", 'TOOL CHANGE')
-    return pp._generate_pause_and_park_gcode(title, instructions)
+    return pp._generate_pause_and_park_gcode(
+        title, instructions, tool_change=True,
+        resume_checkpoint=checkpoint_id,
+        resume_description=nxt.label,
+    )
 
 
 def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
@@ -1508,13 +1654,18 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     ] if (header_pp.pause_before_perimeter and first_perimeter is not None) else []
 
     current_tool: Optional[Tool] = None
+    change_number = 0
     for i, body in enumerate(bodies):
         pp, tool, op, part = body['pp'], body['tool'], body['op'], body['part']
         needs_change = current_tool is None or current_tool.slot != tool.slot
         fixturing_here = fixturing_instructions if i == first_perimeter else []
 
         if needs_change and current_tool is not None:
-            gcode.extend(_tool_change_gcode(pp, current_tool, tool, fixturing_here))
+            change_number += 1
+            gcode.extend(_tool_change_gcode(
+                pp, current_tool, tool, fixturing_here,
+                checkpoint_id=f'TC{change_number:02d}',
+            ))
         else:
             if fixturing_here:
                 gcode.extend(pp._generate_pause_and_park_gcode(

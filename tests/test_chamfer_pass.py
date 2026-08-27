@@ -143,7 +143,7 @@ class TestSingleProgram(unittest.TestCase):
         self.assertIn('Z0.2300', self.result.gcode)
 
     def test_operator_rezero_instructions_present(self):
-        self.assertIn('Re-zero Z to the sacrifice board surface', self.result.gcode)
+        self.assertIn('Re-zero G54 Z to the sacrifice board surface', self.result.gcode)
 
     def test_comment_rules(self):
         for line in self.result.gcode.split('\n'):

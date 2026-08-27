@@ -37,6 +37,7 @@
     material: CFG.defaultMaterial || 'aluminum',
     tool_diameter: parseFloat(CFG.defaultTool) || 0.25,
     tool_diameter_text: CFG.defaultToolText || '1/4"',  // user's raw input, shown verbatim (e.g. "4mm")
+    tool_flutes: 1,
     thickness: 0.25,
     thickness_text: '0.25"',
     tab_spacing: 6.0,
@@ -451,7 +452,7 @@
       // so it has to name the real one.
       chips.push(state.tubePattern === 'holes' && state.mode === 'tubing'
         ? '⌀ 0.201" twist drill'
-        : '⌀ ' + state.tool_diameter_text + ' tool');
+        : '⌀ ' + state.tool_diameter_text + ' / ' + state.tool_flutes + '-flute tool');
     }
     if (state.chamfer.on && state.mode === '2d') {
       chips.push(state.chamfer.width_text + ' chamfer · '
@@ -721,6 +722,26 @@
         refreshLayoutFromTool();   // the kerf readout and the spacing check both move
         invalidatePreview();
       });
+    var fluteInput = $('#f-tool-flutes');
+    if (fluteInput) {
+      var commitFlutes = function () {
+        var n = Number(fluteInput.value);
+        var ok = Number.isInteger(n) && n >= 1 && n <= 12;
+        fluteInput.classList.toggle('invalid', !ok);
+        if (ok) {
+          state.tool_flutes = n;
+          invalidatePreview(); updateSummary();
+        }
+        return ok;
+      };
+      fluteInput.addEventListener('input', commitFlutes);
+      fluteInput.addEventListener('change', function () {
+        if (!commitFlutes()) {
+          fluteInput.value = state.tool_flutes;
+          fluteInput.classList.remove('invalid');
+        }
+      });
+    }
     bindLengthField($('#f-thickness'),
       function () { return state.thickness_text; },
       function (inches, text) {
@@ -1149,6 +1170,7 @@
   function applyMultiToolUI() {
     var on = multiToolOn();
     var toolField = $('#tool-field'); if (toolField) toolField.style.display = on ? 'none' : '';
+    var fluteField = $('#tool-flutes-field'); if (fluteField) fluteField.style.display = on ? 'none' : '';
     // The picker fills the single-tool field, so it goes wherever that field goes: in a
     // multi-tool job the bits are chosen per row in the Tools panel instead.
     var bitField = $('#tool-bit-field'); if (bitField) bitField.style.display = on ? 'none' : '';
@@ -1207,10 +1229,9 @@
     }
   }
 
-  /* The saved-bits picker beside the tool diameter. Choosing a bit fills the field -
-     the single-tool flow only cuts with a diameter, and the rest of a bit's spec (flutes,
-     type, V angle) is what the Tools panel uses. Team bits are listed first: those are
-     the cutters actually in the drawer. */
+  /* The saved-bits picker beside the tool fields. Choosing a bit fills both diameter
+     and flute count; losing the latter made a physical 4-flute aluminum cutter run a
+     program calculated as if it had one flute. Team bits are listed first. */
   function renderBitPicker() {
     var sel = $('#f-tool-bit'), field = $('#tool-bit-field');
     if (!sel || !field) return;
@@ -1246,6 +1267,11 @@
     // Commit through the field's own handler so the value is parsed, validated and
     // shown exactly as a typed one would be.
     field.dispatchEvent(new Event('change', { bubbles: true }));
+    var flutes = $('#f-tool-flutes');
+    if (flutes && bit.flutes) {
+      flutes.value = bit.flutes;
+      flutes.dispatchEvent(new Event('change', { bubbles: true }));
+    }
   }
 
   /* Says what the operator will have to do at the machine, in the order they do it.
@@ -2497,6 +2523,7 @@
       material: state.material,
       thickness: state.thickness, thickness_text: state.thickness_text,
       tool_diameter: state.tool_diameter, tool_diameter_text: state.tool_diameter_text,
+      tool_flutes: state.tool_flutes,
       mode: state.mode, z_datum: state.zDatum,
       tab_spacing: state.tab_spacing,
       max_pass_depth: state.max_pass_depth,
@@ -2560,6 +2587,10 @@
       state.tool_diameter = setup.tool_diameter;
       state.tool_diameter_text = setup.tool_diameter_text || (setup.tool_diameter + '"');
       var tl = $('#f-tool'); if (tl) tl.value = state.tool_diameter_text;
+    }
+    if (setup.tool_flutes) {
+      state.tool_flutes = setup.tool_flutes;
+      var tf = $('#f-tool-flutes'); if (tf) tf.value = state.tool_flutes;
     }
     if (setup.z_datum) {
       state.zDatum = setup.z_datum;
@@ -2753,7 +2784,7 @@
         return 'T' + t.slot + '  ' + t.name + '  ' + (t.diameter_text || t.diameter);
       });
     }
-    return [state.tool_diameter_text + ' end mill'];
+    return [state.tool_diameter_text + ' ' + state.tool_flutes + '-flute end mill'];
   }
 
   function setupSheetHTML() {
@@ -2847,6 +2878,7 @@
     $('#preview-result').hidden = true;
     $('#preview-errors').textContent = '';
     $('#gen-status').textContent = '';
+    showResumePrograms([]);
   }
 
   function generate() {
@@ -2898,6 +2930,7 @@
     fd.append('material', 'aluminum_tube');
     if (state.machine_id) fd.append('machine_id', state.machine_id);
     fd.append('tool_diameter', state.tool_diameter);
+    fd.append('tool_flutes', state.tool_flutes);
     fd.append('thickness', state.thickness);       // tube wall thickness
     // Both faces share one orientation on the jig; the backend applies this single
     // rotation to every face. Tube rotation is hard-snapped to 90 deg in the Layout step.
@@ -2943,7 +2976,8 @@
     // so placements are normalized relative to it.
     var bb = combinedBBox() || { minX: 0, minY: 0, w: 0, h: 0 };
     var job = {
-      material: state.material, tool_diameter: state.tool_diameter, machine_id: state.machine_id,
+      material: state.material, tool_diameter: state.tool_diameter,
+      tool_flutes: state.tool_flutes, machine_id: state.machine_id,
       thickness: state.thickness, tab_spacing: state.tab_spacing,
       stock: { width: bb.w, height: bb.h },
       name: jobFilename(), parts: [],
@@ -3036,6 +3070,7 @@
     fd.append('material', state.material);
     if (state.machine_id) fd.append('machine_id', state.machine_id);
     fd.append('tool_diameter', state.tool_diameter);
+    fd.append('tool_flutes', state.tool_flutes);
     fd.append('thickness', state.thickness);
     fd.append('origin_corner', 'bottom-left');
     fd.append('rotation', Math.round(p.rotation) % 360);
@@ -3104,6 +3139,7 @@
       if (resp.excludes_tool_change_time) bits.push('excludes tool-change time');
     }
     $('#preview-stats').textContent = bits.filter(Boolean).join(' · ');
+    showResumePrograms(resp.restart_files || [], resp.restart_bundle || null);
     // Feeds warnings (a clamped feed, an odd flute count for the material) are advice,
     // not failures: show them without blocking the download.
     $('#preview-errors').textContent = (resp.warnings || []).map(function (w) {
@@ -3116,6 +3152,41 @@
     $('#btn-do').disabled = cutsNothing;
     show3DPreview(resp);
     updateSummary();  // refresh the stock chip with the server-authoritative size
+  }
+
+  function showResumePrograms(files, bundle) {
+    var box = $('#resume-programs');
+    while (box.firstChild) box.removeChild(box.firstChild);
+    box.hidden = !files.length;
+    if (!files.length) return;
+
+    var title = document.createElement('strong');
+    title.textContent = 'Tool-change recovery files';
+    box.appendChild(title);
+    var note = document.createElement('p');
+    note.textContent = 'If a run fails after a tool change, load the matching checkpoint file. '
+      + 'Home or reference the router if position was lost, verify G54 X/Y, install the named '
+      + 'tool, and re-zero G54 Z before pressing Cycle Start. Do not use a temporary G92 zero.';
+    box.appendChild(note);
+    var actions = document.createElement('div');
+    actions.className = 'resume-actions';
+    if (bundle) {
+      var all = document.createElement('button');
+      all.type = 'button';
+      all.className = 'btn small primary';
+      all.textContent = 'Download main + all recovery files';
+      all.addEventListener('click', function () { doDownload(bundle.filename); });
+      actions.appendChild(all);
+    }
+    files.forEach(function (file) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn small';
+      button.textContent = 'Resume ' + file.checkpoint + ' · ' + file.description;
+      button.addEventListener('click', function () { doDownload(file.filename); });
+      actions.appendChild(button);
+    });
+    box.appendChild(actions);
   }
 
   function show3DPreview(resp) {

@@ -56,7 +56,8 @@ def slugify_tool_id(name: str) -> str:
 LENGTH_KEYS = frozenset({
     'x_max', 'y_max', 'z_max',                                   # machine.dimensions
     'x', 'y', 'z',                                               # machine.park_position
-    'sacrifice_board_depth', 'clearance_height', 'safe_height',  # machining.z_reference
+    'sacrifice_board_depth', 'clearance_height', 'safe_height',
+    'tool_change_height',                                      # machining.z_reference
     'width', 'height', 'spacing',                               # machining.tabs
     'depth_margin', 'max_roughing_depth', 'max_finishing_depth',  # tube_facing
     'roughing_tool_edge', 'finishing_tool_edge', 'arc_advance', 'arc_radius',
@@ -222,7 +223,7 @@ TEAM_6238_DEFAULTS = {
             'helix_radius_multiplier': 0.5,
             'max_slotting_depth': 0.06,     # 0.38 x the 4mm reference diameter
             'peck_drill_depth': 0.05,
-            'corner_min_feed_scale': 0.4,   # force-limited: aggressive corner slowdown to protect the tool
+            'corner_min_feed_scale': 0.6,   # ease corners without crossing into aluminum rubbing
             'tab_width': 0.25,
             'tab_height': 0.15
         },
@@ -501,6 +502,18 @@ class TeamConfig:
         pause). Set above the tallest fixture. None -> fall back to material_thickness +
         clearance (just above the stock). From z_reference.safe_height."""
         return self._get('machining', 'z_reference', 'safe_height', default=None)
+
+    @property
+    def tool_change_height(self):
+        """Optional work-coordinate height reserved for manual tool changes.
+
+        This is deliberately separate from ``safe_height``: a shop may want routine
+        bed-crossing moves kept low while still lifting the spindle far enough to get
+        two wrenches around an Omio collet.  It is measured above the sacrifice-board
+        datum and shifted when stock-top Z is selected, exactly like ``safe_height``.
+        ``None`` keeps the normal safe retract (or a configured G53 park) unchanged.
+        """
+        return self._get('machining', 'z_reference', 'tool_change_height', default=None)
 
     @property
     def machine_coolant(self) -> str:
@@ -894,6 +907,10 @@ class TeamConfig:
         Returns:
             True if material has all required params, False if using fallback
         """
+        import feeds_speeds
+
+        material_key = ('aluminum' if feeds_speeds.is_aluminum_material(material)
+                        else material)
         # Required parameters for a complete material definition
         required_params = {
             'name', 'spindle_speed', 'feed_rate', 'ramp_feed_rate', 'plunge_rate',
@@ -903,7 +920,7 @@ class TeamConfig:
         }
 
         # Check if material exists in defaults
-        if material in TEAM_6238_DEFAULTS['materials']:
+        if material_key in TEAM_6238_DEFAULTS['materials']:
             return True
 
         # Check if machine config has all required parameters
@@ -922,20 +939,28 @@ class TeamConfig:
         Returns:
             Dictionary of material parameters (always complete, uses plywood fallback)
         """
+        import feeds_speeds
+
+        requested_material = material
+        material_key = ('aluminum' if feeds_speeds.is_aluminum_material(material)
+                        else material)
         machine_config = self.get_machine_config(machine_id)
 
         # Get machine-specific material config
-        machine_material = machine_config.get('materials', {}).get(material, {})
+        configured_materials = machine_config.get('materials', {})
+        machine_material = (configured_materials.get(requested_material)
+                            or configured_materials.get(material_key, {}))
 
         # Get Team 6238 default for this material
-        default_preset = TEAM_6238_DEFAULTS['materials'].get(material, {})
+        default_preset = TEAM_6238_DEFAULTS['materials'].get(material_key, {})
 
         # If no default found, use plywood as universal fallback
         if not default_preset:
             default_preset = TEAM_6238_DEFAULTS['materials']['plywood'].copy()
             # Use custom name if provided, otherwise capitalize the material ID
             if 'name' not in machine_material:
-                machine_material = {**machine_material, 'name': material.replace('_', ' ').title()}
+                machine_material = {**machine_material,
+                                    'name': str(material).replace('_', ' ').title()}
 
         # Merge: defaults → machine overrides
         return {**default_preset, **machine_material}
@@ -1136,6 +1161,9 @@ machining:
   z_reference:
     sacrifice_board_depth: 0.008    # How far to cut into sacrifice board (inches)
     clearance_height: 0.5           # Clearance above material for rapid moves (inches)
+    # OPTIONAL roomy G54 height used only for manual tool changes. Keep it within
+    # verified Z travel; a configured G53 park takes precedence.
+    # tool_change_height: 2.0
     # OPTIONAL: which surface the operator zeros Z on, and so what every Z in the
     # program is measured from. "sacrifice_board" (the default) or "stock_top".
     # The wizard can override it per job; tube jobs always use their jig zero.
@@ -1227,12 +1255,12 @@ materials:
 
   aluminum:
     name: "Aluminum"
-    description: "Aluminum box tubing - 18K RPM, 55 IPM cutting, 4° ramp"
+    description: "6061/6063 on an Omio router - protected tool-adjusted envelope"
 
     # Speeds and feeds
     spindle_speed: 18000
-    feed_rate: 55.0
-    ramp_feed_rate: 35.0
+    feed_rate: 30.0
+    ramp_feed_rate: 19.0
     plunge_rate: 15.0               # Slower for aluminum
     traverse_rate: 200.0
     approach_rate: 35.0
@@ -1244,14 +1272,14 @@ materials:
     helix_radius_multiplier: 0.5    # Conservative helix entry for aluminum
 
     # Multi-pass parameters
-    max_slotting_depth: 0.2         # Shallower passes for aluminum
+    max_slotting_depth: 0.06        # Safety ceiling for a 4mm cutter; smaller tools scale down
+    peck_drill_depth: 0.05          # Peck ceiling; generated twist drills use D/3
 
     # OPTIONAL: feed floor at sharp pocket corners, as a fraction of feed_rate. At a sharp
     # corner the cutter wraps two edges and engagement spikes, so we ease the feed down (the
-    # toolpath itself is unchanged). Lower = more protection. Aluminum is force-limited, so an
-    # aggressive 0.4 is good; softer/heat-limited materials (plywood, polycarbonate) use ~0.7
-    # to keep the feed up and preserve chip load (avoid rubbing/melting). Omit for the default.
-    corner_min_feed_scale: 0.4
+    # toolpath itself is unchanged). Aluminum cannot be slowed below a real chip, so the
+    # protected default is 0.6 and RPM is coordinated with it. Softer materials use ~0.7.
+    corner_min_feed_scale: 0.6
 
     # Tab parameters
     tab_width: 0.25

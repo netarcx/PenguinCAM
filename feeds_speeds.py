@@ -31,6 +31,7 @@ existing PenguinCAM presets by ``validate_feeds_speeds.py`` (they land within ~1
 """
 
 import math
+import re
 
 # --- Reference tool the material chipload constants are quoted for --------------
 REFERENCE_TOOL = {'diameter': 0.157, 'flutes': 1}   # 4mm single-flute
@@ -44,6 +45,22 @@ RIGIDITY_FACTOR = {'light': 0.85, 'medium': 1.00, 'heavy': 1.10}
 # Operations that engage the tool at full width (slotting). Others (pocket/clearing)
 # run at lower radial engagement and can use the full reference chipload.
 FULL_SLOT_OPERATIONS = {'profile', 'slot'}
+
+# Hard ceiling for the generic router 6061/6063 preset. This is deliberately separate from
+# the chipload model: team config files can outlive releases, and the old generated
+# template wrote 55 IPM / 0.200 in into every new config.  Because machine config wins
+# over built-in defaults, those stale values silently defeated the 2026-08-24 derate.
+# Treat these as a safety envelope, not tuning targets; a config may always ask for less.
+ALUMINUM_ROUTER_SAFETY_MAX = {
+    'feed_rate': 30.0,
+    'ramp_feed_rate': 19.0,
+    'plunge_rate': 15.0,
+    'ramp_angle': 4.0,
+    'stepover_percentage': 0.25,
+    'helix_radius_multiplier': 0.5,
+    'max_slotting_depth': 0.06,
+    'peck_drill_depth': 0.05,
+}
 
 
 # Fraction of a spindle's plate rating that is actually available at the cutter. Router
@@ -157,11 +174,12 @@ MATERIALS = {
         # slot_stepdown_ratio now land on the derated preset; chipload_ref stays for
         # partial-engagement work, and chipload_min drops to 0.0010 - conservative
         # single-flute practice on light routers runs there without rubbing, and a
-        # floor of 0.0015 would flag the derated feeds themselves.
+        # A 0.0015 floor is protected by coordinating RPM with both straight and
+        # slowed-corner feed, rather than allowing a low feed to rub at 18,000 RPM.
         'unit_power_hp': 0.3,
         'name': '6061 Aluminum',
-        'preferred_rpm': 18000,
-        'chipload_ref': 0.0032, 'chipload_min': 0.0010, 'chipload_max': 0.0050,
+        'preferred_rpm': 14000,
+        'chipload_ref': 0.0032, 'chipload_min': 0.0015, 'chipload_max': 0.0050,
         'slotting_multiplier': 0.52,
         'ramp_multiplier': 0.64, 'plunge_multiplier': 0.28,
         'stepover_ratio': 0.25, 'slot_stepdown_ratio': 0.38,
@@ -175,6 +193,43 @@ MATERIALS = {
         'feed_flutes_max': 2,
     },
 }
+
+# 6063 forms a built-up edge more readily than 6061. There is no honest universal
+# numeric derate without the exact cutter, temper, and lubricant, so use the same
+# deliberately conservative router envelope and distinguish the alloy so preflight can
+# require lubricant. Keeping a separate key also prevents 6063 becoming plywood.
+MATERIALS['aluminum_6063'] = {
+    **MATERIALS['aluminum_6061'],
+    'name': '6063 Aluminum',
+}
+
+
+def canonical_material_key(material):
+    """Return the feeds-model key for a known material spelling, or ``None``.
+
+    Alloy names arrive from YAML, the web API, saved jobs, and the CLI. Treat every
+    normal spelling of 6061/6063 as aluminum before any fallback can select plywood.
+    An unspecified ``aluminum`` resolves as 6063, the less-machinable alloy, so the
+    generic preset is conservative for either alloy.
+    """
+    token = re.sub(r'[^a-z0-9]+', '_', str(material or '').strip().lower()).strip('_')
+    token = token.replace('aluminium', 'aluminum')
+    if not token:
+        return None
+    if '6063' in token and ('aluminum' in token or token.startswith('6063')):
+        return 'aluminum_6063'
+    if '6061' in token and ('aluminum' in token or token.startswith('6061')):
+        return 'aluminum_6061'
+    if token in ('aluminum', 'aluminum_tube'):
+        return 'aluminum_6063'
+    aliases = {'polycarb': 'polycarbonate'}
+    resolved = aliases.get(token, token)
+    return resolved if resolved in MATERIALS else None
+
+
+def is_aluminum_material(material):
+    """Whether ``material`` denotes 6061/6063 or the generic aluminum family."""
+    return canonical_material_key(material) in ('aluminum_6061', 'aluminum_6063')
 
 
 # --- Twist drilling -------------------------------------------------------------
@@ -196,6 +251,7 @@ DRILLING = {
     'hdpe':          {'sfm': 300, 'ipr_ref': 0.007},
     'srpp':          {'sfm': 250, 'ipr_ref': 0.005},
     'aluminum_6061': {'sfm': 250, 'ipr_ref': 0.004},
+    'aluminum_6063': {'sfm': 200, 'ipr_ref': 0.0035},
 }
 
 DRILL_IPR_EXPONENT = 0.5
@@ -214,7 +270,7 @@ def calculate_drill_feeds(machine, material, tool):
     run fast so they can slow the feed or accept a shorter tool life.
     """
     m = _resolve(machine, MACHINES, 'machine')
-    mat_key = material if isinstance(material, str) else None
+    mat_key = canonical_material_key(material) if isinstance(material, str) else None
     drill = DRILLING.get(mat_key) or DRILLING['plywood']
 
     diameter = float(tool['diameter'])

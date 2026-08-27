@@ -186,7 +186,7 @@ In PenguinCAM web interface:
   and how wide an edge break you want (0.02" is a light deburr)
 - Pick which edges to break: outside profile, holes, pockets
 - The program cuts everything with your end mill first, then **pauses (M0)** for you to
-  swap in the V-bit and re-zero Z on the sacrifice board - do NOT touch X/Y zero
+  swap in the V-bit and re-zero G54 Z on the sacrifice board - do NOT touch X/Y zero
 - Tabs stay in until after the chamfer; if tab removal is enabled the program pauses
   again to swap the end mill back
 - Depth is computed from the width and bit angle (a 90° bit cuts as deep as the break

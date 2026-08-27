@@ -323,7 +323,7 @@ class TestMaterialPresets(unittest.TestCase):
         pp.apply_material_preset('aluminum')
         self.assertEqual(pp.feed_rate, 30.0)
         self.assertEqual(pp.max_slotting_depth, 0.06)
-        self.assertEqual(pp.spindle_speed, 18000)
+        self.assertEqual(pp.spindle_speed, 12000)
         self.assertEqual(pp.ramp_angle, 4.0)
         self.assertEqual(pp.stepover_percentage, 0.25)
 
@@ -466,12 +466,12 @@ class TestCornerSlowdown(unittest.TestCase):
 
     def setUp(self):
         self.pp = FRCPostProcessor(0.25, 0.157)
-        self.pp.apply_material_preset('aluminum')   # feed 55 IPM
+        self.pp.apply_material_preset('aluminum')   # feed 30 IPM
 
     def test_corner_feed_scale_by_angle(self):
         s = self.pp._corner_feed_scale
         self.assertAlmostEqual(s((-1, 0), (0, 0), (1, 0)), 1.0)                  # straight -> no slowdown
-        self.assertAlmostEqual(s((0, 1), (0, 0), (1, 0)), 0.6, places=2)        # 90 deg -> partial
+        self.assertAlmostEqual(s((0, 1), (0, 0), (1, 0)), 0.7333, places=2)     # 90 deg -> partial
         self.assertAlmostEqual(s((0, 0), (0, 0), (1, 0)), 1.0)                  # degenerate -> safe 1.0
         # A sharp (<=60 deg) corner hits the floor.
         import math as m
@@ -498,7 +498,7 @@ class TestCornerSlowdown(unittest.TestCase):
     def test_corner_floor_is_material_aware(self):
         al = FRCPostProcessor(0.25, 0.157); al.apply_material_preset('aluminum')
         pc = FRCPostProcessor(0.25, 0.157); pc.apply_material_preset('polycarbonate')
-        self.assertAlmostEqual(al.corner_min_feed_scale, 0.4)   # force-limited: aggressive slowdown
+        self.assertAlmostEqual(al.corner_min_feed_scale, 0.6)   # keeps a real chip at protected RPM
         self.assertAlmostEqual(pc.corner_min_feed_scale, 0.7)   # heat-limited: gentler, preserve chip load
         # A custom/unknown material falls back to the (softer) default, not the aluminum floor.
         cust = FRCPostProcessor(0.25, 0.157); cust.apply_material_preset('mystery_material')
@@ -1120,7 +1120,7 @@ class TestTeamConfigIntegration(unittest.TestCase):
             'materials': {
                 'aluminum': {
                     'spindle_speed': 18000,
-                    'feed_rate': 42.0,       # Different from default 55.0
+                    'feed_rate': 42.0,       # Deliberately above the 30 IPM default
                     'plunge_rate': 10.0,     # Different from default 15.0
                     'ramp_feed_rate': 28.0,  # Different from default 35.0
                 }

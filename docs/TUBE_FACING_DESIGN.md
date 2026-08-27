@@ -152,7 +152,7 @@ The finishing arc at `Y-0.0787` (tool radius) places the actual tube face at Y=0
 │  • G0 G28 G91 Z0. (home Z axis)             │
 │  • G90 (back to absolute)                   │
 │  • T1 M6 (tool change)                      │
-│  • S18000 M3 (spindle on)                   │
+│  • S12000 M3 (tool-adjusted spindle)        │
 │  • G4 P3.0 (dwell for spin-up)              │
 │  • G55 (select jig coordinate system)       │
 └─────────────────────────────────────────────┘
@@ -175,7 +175,7 @@ The finishing arc at `Y-0.0787` (tool radius) places the actual tube face at Y=0
                     ↓
 ┌─────────────────────────────────────────────┐
 │ PHASE 2: FACE SECOND HALF                   │
-│  • S18000 M3 (spindle on)                   │
+│  • S12000 M3 (tool-adjusted spindle)        │
 │  • G4 P3.0 (dwell for spin-up)              │
 │  • G53 G0 Z0. (safe clearance)              │
 │  • G0 X0 Y0 (rapid to work origin)          │
@@ -260,8 +260,8 @@ pass2_y_offset = 0.0    # No shift for Pass 2
 ### Material Preset
 
 Tube facing always uses the **aluminum** preset:
-- Spindle speed: 18,000 RPM
-- Feed rate: 55 IPM
+- Spindle speed: automatically lowered as needed to preserve chip thickness through corners
+- Feed rate: 30 IPM (smaller tools are automatically derated)
 - 25% stepover
 
 ---
@@ -272,7 +272,7 @@ Tube facing always uses the **aluminum** preset:
 ( PENGUINCAM TUBE FACING OPERATION )
 ( Generated: 2026-01-26 14:30 )
 ( Tube size: 1x1 )
-( Tool: 0.157" end mill )
+( Tool: 0.157" 1-flute end mill )
 ( )
 ( SETUP INSTRUCTIONS: )
 ( 1. Mount tube in jig with end facing spindle )
@@ -289,7 +289,7 @@ G90  ; Back to absolute mode
 
 ( Tool and spindle )
 T1 M6
-S18000 M3
+S12000 M3
 G4 P3.0
 
 G55  ; Use jig work coordinate system
@@ -321,7 +321,7 @@ M0
 ( === PHASE 2: FACE SECOND HALF === )
 ( Face from Y=-0.250 to Y=0 )
 
-S18000 M3
+S12000 M3
 G4 P3.0
 
 G53 G0 Z0.  ; Move to machine Z0 (safe clearance)

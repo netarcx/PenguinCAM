@@ -72,6 +72,7 @@ machines:
       z_reference:
         sacrifice_board_depth: 0.008    # How far to cut into sacrifice board (inches)
         clearance_height: 0.5           # Clearance above material for rapid moves (inches)
+        tool_change_height: 2.0         # Roomy G54 Z used only for manual tool changes
 
       # Tab parameters (for perimeter operations)
       tabs:
@@ -145,12 +146,12 @@ machines:
 
       aluminum:
         name: "Aluminum"
-        description: "Aluminum - 18K RPM, 50 IPM cutting, 4° ramp"
+        description: "6061/6063 aluminum - protected Omio router envelope"
 
         spindle_speed: 18000
-        feed_rate: 50.0
-        ramp_feed_rate: 32.0
-        plunge_rate: 14.0
+        feed_rate: 30.0
+        ramp_feed_rate: 19.0
+        plunge_rate: 15.0
         traverse_rate: 200.0
         approach_rate: 35.0
 
@@ -158,7 +159,8 @@ machines:
         ramp_start_clearance: 0.050
         stepover_percentage: 0.25
         helix_radius_multiplier: 0.5
-        max_slotting_depth: 0.2
+        max_slotting_depth: 0.06
+        corner_min_feed_scale: 0.6
         peck_drill_depth: 0.05          # Peck depth for G83 drilling small holes (inches)
 
         tab_width: 0.25
@@ -286,11 +288,11 @@ machines:
 
       aluminum:
         name: "Aluminum"
-        description: "Full-speed aluminum for industrial router"
+        description: "6061/6063 aluminum protected router envelope"
 
         spindle_speed: 18000
-        feed_rate: 55.0               # Full speed - rigid machine
-        ramp_feed_rate: 35.0
+        feed_rate: 30.0
+        ramp_feed_rate: 19.0
         plunge_rate: 15.0
         traverse_rate: 200.0
         approach_rate: 35.0
@@ -299,7 +301,8 @@ machines:
         ramp_start_clearance: 0.050
         stepover_percentage: 0.25
         helix_radius_multiplier: 0.5
-        max_slotting_depth: 0.2
+        max_slotting_depth: 0.06
+        corner_min_feed_scale: 0.6
 
         tab_width: 0.25
         tab_height: 0.15

@@ -23,7 +23,7 @@ import io
 import math
 import re
 
-from frc_cam_postprocessor import FRCPostProcessor
+from frc_cam_postprocessor import FRCPostProcessor, build_resume_programs
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -172,6 +172,21 @@ def check_text_rules(name, lines):
                 fail(name, f'line {n} emits canned cycle {tok}, unsupported on GRBL')
 
 
+def check_offset_reset_before_motion(name, lines):
+    """A stale G92 must be cancelled before the first programmed move."""
+    reset_at = None
+    first_motion = None
+    for index, line in enumerate(lines):
+        code = re.sub(r'\(.*?\)', '', line).split(';')[0].strip()
+        if code.startswith('G92.1'):
+            reset_at = index
+        if re.match(r'^G0?[0-3]\b', code):
+            first_motion = index
+            break
+    if reset_at is None or (first_motion is not None and reset_at > first_motion):
+        fail(name, 'does not cancel temporary G92 offset before first motion')
+
+
 
 def audit_tube(name, face_width, tube_length, tube_height, square_end=True,
                cut_to_length=False, mode='holes', tool=None, wall=0.0625):
@@ -215,6 +230,20 @@ def _check_tube_program(name, result):
     lines = g.splitlines()
 
     check_text_rules(name, lines)
+    check_offset_reset_before_motion(name, lines)
+    if 'REQUIRED ALUMINUM PREFLIGHT' not in g:
+        fail(name, 'tube aluminum program has no mandatory preflight')
+    if 'continuous manual air blast' not in g and 'flow is aimed and chips can escape' not in g:
+        fail(name, 'tube aluminum program has no chip-evacuation disposition')
+
+    tool_match = re.search(r'\( Tool: ([\d.]+)"(?: \d+-flute)? end mill \)', g)
+    if tool_match:
+        diameter = float(tool_match.group(1))
+        for phase, depth in re.findall(
+                r'\( (Roughing|Finishing): \d+ passes of ([\d.]+)" each', g):
+            if float(depth) > diameter + 0.0006:
+                fail(name, f'tube {phase.lower()} axial level {depth}" exceeds '
+                           f'the {diameter:.3f}" cutter diameter')
 
     # Substance, not the plate path's exact wording: the tube generator ends with a bare
     # `M30` where the plate generator writes `M30  ; Program end`. Both are valid; what
@@ -368,6 +397,23 @@ def audit(name, job, expect_drill=False, max_engagement=None):
     lines = g.splitlines()
 
     check_text_rules(name, lines)
+    check_offset_reset_before_motion(name, lines)
+    _audit_resume_programs(name, result)
+
+    aluminum_program = (('Material: Aluminum' in g or 'Material: 6061 Aluminum' in g
+                         or 'Material: 6063 Aluminum' in g)
+                        and 'DRY RUN' not in g)
+    if aluminum_program:
+        if 'REQUIRED ALUMINUM PREFLIGHT' not in g:
+            fail(name, 'aluminum program has no mandatory chip-evacuation preflight')
+        if 'continuous manual air blast' not in g and 'flow is aimed and chips can escape' not in g:
+            fail(name, 'aluminum program has no explicit continuous chip-evacuation disposition')
+        for change in g.split('( === TOOL CHANGE')[1:]:
+            before_pause = change.split('M0', 1)[0]
+            if 'Clean collet, minimize stickout, and verify low runout' not in before_pause:
+                fail(name, 'aluminum tool change does not recheck collet and runout')
+            if 'continuous directed air and a clear chip escape path' not in before_pause:
+                fail(name, 'aluminum tool change does not recheck chip evacuation')
 
     if max_engagement is not None:
         # The grid checker is a coarse independent instrument with ~25% reading error
@@ -409,10 +455,13 @@ def audit(name, job, expect_drill=False, max_engagement=None):
     # --- program structure ----------------------------------------------------------
     if not g.rstrip().endswith('M30  ; Program end'):
         fail(name, 'program does not end with M30')
-    if g.count('M0') != g.count('=== TOOL CHANGE') + g.count('PAUSE FOR FIXTURING'):
+    expected_pauses = (g.count('=== TOOL CHANGE') + g.count('PAUSE FOR FIXTURING')
+                       + g.count('REQUIRED ALUMINUM PREFLIGHT'))
+    if g.count('M0') != expected_pauses:
         fail(name, f'M0 count {g.count("M0")} does not match pauses '
                    f'({g.count("=== TOOL CHANGE")} changes + '
-                   f'{g.count("PAUSE FOR FIXTURING")} fixturing)')
+                   f'{g.count("PAUSE FOR FIXTURING")} fixturing + '
+                   f'{g.count("REQUIRED ALUMINUM PREFLIGHT")} aluminum preflight)')
     dry = 'DRY RUN' in g
     if dry:
         # The whole claim of a dry run, checked independently: nothing reaches the work.
@@ -440,7 +489,56 @@ def audit(name, job, expect_drill=False, max_engagement=None):
                     fail(name, 'spindle started after a pause in a dry run')
             elif 'M3' not in after:
                 fail(name, 'spindle not restarted after a pause')
-            break
+
+
+def _audit_resume_programs(name, result):
+    """Independently verify every tool-boundary tail can start with no prior modal state."""
+    programs = build_resume_programs(result.gcode, result.filename)
+    material_header = next((line.lower() for line in result.gcode.splitlines()
+                            if line.startswith('(Material:')), '')
+    aluminum_program = 'aluminum' in material_header
+    expected = result.gcode.count('=== TOOL CHANGE')
+    if len(programs) != expected:
+        fail(name, f'{expected} tool changes produced {len(programs)} resume programs')
+        return
+    for program in programs:
+        resume_name = f'{name}/{program["checkpoint"]}'
+        gcode = program['gcode']
+        lines = gcode.splitlines()
+        check_text_rules(resume_name, lines)
+        checkpoint = next((i for i, line in enumerate(lines)
+                           if '=== RESUME CHECKPOINT' in line), None)
+        confirm = next((i for i, line in enumerate(lines)
+                        if line.startswith('M0')), None)
+        if checkpoint is None or confirm is None or confirm >= checkpoint:
+            fail(resume_name, 'operator confirmation does not precede checkpoint motion')
+            continue
+        before = '\n'.join(lines[:checkpoint])
+        if re.search(r'^G[0-3]\b', before, re.M):
+            fail(resume_name, 'moves the machine before the standalone resume confirmation')
+        if aluminum_program:
+            if 'clean collet, low runout, continuous directed air' not in before:
+                fail(resume_name, 'standalone aluminum setup omits collet, air, or runout check')
+        after = '\n'.join(lines[checkpoint:checkpoint + 18])
+        for required in ('G90 G94 G91.1 G40 G49 G17', 'G20', 'G92.1', 'G54',
+                         'Safe Z before resumed XY motion'):
+            if required not in after:
+                fail(resume_name, f'missing restart state {required}')
+        if 'DRY RUN' not in result.gcode and 'M3' not in after:
+            fail(resume_name, 'does not start the incoming tool after the state reset')
+        if not gcode.rstrip().endswith('M30  ; Program end'):
+            fail(resume_name, 'does not carry the original program through M30')
+
+
+def audit_refusal(name, job, expected):
+    """An unsafe request is a passing case only when no runnable program is returned."""
+    global checked
+    checked += 1
+    result = run(job)
+    if result.success:
+        fail(name, 'UNSAFE REQUEST GENERATED RUNNABLE G-CODE')
+    elif not any(expected.lower() in e.lower() for e in result.errors):
+        fail(name, f'refusal did not explain {expected!r}: {result.errors[:1]}')
 
 
 def main():
@@ -453,6 +551,30 @@ def main():
     drill_set = [Tool(1, '#10 drill', 0.1935, 2, type='drill'),
                  Tool(2, '1/4 endmill', 0.25, 2),
                  Tool(3, '1/2 V-bit', 0.5, 2, type='vbit', included_angle=90)]
+
+    # Adversarial requests that used to produce executable bit-breaking programs.
+    # Every public alloy spelling must take the aluminum path, never plywood.
+    hostile_dxf = plate(HOLES, POCKET)
+    for alias in ('aluminum', 'aluminum_tube', '6061', '6061-T6',
+                  'aluminum_6061', '6063', '6063-T5', 'aluminum_6063'):
+        audit_refusal(f'refuse/4F/{alias}', MultiToolJob(
+            material=alias, thickness=0.25, machine_id='omio_x8',
+            tools=[Tool(1, '1/8 4F', 0.125, 4)],
+            parts=[PartOps(dxf_path=hostile_dxf, name='p', operations=[
+                Operation('holes', 1), Operation('pockets', 1),
+                Operation('perimeter', 1)])]), '1- or 2-flute')
+
+    audit_refusal('refuse/rpm-below-machine', MultiToolJob(
+        material='6063', thickness=0.25, machine_id='omio_x8',
+        tools=[Tool(1, '1/8 1F at 1000 RPM', 0.125, 1, spindle_speed=1000)],
+        parts=[PartOps(dxf_path=plate(), name='p', operations=[
+            Operation('perimeter', 1)])]), 'RPM')
+    audit_refusal('refuse/2000-ipm-drill', MultiToolJob(
+        material='6061', thickness=0.25, machine_id='omio_x8',
+        tools=[Tool(1, '#10 drill at 2000 IPM', 0.1935, 2, type='drill',
+                    plunge_rate=2000), Tool(2, '1/8 endmill', 0.125, 1)],
+        parts=[PartOps(dxf_path=plate(HOLES), name='p', operations=[
+            Operation('holes', 1, 'Drill'), Operation('perimeter', 2)])]), 'plunge')
 
     for material in ('plywood', 'aluminum', 'polycarbonate'):
         for thickness in (0.125, 0.25, 0.5):
@@ -528,14 +650,15 @@ def main():
             Operation('holes', 2, scope={'min_diameter': 0.4}),
             Operation('pockets', 2), Operation('perimeter', 2)])]))
 
-    # The 2026-08-24 field-failure shape, audited forever: thin aluminum, a small
-    # multi-flute cutter, and an operator depth-per-pass ceiling. The original bug hid
-    # in the tab-removal pass (full plate thickness in one move while the profile
-    # politely stepped down), which no other case exercised.
+    # The 2026-08-24 field-failure geometry, audited forever with the safe cutter the
+    # program now requires: thin aluminum and an operator depth-per-pass ceiling. The
+    # original bug hid in tab removal (full plate thickness in one move while the
+    # profile politely stepped down), which no other case exercised. The physical 4F
+    # tool from that failure is separately covered by refusal tests.
     audit('thin-al/ceiling', MultiToolJob(
         material='aluminum', thickness=0.125, machine_id='omio_x8',
         max_pass_depth=1 / 32,
-        tools=[Tool(1, '1/8 4F', 0.125, 4)],
+        tools=[Tool(1, '1/8 1F aluminum', 0.125, 1)],
         parts=[PartOps(dxf_path=plate(HOLES), name='p', operations=[
             Operation('holes', 1), Operation('perimeter', 1)])]),
           max_engagement=1 / 32)
@@ -546,7 +669,7 @@ def main():
     audit('thin-al/ceiling+pocket', MultiToolJob(
         material='aluminum', thickness=0.125, machine_id='omio_x8',
         max_pass_depth=1 / 32,
-        tools=[Tool(1, '1/8 4F', 0.125, 4)],
+        tools=[Tool(1, '1/8 1F aluminum', 0.125, 1)],
         parts=[PartOps(dxf_path=plate(HOLES, POCKET), name='p', operations=[
             Operation('holes', 1), Operation('pockets', 1), Operation('perimeter', 1)])]),
           max_engagement=1 / 32)
@@ -716,8 +839,8 @@ def main():
                  'a drilled pattern was allowed to run a milling operation')
 
     print(f'audited {checked} generated programs')
-    print('  note: tube programs get the text/structure rules only - the ZMIN and '
-          'rapid-below-top checks assume the plate Z-frame')
+    print('  note: tube programs also enforce <=1D axial facing levels; their ZMIN and '
+          'rapid checks use separate tube-frame tests')
     print(f'{len(problems)} problem(s)')
     for p in problems:
         print('  *', p)

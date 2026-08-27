@@ -198,7 +198,8 @@
         <pre><code>z_reference:
   sacrifice_board_depth: 0.008    # How far to cut into the sacrifice board (through-cuts)
   clearance_height: 0.5           # Clearance above the stock for in-part rapids
-  safe_height: 2.0                # OPTIONAL: "clear everything" height (see below)</code></pre>
+  safe_height: 2.0                # OPTIONAL: "clear everything" height (see below)
+  tool_change_height: 2.0         # OPTIONAL: roomy height used only to change bits</code></pre>
         <p>
             <strong><code>clearance_height</code></strong> is the small hop above the stock used
             for rapids <em>between features within a part</em> (these stay over the stock, so they
@@ -214,6 +215,14 @@
             for low edge clamps, but it will not clear tall fixturing. (This replaces the old
             machine-coordinate <code>G53</code> retract, which is now opt-in via
             <code>park_position</code>.)
+        </p>
+        <p>
+            <strong><code>tool_change_height</code></strong> is an optional G54 height used
+            only at manual tool changes when no verified machine-coordinate park is configured.
+            It gives the collet and wrenches more room without making every normal retract that
+            tall. Keep it within the machine's verified Z travel. If a
+            <code>park_position</code> is configured, the verified G53 park takes precedence and
+            also moves X/Y away from the work.
         </p>
 
         <h3>Material Presets</h3>
@@ -247,8 +256,8 @@
                 </tr>
                 <tr>
                     <td>Aluminum</td>
-                    <td>40-60 IPM</td>
-                    <td>Use flood coolant if available</td>
+                    <td>Up to 30 IPM</td>
+                    <td>1-2 flutes; continuous chip evacuation; lubricant/MQL for 6063</td>
                 </tr>
                 <tr>
                     <td>Polycarbonate</td>
@@ -285,17 +294,17 @@
         </p>
         <pre><code>materials:
   aluminum:
-    corner_min_feed_scale: 0.4    # aggressive slowdown
+    corner_min_feed_scale: 0.6    # ease corners without rubbing
   polycarbonate:
     corner_min_feed_scale: 0.7    # gentler slowdown</code></pre>
         <p>
             The right value depends on what limits the material. <strong>Aluminum</strong> is
-            <em>force-limited</em> &mdash; a sharp corner can deflect or break the tool &mdash; so an aggressive
-            floor (<code>0.4</code>, i.e. 40% of feed) is worthwhile. <strong>Softer, heat-sensitive materials</strong>
+            <em>force-limited</em>, but slowing below a real chip welds material to the edge. The protected
+            floor is <code>0.6</code>; PenguinCAM coordinates RPM with this floor. <strong>Softer, heat-sensitive materials</strong>
             like polycarbonate and plywood are <em>low-force but rubbing-limited</em>: cutting the feed too far
             drops the chip load and the tool starts rubbing instead of cutting, which builds heat (and melts
             plastics). Those use a gentler floor (<code>0.7</code>) to keep the chips shearing. Omit the setting
-            to use PenguinCAM's built-in per-material default (0.4 for aluminum, 0.7 for softer materials); set
+            to use PenguinCAM's built-in per-material default (0.6 for aluminum, 0.7 for softer materials); set
             it to <code>1.0</code> to disable corner slowdown for that material entirely.
         </p>
 
