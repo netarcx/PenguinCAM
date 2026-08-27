@@ -1126,7 +1126,10 @@ def main():
                 mill = (mode == 'lightening')
                 audit_tube(f'tube/{label}/{length:g}in/{mode}', face_width, length,
                            height, mode=mode, square_end=mill)
-    audit_tube('tube/2x1-flat/cut-to-length', 2.0, 24.0, 1.0, mode='lightening',
+    # 22", not 24": cutting a tube to length puts the cut plane past the tube's end,
+    # and the roughing arc reaches past that again, so a 24" tube genuinely does not fit
+    # 24" of Y travel. The envelope check refuses it now, which is the point.
+    audit_tube('tube/2x1-flat/cut-to-length', 2.0, 22.0, 1.0, mode='lightening',
                square_end=True, cut_to_length=True)
     # Thick-wall 1x1 with a small cutter: the per-pass depth (0.101") is LESS than the
     # 0.125" wall, so the first pass does not clear the top wall. This is the geometry

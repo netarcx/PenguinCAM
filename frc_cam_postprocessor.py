@@ -6456,6 +6456,39 @@ class FRCPostProcessor:
             'finishing_depth_per_pass': finishing_depth_per_pass
         }
 
+    #: Material the roughing pass leaves for the cut-to-length finishing pass, inches.
+    CUT_TO_LENGTH_FINISH_STOCK = 0.0125
+    #: How far each arc advances in X, and its radius, in the arc-clearing pattern.
+    CUT_TO_LENGTH_ARC_ADVANCE = 0.04
+    CUT_TO_LENGTH_ARC_RADIUS = 0.05
+    #: How far the tool edge stands clear of the tube in X at the ends of a facing or
+    #: cut-to-length sweep.
+    TUBE_SWEEP_X_CLEARANCE = 0.05
+
+    def tube_swept_extents(self, tube_width: float, tube_length: float,
+                           square_end: bool, cut_to_length: bool) -> tuple:
+        """How much travel a tube program actually needs, in inches: (x_span, y_max).
+
+        Not the same as the tube. Facing and cutting to length both start and finish
+        CLEAR of the tube in X - tool radius plus 0.05 at each end - and the
+        cut-to-length arc reaches past the cut plane in Y by the finish stock, the arc
+        offset and the arc radius. Comparing the tube against the travel let a tube that
+        just fits the table produce a program that ran into the soft limit.
+        """
+        tool_radius = self.tool_diameter / 2.0
+        x_span = tube_width or 0.0
+        y_max = tube_length or 0.0
+        if square_end or cut_to_length:
+            x_span += 2 * (tool_radius + self.TUBE_SWEEP_X_CLEARANCE)
+        if cut_to_length:
+            half_advance = self.CUT_TO_LENGTH_ARC_ADVANCE / 2
+            j_offset = math.sqrt(self.CUT_TO_LENGTH_ARC_RADIUS ** 2 - half_advance ** 2)
+            y_max += (tool_radius + self.CUT_TO_LENGTH_FINISH_STOCK + j_offset
+                      + self.CUT_TO_LENGTH_ARC_RADIUS)
+            if square_end:
+                y_max += self.tube_facing_offset
+        return x_span, y_max
+
     #: Extra depth a pass must have gone past the nominal wall bottom before the middle
     #: of the tube counts as open. Extruded box tube wall thickness is a nominal figure;
     #: 0.02" covers the usual mill tolerance on 6061 tube.
@@ -7216,6 +7249,21 @@ class FRCPostProcessor:
                 f'but if the tube is really {measured_width:.3f}" wide, every face-2 '
                 f'feature will be off by {abs(measured_width - tube_width):.3f}".')
 
+        # Now that the width is known, check the TOOLPATH against the travel, not just
+        # the tube. See tube_swept_extents.
+        x_span, y_reach = self.tube_swept_extents(
+            tube_width, tube_length, square_end, cut_to_length)
+        x_max = self.config.machine_x_max
+        y_max = self.config.machine_y_max
+        if x_span > x_max + 1e-9 or y_reach > y_max + 1e-9:
+            return PostProcessorResult(success=False, errors=[
+                f'A {tube_width:.2f}" x {(tube_length or 0.0):.2f}" tube does not fit '
+                f'the machine ({x_max:.1f}" x {y_max:.1f}" of travel): the toolpath '
+                f'needs {x_span:.3f}" of X and reaches {y_reach:.3f}" in Y. Squaring the '
+                f'end and cutting to length both sweep clear of the tube, so the '
+                f'toolpath is bigger than the tube. Machine it in shorter sections, or '
+                f'use a longer-travel machine.'])
+
         # === PHASE 1: FIRST FACE (SQUARE + MACHINE PATTERN) ===
         gcode.append('( === PHASE 1: FIRST FACE === )')
         gcode.append('')
@@ -7590,12 +7638,11 @@ class FRCPostProcessor:
 
         # For cut to length, the tool's -Y edge defines the kept part boundary
         # (opposite of tube facing where +Y edge defines the face)
-        # Roughing leaves 0.0125" for finishing pass
-        finish_stock = 0.0125  # Material left for finishing
+        finish_stock = self.CUT_TO_LENGTH_FINISH_STOCK
 
         # Arc clearing parameters (same as tube facing)
-        arc_advance = 0.04  # How far each arc advances in X
-        arc_radius = 0.05  # Arc radius
+        arc_advance = self.CUT_TO_LENGTH_ARC_ADVANCE
+        arc_radius = self.CUT_TO_LENGTH_ARC_RADIUS
         half_advance = arc_advance / 2
         j_offset = math.sqrt(arc_radius**2 - half_advance**2)
 

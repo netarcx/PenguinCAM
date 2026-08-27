@@ -1536,13 +1536,20 @@ def process_file():
                     # 2000" tube spent 84 seconds and produced 13.7 MB before anything
                     # downstream would have rejected it. The post-processor enforces the
                     # same bound again; this one just refuses early and cheaply.
-                    if (tube_length > team_config.machine_y_max
-                            or tube_width > team_config.machine_x_max):
+                    # The SWEPT extents, not the tube: squaring the end and cutting to
+                    # length both run clear of the tube in X, and the cut-to-length arc
+                    # reaches past the cut plane in Y.
+                    _x_span, _y_reach = pp.tube_swept_extents(
+                        tube_width, tube_length, square_end, cut_to_length)
+                    if (_y_reach > team_config.machine_y_max
+                            or _x_span > team_config.machine_x_max):
                         return jsonify({'error': (
                             f'A {tube_width:.1f}" x {tube_length:.1f}" tube does not fit '
                             f'the machine ({team_config.machine_x_max:.1f}" x '
-                            f'{team_config.machine_y_max:.1f}" of travel). Cut the tube '
-                            f'shorter, or machine it in two setups.')}), 400
+                            f'{team_config.machine_y_max:.1f}" of travel): the toolpath '
+                            f'needs {_x_span:.2f}" of X and reaches {_y_reach:.2f}" in Y '
+                            f'once the facing and cut-to-length sweeps are counted. Cut '
+                            f'the tube shorter, or machine it in two setups.')}), 400
                     if pattern_mode == 'custom':
                         # A refused design is a 400 the operator can act on, not a 500.
                         # It is refused whole: a design with one bad feature generates

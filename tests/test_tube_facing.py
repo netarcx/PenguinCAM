@@ -679,5 +679,66 @@ class TestTubeRouteUsesTheDeclaredWidth(unittest.TestCase):
         self.assertIn('tube size', response.get_json()['error'].lower())
 
 
+
+class TestTubeEnvelopeUsesSweptExtents(unittest.TestCase):
+    """The envelope check compared the TUBE against the travel, not the TOOLPATH.
+
+    Facing and cutting to length both overtravel: the tool starts and finishes clear of
+    the tube in X (tool radius + 0.05 each side), and the cut-to-length arc reaches past
+    the cut plane in Y by the finish stock, the arc offset and the arc radius. A tube that
+    just fits the table therefore produced a program that ran into the soft limit, and the
+    operator found out at the machine.
+    """
+
+    def _cfg(self, x_max, y_max):
+        return TeamConfig({'version': 2, 'default_machine': 'm', 'machines': {'m': {
+            'name': 'M',
+            'machine': {'dimensions': {'x_max': x_max, 'y_max': y_max, 'z_max': 8.0}}}}})
+
+    def _run(self, x_max, y_max, cut_to_length=False, width=2.0, length=12.0):
+        pp = FRCPostProcessor(0.0625, 0.157, config=self._cfg(x_max, y_max))
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(width, length, mode='lightening')
+        return pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=True, cut_to_length=cut_to_length,
+            tube_width=width, tube_length=length, timestamp='2026-08-27 12:00')
+
+    def test_x_overtravel_is_refused(self):
+        """A 2.000" tube on 2.100" of X travel: the tube fits, the toolpath does not -
+        it reaches -0.129 to 2.129 with a 0.157" cutter."""
+        result = self._run(x_max=2.1, y_max=30.0)
+        self.assertFalse(result.success, 'the X overtravel was not checked')
+        joined = ' '.join(result.errors)
+        self.assertIn('2.1', joined)
+        self.assertTrue('travel' in joined.lower() or 'reach' in joined.lower(), joined)
+
+    def test_x_overtravel_that_fits_is_allowed(self):
+        result = self._run(x_max=3.0, y_max=30.0)
+        self.assertTrue(result.success, result.errors)
+
+    def test_cut_to_length_y_overtravel_is_refused(self):
+        """A 12.000" tube on 12.200" of Y travel. The cut plane alone is at 12.14, and
+        the roughing arc peaks past it."""
+        result = self._run(x_max=6.0, y_max=12.2, cut_to_length=True)
+        self.assertFalse(result.success, 'the Y overtravel was not checked')
+        self.assertIn('12.2', ' '.join(result.errors))
+
+    def test_cut_to_length_y_that_fits_is_allowed(self):
+        result = self._run(x_max=6.0, y_max=24.0, cut_to_length=True)
+        self.assertTrue(result.success, result.errors)
+
+    def test_a_pattern_with_no_facing_is_judged_on_the_tube_alone(self):
+        """Without squaring or cutting there is no overtravel to allow for."""
+        pp = FRCPostProcessor(0.0625, 0.157, config=self._cfg(2.05, 30.0))
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = 1.0
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        result = pp.generate_tube_pattern_gcode(
+            tube_height=1.0, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0, timestamp='2026-08-27 12:00')
+        self.assertTrue(result.success, result.errors)
+
+
 if __name__ == '__main__':
     unittest.main()
