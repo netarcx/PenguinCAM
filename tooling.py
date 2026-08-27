@@ -357,17 +357,46 @@ class Operation:
         self._validate_scope_numbers()
         self.name = str(self.name or OP_LABELS[self.op_type])
 
+    #: Deepest a spot/centre drill may go, whatever the stock. A spot only has to break
+    #: the surface enough to stop the twist drill walking; anything deeper is either a
+    #: typo or a job for the drill itself.
+    MAX_SPOT_DEPTH = 0.25
+
     #: Included point angles a real twist drill is ground to. 118 is the general-purpose
     #: default and 135 the split point; outside this band the tip-length compensation
     #: stops being a small correction and starts driving the tool through the table.
     MIN_POINT_ANGLE = 60.0
     MAX_POINT_ANGLE = 150.0
 
+    #: Every numeric scope key, and whether zero is allowed. `float(raw)` with no check
+    #: was how `spot_depth: 100` reached the machine as a commanded 99.75 in feed move
+    #: and `point_angle: 5` put the final peck 2.2 in below the sacrifice board - both
+    #: in programs that reported success.
+    _NUMERIC_SCOPE_FIELDS = ('spot_depth', 'point_angle', 'size_tolerance',
+                             'min_diameter', 'max_diameter', 'min_area', 'max_area')
+
     def _validate_scope_numbers(self) -> None:
         """Check every number in `scope` before anything downstream reads it."""
-        raw = self.scope.get('point_angle')
-        if raw is not None:
-            self.scope['point_angle'] = self._checked_point_angle(raw)
+        for key in self._NUMERIC_SCOPE_FIELDS:
+            raw = self.scope.get(key)
+            if raw is None:
+                continue
+            if key == 'point_angle':
+                self.scope[key] = self._checked_point_angle(raw)
+                continue
+            try:
+                value = _positive_finite(raw, key)
+            except (TypeError, ValueError) as exc:
+                raise ToolingError(
+                    f"Operation {self.label!r} has a bad {key}: {exc}") from exc
+            self.scope[key] = value
+
+        depth = self.scope.get('spot_depth')
+        if depth is not None and depth > self.MAX_SPOT_DEPTH:
+            raise ToolingError(
+                f"Operation {self.label!r} asks for a spot_depth of {depth:g} in. A "
+                f"centre drill only marks the location; anything past "
+                f"{self.MAX_SPOT_DEPTH:g} in is a drilling operation, not a spot.")
 
     def _checked_point_angle(self, raw: Any) -> float:
         """One message for every way a point angle can be wrong, and it names the range.
@@ -439,9 +468,12 @@ class Operation:
 
     @property
     def spot_depth(self) -> Optional[float]:
-        """How deep a spot/centre drill goes. None = derive from the tool diameter."""
-        raw = self.scope.get('spot_depth')
-        return float(raw) if raw else None
+        """How deep a spot/centre drill goes. None = derive from the tool diameter.
+
+        Already range-checked by `_validate_scope_numbers`; nothing unvalidated can
+        reach here.
+        """
+        return self.scope.get('spot_depth')
 
     @property
     def drill_point_angle(self) -> Optional[float]:
@@ -530,6 +562,14 @@ class MultiToolJob:
                 if op.tool_slot not in slots:
                     raise ToolingError(f"Operation {op.label!r} on {part.name!r} asks for "
                                        f"T{op.tool_slot}, which is not in the tool list")
+                # The absolute cap lives on Operation; the stock is only known here.
+                spot = op.spot_depth
+                if spot is not None and spot > self.thickness:
+                    raise ToolingError(
+                        f"Operation {op.label!r} on {part.name!r} asks for a spot_depth "
+                        f"of {spot:g} in in {self.thickness:g} in stock. A spot that "
+                        f"goes through the material is a drilled hole, and this one "
+                        f"would cut the table.")
 
     def tool(self, slot: int) -> Tool:
         for t in self.tools:

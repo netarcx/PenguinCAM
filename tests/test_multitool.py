@@ -127,12 +127,13 @@ class TestToolValidation(unittest.TestCase):
         self.assertEqual([t.slot for t in job.used_tools], [2])
 
 
-class TestDrillPointAngleValidation(unittest.TestCase):
+class TestDrillScopeValidation(unittest.TestCase):
     """Numbers in `scope` go straight into Z arithmetic. Every one of them is checked at
     the door, because past it there is nothing between a typo and a commanded move.
 
-    `point_angle: 5` was verified as generating a "successful" program whose last peck
-    landed at G1 Z-2.2239 - 2.2 inches below the sacrifice board.
+    Both of these were verified as generating a "successful" program: `point_angle: 5`
+    put the last peck at G1 Z-2.2239, 2.2 inches below the sacrifice board, and
+    `spot_depth: 100` commanded a feed move 99.75 inches down.
     """
 
     def test_point_angle_must_be_a_real_drill_point(self):
@@ -149,6 +150,58 @@ class TestDrillPointAngleValidation(unittest.TestCase):
             with self.subTest(angle=angle):
                 op = Operation('holes', 1, scope={'point_angle': angle})
                 self.assertAlmostEqual(op.drill_point_angle, float(angle))
+
+    def test_spot_depth_must_be_positive_finite_and_shallow(self):
+        for depth in (100, 0, -1, float('nan'), float('inf'), 0.5):
+            with self.subTest(depth=depth):
+                with self.assertRaises(ToolingError) as ctx:
+                    Operation('holes', 1, scope={'purpose': 'spot', 'spot_depth': depth})
+                self.assertIn('spot_depth', str(ctx.exception))
+
+    def test_spot_depth_cannot_exceed_the_stock(self):
+        with self.assertRaises(ToolingError) as ctx:
+            build_job(thickness=0.06,
+                      tools=[Tool(1, 'centre', 0.125, 2, type='drill'),
+                             Tool(2, 'em', 0.25, 2)],
+                      parts=[PartOps(dxf_path=make_plate_dxf(), name='p', operations=[
+                          Operation('holes', 1, scope={'purpose': 'spot',
+                                                       'spot_depth': 0.2}),
+                          Operation('perimeter', 2)])])
+        self.assertIn('spot_depth', str(ctx.exception))
+
+    def test_scope_size_ranges_are_validated(self):
+        for key in ('min_diameter', 'max_diameter'):
+            for bad in (float('nan'), -1, 'wide'):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ToolingError):
+                        Operation('holes', 1, scope={key: bad})
+        for key in ('min_area', 'max_area'):
+            for bad in (float('inf'), -0.5):
+                with self.subTest(key=key, bad=bad):
+                    with self.assertRaises(ToolingError):
+                        Operation('pockets', 1, scope={key: bad})
+
+    def test_size_tolerance_is_validated_at_the_door(self):
+        with self.assertRaises(ToolingError):
+            Operation('holes', 1, scope={'size_tolerance': float('nan')})
+        with self.assertRaises(ToolingError):
+            Operation('holes', 1, scope={'size_tolerance': -0.01})
+
+    def test_tool_fields_reject_nan(self):
+        for field, value in (('diameter', float('nan')), ('flutes', float('nan')),
+                             ('included_angle', float('nan'))):
+            with self.subTest(field=field):
+                with self.assertRaises(ToolingError):
+                    Tool.from_dict({'slot': 1, 'name': 'x', 'diameter': 0.25,
+                                    field: value})
+
+    def test_bad_scope_from_an_ops_file_is_a_clean_refusal(self):
+        """`json.loads` accepts a bare NaN literal, so this is a real posted payload."""
+        data = json.loads('{"op_type": "holes", "tool_slot": 1, '
+                          '"scope": {"spot_depth": NaN}}')
+        with self.assertRaises(ToolingError):
+            Operation.from_dict(data)
+
 
 class TestOperationOrdering(unittest.TestCase):
     """order_operations groups work by tool but must never reorder a part's own list."""
