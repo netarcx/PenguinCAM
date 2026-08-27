@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PenguinCAM - FRC Team 6238 CAM Tool
+UV-CAM - FRC Team 6238 CAM Tool
 A Flask-based web interface for generating G-code from DXF files
 """
 
@@ -87,7 +87,7 @@ import local_mode
 import job_library
 LOCAL_MODE = local_mode.is_local_mode()
 if LOCAL_MODE:
-    log("🐧 PenguinCAM running in LOCAL mode - Onshape sign-in is not required")
+    log("🐧 UV-CAM running in LOCAL mode - Onshape sign-in is not required")
 
 # ============================================================================
 # File Token Manager - Secure file access with random tokens
@@ -832,7 +832,7 @@ def save_tool():
     the first entry instead of leaving two rows a shelf apart in the list."""
     if not LOCAL_MODE or not local_mode.config_is_writable():
         return _saved_tools_response(
-            'This copy of PenguinCAM cannot write the team config, so the bit was not '
+            'This copy of UV-CAM cannot write the team config, so the bit was not '
             'saved. Copy the YAML into your config file to share it with the team.',
             status=409)
     tool, error = _tool_from_request((request.get_json(silent=True) or {}).get('tool'))
@@ -872,7 +872,7 @@ def save_tool():
 def delete_tool():
     """Remove one saved bit. Built-in bits are not the team's to delete."""
     if not LOCAL_MODE or not local_mode.config_is_writable():
-        return _saved_tools_response('This copy of PenguinCAM cannot write the team config.',
+        return _saved_tools_response('This copy of UV-CAM cannot write the team config.',
                                      status=409)
     tool_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
     if not tool_id:
@@ -958,7 +958,7 @@ def save_stock():
     """Add or update one sheet (or offcut) in the team config file."""
     if not LOCAL_MODE or not local_mode.config_is_writable():
         return _stock_response(
-            'This copy of PenguinCAM cannot write the team config, so the stock was not '
+            'This copy of UV-CAM cannot write the team config, so the stock was not '
             'saved. Copy the YAML into your config file to share it with the team.',
             status=409)
     entry, error = _stock_from_request((request.get_json(silent=True) or {}).get('stock'))
@@ -995,7 +995,7 @@ def save_stock():
 def delete_stock():
     """Remove one sheet from the team config file."""
     if not LOCAL_MODE or not local_mode.config_is_writable():
-        return _stock_response('This copy of PenguinCAM cannot write the team config.',
+        return _stock_response('This copy of UV-CAM cannot write the team config.',
                                status=409)
     stock_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
     if not stock_id:
@@ -1059,7 +1059,7 @@ def save_saved_job():
     someone's Downloads folder would not be saved at all.
     """
     if not _jobs_writable():
-        return _jobs_response('This copy of PenguinCAM has nowhere to save jobs.',
+        return _jobs_response('This copy of UV-CAM has nowhere to save jobs.',
                               status=409)
     spec = request.get_json(silent=True) or {}
     name = str(spec.get('name') or '').strip()
@@ -1076,9 +1076,11 @@ def save_saved_job():
         except (ValueError, TypeError):
             return _jobs_response(f'{part.get("name") or "A part"} did not arrive intact.',
                                   status=400)
-        parts.append({'name': part.get('name'), 'dxf_bytes': blob,
+        parts.append({'name': part.get('name'), 'number': part.get('number'),
+                      'dxf_bytes': blob,
                       'place_x': part.get('place_x'), 'place_y': part.get('place_y'),
                       'center_x': part.get('center_x'), 'center_y': part.get('center_y'),
+                      'label_x': part.get('label_x'), 'label_y': part.get('label_y'),
                       'rotation': part.get('rotation'), 'mirror': part.get('mirror'),
                       'ops': part.get('ops')})
     try:
@@ -1096,7 +1098,7 @@ def save_saved_job():
 def open_saved_job():
     """One saved job, with its DXFs, ready for the wizard to rebuild."""
     if not _jobs_writable():
-        return _jobs_response('Saved jobs need a local install of PenguinCAM.',
+        return _jobs_response('Saved jobs need a local install of UV-CAM.',
                               status=404)
     job_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
     if not job_id:
@@ -1114,7 +1116,7 @@ def open_saved_job():
 @limiter.limit("20 per minute")
 def delete_saved_job():
     if not _jobs_writable():
-        return _jobs_response('This copy of PenguinCAM has nowhere to save jobs.',
+        return _jobs_response('This copy of UV-CAM has nowhere to save jobs.',
                               status=409)
     job_id = str((request.get_json(silent=True) or {}).get('id') or '').strip()
     try:
@@ -1922,6 +1924,11 @@ def process_job():
                 place_x = _finite_placement(part.get('place_x', 0.0), 'place_x')
                 place_y = _finite_placement(part.get('place_y', 0.0), 'place_y')
                 rotation = _finite_placement(part.get('rotation', 0), 'rotation')
+                engrave_anchor = None
+                if part.get('engrave_anchor_x') is not None or part.get('engrave_anchor_y') is not None:
+                    engrave_anchor = (
+                        _finite_placement(part.get('engrave_anchor_x'), 'engrave_anchor_x'),
+                        _finite_placement(part.get('engrave_anchor_y'), 'engrave_anchor_y'))
             except ValueError as exc:
                 gen_errors.append({'part_index': i, 'name': name, 'error': str(exc)})
                 continue
@@ -1935,8 +1942,9 @@ def process_job():
             if engrave:
                 # Its OWN name: the whole point is telling one part from another once
                 # they are off the machine and in a pile.
-                pp.engrave = {'text': name, 'height': ENGRAVE_HEIGHT_IN,
-                              'depth': ENGRAVE_DEPTH_IN}
+                engrave_text = str(part.get('engrave_text') or name)[:100]
+                pp.engrave = {'text': engrave_text, 'height': ENGRAVE_HEIGHT_IN,
+                              'depth': ENGRAVE_DEPTH_IN, 'anchor': engrave_anchor}
             pp.apply_material_preset(material, machine_id)
             pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
             if max_pass_depth is not None:
@@ -3448,7 +3456,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 6238))
     
     log("="*70)
-    log("PenguinCAM - FRC Team 6238")
+    log("UV-CAM - FRC Team 6238")
     log("="*70)
     log(f"\nPost-processor script: {POST_PROCESSOR}")
     log(f"Temporary directory: {TEMP_DIR}")

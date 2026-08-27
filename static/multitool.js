@@ -1075,6 +1075,10 @@
       job.parts.push({
         file_index: i,
         name: part.name,
+        engrave_text: String(part.name || 'part').trim()
+          + (String(part.number || '').trim() ? ' #' + String(part.number).trim() : ''),
+        engrave_anchor_x: place.label_x,
+        engrave_anchor_y: place.label_y,
         place_x: place.x,
         place_y: place.y,
         rotation: part.rotation,

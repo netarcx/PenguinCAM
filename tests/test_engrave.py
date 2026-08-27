@@ -31,11 +31,13 @@ def _plate(path, width=4.0, height=3.0):
     return path
 
 
-def _build(dxf, tool=0.0625, text='GEARBOX-L', height=0.18, size=(4.0, 3.0)):
+def _build(dxf, tool=0.0625, text='GEARBOX-L', height=0.18, size=(4.0, 3.0),
+           anchor=None):
     with redirect_stdout(io.StringIO()):
         pp = FRCPostProcessor(0.25, tool, config=TeamConfig())
         pp.apply_material_preset('plywood')
-        pp.engrave = {'text': text, 'height': height, 'depth': 0.01}
+        pp.engrave = {'text': text, 'height': height, 'depth': 0.01,
+                      'anchor': anchor}
         pp.load_dxf(dxf)
         pp.transform_coordinates('bottom-left', 0)
         pp.identify_perimeter_and_pockets()
@@ -89,6 +91,22 @@ class EngraveToolpathTest(unittest.TestCase):
         self.assertTrue(result.success, msg=str(result.errors))
         self.assertIn('(===== ENGRAVE PART NAME =====)', result.gcode)
         self.assertIn('(Text: GEARBOX-L)', result.gcode)
+
+    def test_a_selected_position_places_the_label_on_that_part(self):
+        _, result = _build(self.dxf, text='P #17', anchor=(0.75, 0.65))
+        self.assertIn('(Text: P #17)', result.gcode)
+        section = result.gcode.split('ENGRAVE PART NAME', 1)[1].split('(=====', 1)[0]
+        xs = [float(v) for v in re.findall(r'X(-?[\d.]+)', section)]
+        ys = [float(v) for v in re.findall(r'Y(-?[\d.]+)', section)]
+        self.assertTrue(xs and ys)
+        self.assertAlmostEqual((min(xs) + max(xs)) / 2, 0.75, delta=0.02)
+        self.assertAlmostEqual((min(ys) + max(ys)) / 2, 0.65, delta=0.02)
+
+    def test_a_selected_position_cannot_put_the_name_on_the_stock(self):
+        _, result = _build(self.dxf, text='BRACKET #17', anchor=(0.02, 0.02))
+        self.assertNotIn('ENGRAVE PART NAME', result.gcode)
+        self.assertTrue(any('selected label position' in warning
+                            for warning in result.warnings), result.warnings)
 
     def test_it_runs_before_the_profile(self):
         """After the profile the part hangs on tabs, and a light chattery label cut is
@@ -237,6 +255,21 @@ class MultiToolEngraveTest(unittest.TestCase):
             config=TeamConfig())
         with redirect_stdout(io.StringIO()):
             return tooling.generate_multitool_job(job, timestamp='2026-01-01 00:00:00')
+
+    def test_custom_number_and_position_reach_a_multi_tool_program(self):
+        import tooling
+        job = tooling.MultiToolJob(
+            material='plywood', thickness=0.25, engrave=True,
+            tools=[tooling.Tool(1, '1/8 endmill', 0.125, 2)],
+            parts=[tooling.PartOps(
+                dxf_path=self.dxf, name='GEARBOX-L', engrave_text='ARM #42',
+                engrave_anchor=(1.0, 1.0),
+                operations=[tooling.Operation('holes', 1),
+                            tooling.Operation('perimeter', 1)])],
+            config=TeamConfig())
+        with redirect_stdout(io.StringIO()):
+            result = tooling.generate_multitool_job(job, timestamp='2026-01-01 00:00:00')
+        self.assertIn('(Text: ARM #42)', result.gcode)
 
     def test_the_name_is_cut_when_the_job_asks_for_it(self):
         off = self._run(False)

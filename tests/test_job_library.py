@@ -26,13 +26,14 @@ DXF = b'0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
 
 
 def _part(name, x=0.0, y=0.0, rotation=0.0, blob=DXF, mirror=False, ops=None,
-          cx=None, cy=None):
+          cx=None, cy=None, number='', label_x=None, label_y=None):
     # mirror and ops are parameters, not constants. Hardcoding them False/None made the
     # round-trip test unable to fail for either field: dropping `mirror` entirely from
     # the writer left every test green, and a re-cut nest came back un-mirrored.
     return {'name': name, 'dxf_bytes': blob, 'place_x': x, 'place_y': y,
             'center_x': x if cx is None else cx, 'center_y': y if cy is None else cy,
-            'rotation': rotation, 'mirror': mirror, 'ops': ops}
+            'rotation': rotation, 'mirror': mirror, 'ops': ops,
+            'number': number, 'label_x': label_x, 'label_y': label_y}
 
 
 class JobLibraryTest(unittest.TestCase):
@@ -194,6 +195,13 @@ class SavedJobFidelityTest(unittest.TestCase):
         back = job_library.load_job(self.config, job_id)['parts'][0]
         self.assertEqual((back['place_x'], back['place_y']), (2.0, 3.0))
         self.assertEqual((back['center_x'], back['center_y']), (4.0, 5.5))
+
+    def test_part_number_and_engraving_position_survive(self):
+        parts = [_part('ARM', number='R-42', label_x=1.25, label_y=0.75)]
+        job_id, _ = job_library.save_job(self.config, 'Labels', {}, parts)
+        back = job_library.load_job(self.config, job_id)['parts'][0]
+        self.assertEqual(back['number'], 'R-42')
+        self.assertEqual((back['label_x'], back['label_y']), (1.25, 0.75))
 
     def test_a_placement_that_is_not_a_number_is_refused_at_the_door(self):
         """NaN survives float() and json.dump writes it as bare NaN, which json.load

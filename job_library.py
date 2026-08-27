@@ -158,6 +158,7 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
                 fh.write(blob)
             meta_parts.append({
                 'name': part.get('name') or f'part {index + 1}',
+                'number': str(part.get('number') or '')[:20],
                 'dxf': dxf_name,
                 # Both anchors. `place_x/y` is the footprint's lower-left corner, which
                 # is what every other wire format in this app means by "place"; the
@@ -169,6 +170,10 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
                 'place_y': _finite(part.get('place_y'), 'placement'),
                 'center_x': _finite(part.get('center_x'), 'placement'),
                 'center_y': _finite(part.get('center_y'), 'placement'),
+                'label_x': (_finite(part.get('label_x'), 'label placement')
+                            if part.get('label_x') is not None else None),
+                'label_y': (_finite(part.get('label_y'), 'label placement')
+                            if part.get('label_y') is not None else None),
                 'rotation': _finite(part.get('rotation'), 'rotation'),
                 'mirror': bool(part.get('mirror')),
                 'ops': part.get('ops') or None,

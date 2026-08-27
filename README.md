@@ -1,4 +1,4 @@
-# PenguinCAM
+# UV-CAM
 
 **Onshape-to-CNC for FRC Teams**
 
@@ -26,16 +26,16 @@ Key files: `templates/wizard.html`, `static/wizard.js`, `static/gcode_viewer.js`
 
 ---
 
-## What is PenguinCAM?
+## What is UV-CAM?
 
-PenguinCAM streamlines the workflow from CAD design to CNC machining for FRC teams:
+UV-CAM streamlines the workflow from CAD design to CNC machining for FRC teams:
 
 1. **Design in Onshape** → Create flat plates or tubes, with holes and pockets
-2. **Open app → "Send to PenguinCAM"** → One-click export from Onshape
+2. **Open app → "Send to UV-CAM"** → One-click export from Onshape
 3. **Orient & Generate** → Rotate part, auto-generate toolpaths
 4. **Download or Save to Drive** → Ready to run on your CNC router
 
-**No difficult CAM software, no manual exports!** PenguinCAM knows what FRC teams need.
+**No difficult CAM software, no manual exports!** UV-CAM knows what FRC teams need.
 
 Designed to feel like 3D printer slicers or laser cutter software. Get the design, orient it on the machine, and go. Launching directly from Onshape means no export/import steps, lost files or inconsistent naming. Every part designed by your team members automatically get the same CNC behavior. Students don't have to know feeds & speeds, understand ramp angles, risk machine collisions. Just select the part and go.
 
@@ -71,14 +71,14 @@ Designed to feel like 3D printer slicers or laser cutter software. Get the desig
 ### 🔗 **Onshape Integration** ⭐ Preferred Workflow
 
 **One-Click Export from Onshape:**
-- Select top face of part in Onshape → "Send to PenguinCAM"
-- Opens PenguinCAM with part already loaded
+- Select top face of part in Onshape → "Send to UV-CAM"
+- Opens UV-CAM with part already loaded
 - No manual DXF export needed
 
 **How to Set Up:**
-1. Install PenguinCAM app in your Onshape classroom
+1. Install UV-CAM in your Onshape classroom
 2. Extension appears in right side panel in Parts Studios
-3. Click once to send part directly to PenguinCAM
+3. Click once to send part directly to UV-CAM
 4. OAuth authentication (one-time per team member)
 
 **Alternative:** Manual DXF upload available for offline work
@@ -117,9 +117,9 @@ Designed to feel like 3D printer slicers or laser cutter software. Get the desig
 
 **One-Click Workflow:**
 1. **Design your part** in Onshape (flat plate with holes/pockets)
-2. **Open the PenguinCAM app** in the right panel
+2. **Open the UV-CAM app** in the right panel
 2. **Select the top face** by clicking on it
-3. **Click "Send to PenguinCAM"** in the PenguinCAM panel
+3. **Click "Send to UV-CAM"** in the UV-CAM panel
 4. **Orient your part** - Rotate if needed in 2D setup view
 5. **Click "Generate Program"** - Review 3D preview
 6. **Download or save to Drive** - Ready for CNC!
@@ -180,13 +180,13 @@ Create a `PenguinCAM-config.yaml` file to customize machine settings for your CN
 - Download template: [`PenguinCAM-config-template.yaml`](https://github.com/6238/PenguinCAM/blob/main/PenguinCAM-config-template.yaml)
 - Edit for your team (machine park position, controller type, feeds/speeds, etc.)
 - Save as `PenguinCAM-config.yaml` and drag into your Onshape documents folder
-- Done! Your settings load automatically when team members use PenguinCAM
+- Done! Your settings load automatically when team members use UV-CAM
 
 See "For Other FRC Teams" section below for complete instructions.
 
 ### Deployment (Advanced)
 
-For teams self-hosting PenguinCAM, it's can be deployed on Railway (server-based) or Vercel (serverless) with automatic GitHub integration, or your own hosting service or server.
+For teams self-hosting UV-CAM, it can be deployed on Railway (server-based) or Vercel (serverless) with automatic GitHub integration, or on your own server.
 
 **Setup guides:**
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) - Deploy to Railway, environment variables
@@ -268,7 +268,7 @@ Google Drive Upload
 
 ### G-code Operations
 
-PenguinCAM generates optimized toolpaths:
+UV-CAM generates optimized toolpaths:
 
 1. **Holes (all sizes):**
    - Helical entry from center
@@ -300,7 +300,7 @@ See [Z_COORDINATE_SYSTEM.md](docs/Z_COORDINATE_SYSTEM.md) for details.
 
 ## Default Settings
 
-PenguinCAM uses Team 6238 defaults optimized for FRC robotics:
+UV-CAM uses Team 6238 defaults optimized for FRC robotics:
 
 **Material:**
 - Thickness: 0.25" (configurable per job)
@@ -430,7 +430,7 @@ See [DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) for complete setup.
 
 ## Contributing
 
-PenguinCAM was built for FRC Team 6238 but is open for other teams to use and improve!
+UV-CAM was built for FRC Team 6238 but is open for other teams to use and improve!
 
 **Ideas welcome:**
 - Multiple parts in a single job
@@ -459,11 +459,11 @@ For questions or support:
 
 ## For Other FRC Teams
 
-Interested in using PenguinCAM for your team? Great! **You can use the hosted service at https://penguincam.popcornpenguins.com** - no deployment required!
+Interested in using UV-CAM for your team? Great! **You can use the hosted service at https://penguincam.popcornpenguins.com** - no deployment required!
 
 ### Recommended Approach: Use the Hosted Service
 
-PenguinCAM is designed to support multiple teams using the same hosted instance. Each team can customize machine settings, feeds/speeds, and other preferences using a configuration file stored in your Onshape documents.
+UV-CAM is designed to support multiple teams using the same hosted instance. Each team can customize machine settings, feeds/speeds, and other preferences using a configuration file stored in your Onshape documents.
 
 **Setup steps (5 minutes):**
 
@@ -512,7 +512,7 @@ All other values automatically use proven Team 6238 defaults.
 
 ### Advanced: Self-Hosting (Optional)
 
-Want to run your own instance? You can deploy PenguinCAM yourself:
+Want to run your own instance? You can deploy UV-CAM yourself:
 
 **Setup steps:**
 1. Fork this repository

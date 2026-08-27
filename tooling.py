@@ -430,6 +430,8 @@ class PartOps:
     place_y: float = 0.0
     rotation: float = 0.0
     mirror: bool = False
+    engrave_text: Optional[str] = None
+    engrave_anchor: Optional[Tuple[float, float]] = None
     operations: List[Operation] = field(default_factory=list)
 
 
@@ -1819,8 +1821,8 @@ def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
     """
     pp = build_part_postprocessor(job, part, tool_diameter)
     pp.classify_holes()
-    pp.engrave = {'text': part.name, 'height': ENGRAVE_HEIGHT_IN,
-                  'depth': ENGRAVE_DEPTH_IN}
+    pp.engrave = {'text': part.engrave_text or part.name, 'height': ENGRAVE_HEIGHT_IN,
+                  'depth': ENGRAVE_DEPTH_IN, 'anchor': part.engrave_anchor}
     try:
         lines = pp._engrave_body()
     except Exception as exc:            # a label is never worth failing a job over
@@ -1980,6 +1982,12 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         file_index = _expect_int(raw.get('file_index', i), f'part {i + 1} file_index')
         if file_index not in dxf_paths:
             raise ToolingError(f"Part {i + 1} references DXF #{file_index}, which was not provided")
+        anchor = None
+        if raw.get('engrave_anchor_x') is not None or raw.get('engrave_anchor_y') is not None:
+            anchor = (_expect_number(raw.get('engrave_anchor_x'),
+                                     f'part {i + 1} engrave_anchor_x'),
+                      _expect_number(raw.get('engrave_anchor_y'),
+                                     f'part {i + 1} engrave_anchor_y'))
         parts.append(PartOps(
             dxf_path=dxf_paths[file_index],
             name=raw.get('name') or f'part{i + 1}',
@@ -1987,6 +1995,9 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
             place_y=_expect_number(raw.get('place_y', 0.0), f'part {i + 1} place_y'),
             rotation=_expect_number(raw.get('rotation', 0.0), f'part {i + 1} rotation'),
             mirror=bool(raw.get('mirror')),
+            engrave_text=(str(raw.get('engrave_text'))[:100]
+                          if raw.get('engrave_text') is not None else None),
+            engrave_anchor=anchor,
             operations=[Operation.from_dict(o)
                         for o in _expect_list(raw.get('operations'),
                                               f'part {i + 1} operations')],

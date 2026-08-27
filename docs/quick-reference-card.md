@@ -1,4 +1,4 @@
-# PenguinCAM Quick Reference
+# UV-CAM Quick Reference
 
 **Student & Mentor Cheat Sheet - FRC Team 6238**
 
@@ -11,8 +11,8 @@
 **Easiest Method - One Click:**
 1. Open your Part Studio in Onshape
 2. **Right-click the part** in the feature tree (left sidebar)
-3. Click **"Send to PenguinCAM"** from the menu
-4. Part opens automatically in PenguinCAM!
+3. Click **"Send to UV-CAM"** from the menu
+4. Part opens automatically in UV-CAM!
 
 **First Time Only:** You'll sign in with your @popcornpenguins.com Google account
 
@@ -23,7 +23,7 @@
 ### 2. Set Parameters (Setup Mode)
 
 * Select the correct material type (polycarb, plywood, or aluminum, or aluminum tube)
-* Use calipers to verify the material thickness and set the measured material thickness in PenguinCAM.  PenguinCAM will automatically determine feed height, retract height, and clearance height based on the material thickness and the material type. 
+* Use calipers to verify the material thickness and enter it in UV-CAM. UV-CAM automatically determines feed, retract, and clearance heights from the material thickness and type.
 * Ensure the tool diameter is set correctly (0.157" for a 4mm end mill)
 
 ---
@@ -38,7 +38,7 @@ After import, you'll see a **2D top-down view** of your part:
    - Like 3D printer slicers or laser cutters
    - No need to pick a corner!
 
-**Important:** First decide how you will fixture the raw material on the machine, and then select orientation in PenguinCAM to match.
+**Important:** First decide how you will fixture the raw material on the machine, and then select the matching orientation in UV-CAM.
 
 ---
 
@@ -111,7 +111,7 @@ See [Z_COORDINATE_SYSTEM.md](Z_COORDINATE_SYSTEM.md) for detailed explanation.
 
 **Material:**
 - Thickness: **0.25"** (1/4" aluminum)
-- Change in PenguinCAM if using different thickness
+- Change in UV-CAM if using a different thickness
 
 **Tool:**
 - Diameter: **0.157"** (4mm endmill)
@@ -125,7 +125,7 @@ See [Z_COORDINATE_SYSTEM.md](Z_COORDINATE_SYSTEM.md) for detailed explanation.
 
 ---
 
-## 🕳️ What PenguinCAM Knows
+## 🕳️ What UV-CAM Knows
 
 ### Holes (Automatic Detection)
 
@@ -152,7 +152,7 @@ See [Z_COORDINATE_SYSTEM.md](Z_COORDINATE_SYSTEM.md) for detailed explanation.
 
 ## ⚙️ Common Settings to Adjust
 
-In PenguinCAM web interface:
+In the UV-CAM web interface:
 
 **Material Thickness:**
 - Measure with calipers!
@@ -207,7 +207,7 @@ In PenguinCAM web interface:
 - Put pockets fully inside the perimeter
 
 **❌ Avoid:**
-- 3D features (PenguinCAM only processes top face)
+- 3D features (UV-CAM only processes the top face)
 - Open paths (must be closed shapes)
 - Overlapping geometry
 - Tiny features smaller than tool diameter
@@ -235,7 +235,7 @@ In PenguinCAM web interface:
 
 ## 🔍 Checking Your G-code
 
-### In PenguinCAM (Before Download):
+### In UV-CAM (Before Download):
 
 **3D Preview:**
 - Rotate view with mouse drag
@@ -271,7 +271,7 @@ In PenguinCAM web interface:
 
 **Before Running G-code:**
 
-- [ ] Correct tool installed (match diameter in PenguinCAM)
+- [ ] Correct tool installed (match the diameter in UV-CAM)
 - [ ] Material securely clamped
 - [ ] Sacrifice board under material
 - [ ] X/Y/Z zeros set correctly
@@ -300,7 +300,7 @@ In PenguinCAM web interface:
 ### "Part is wrong size"
 
 **Check:**
-- Did you specify correct tool diameter in PenguinCAM?
+- Did you specify the correct tool diameter in UV-CAM?
 - Is your actual endmill the size you think it is?
 - Did you measure material thickness accurately?
 
@@ -339,7 +339,7 @@ In PenguinCAM web interface:
 
 ## 📞 Getting Help
 
-**For PenguinCAM Problems:**
+**For UV-CAM Problems:**
 - Check this guide first
 - Ask a mentor
 - Report bugs: [GitHub Issues]
@@ -382,7 +382,7 @@ In PenguinCAM web interface:
 **Documentation:**
 - [Tool Compensation Guide](TOOL_COMPENSATION_GUIDE.md) - How offsets work
 - [Z-Coordinate System](Z_COORDINATE_SYSTEM.md) - Detailed zeroing guide
-- [Deployment Guide](DEPLOYMENT_GUIDE.md) - For mentors setting up PenguinCAM
+- [Deployment Guide](DEPLOYMENT_GUIDE.md) - For mentors setting up UV-CAM
 - [Roadmap](../ROADMAP.md) - Upcoming features
 
 **Questions?**
@@ -401,7 +401,7 @@ In PenguinCAM web interface:
    - Export → DXF
    - Save the file
 
-2. **In PenguinCAM:**
+2. **In UV-CAM:**
    - Go to https://penguincam.popcornpenguins.com
    - Sign in with @popcornpenguins.com account
    - Drag & drop DXF file (or click to browse)

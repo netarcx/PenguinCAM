@@ -64,7 +64,7 @@ def find_free_port(host: str, preferred: int, attempts: int = 20) -> int:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='Run PenguinCAM locally, without Onshape or any cloud service.')
+        description='Run UV-CAM locally, without Onshape or any cloud service.')
     parser.add_argument('--port', type=int, default=None,
                         help='Port to listen on (default: 6238, or the next free one)')
     parser.add_argument('--host', default='127.0.0.1',
@@ -118,7 +118,7 @@ def main(argv=None) -> int:
     loaded_config, config_path = local_mode.load_local_team_config()
 
     print("=" * 70)
-    print("PenguinCAM - local mode")
+    print("UV-CAM - local mode")
     print("=" * 70)
     if loaded_config is not None:
         print(f"  Team config : {config_path}")
@@ -153,7 +153,7 @@ def main(argv=None) -> int:
         pass
     # Printed unconditionally: Werkzeug's serve_forever swallows the KeyboardInterrupt,
     # so the handler above almost never fires and the goodbye never appeared.
-    print("\nPenguinCAM stopped.")
+    print("\nUV-CAM stopped.")
     return 0
 
 

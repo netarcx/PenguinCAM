@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PenguinCAM</title>
+    <title>UV-CAM</title>
     <link rel="icon" href="{{ url_for('static', filename='popcornlogo.svg') }}">
     <!-- Barlow is the DIN-adjacent industrial grotesk the UI is set in; the semi
          condensed cut carries the headings and title-block labels. Both degrade to
@@ -23,7 +23,7 @@
                     <circle class="bm-ring" cx="12" cy="12" r="8.5"></circle>
                     <path class="bm-ring" d="M12 0.5v23M0.5 12h23"></path>
                 </svg>
-                <span class="brand-name">Penguin<b>CAM</b></span>
+                <span class="brand-name">UV-<b>CAM</b></span>
             </div>
             <!-- Loaded team configuration (so the user can confirm it resolved correctly,
                  even in the Onshape panel). Clickable when we know the config file URL. -->
@@ -164,7 +164,7 @@
                     Thickness is derived from the CAD part in 2.5D mode.
                 </p>
                 <p class="hint" id="max-pass-hint">
-                    Blank lets PenguinCAM pick the depth; set it to force shallower
+                    Blank lets UV-CAM pick the depth; set it to force shallower
                     passes for a fragile cutter.
                 </p>
 
@@ -179,13 +179,14 @@
 
                 <label class="field inline" id="engrave-toggle">
                     <input type="checkbox" id="f-engrave" autocomplete="off">
-                    <span>Engrave each part&rsquo;s name into it</span>
+                    <span>Engrave each part&rsquo;s name and number into it</span>
                 </label>
                 <p class="hint" id="engrave-note" style="display:none">
                     Cut shallow into the face while the sheet is still whole, so a nest of
                     similar parts is not a puzzle once it is off the machine. Needs a fine
-                    cutter &mdash; a name is skipped, with a warning, on a part too small
-                    to carry a legible one.
+                    cutter &mdash; edit each name and number in Parts, then drag its purple
+                    label inside the part in Layout. A label that cannot fit is skipped
+                    with a warning rather than cut into the surrounding stock.
                 </p>
 
                 <!-- Deburr / chamfer pass (2D standard mode only). -->
@@ -396,11 +397,38 @@
                         <select id="f-stock" autocomplete="off"></select>
                     </label>
                     <button type="button" class="btn small" id="btn-save-stock"
-                            title="Save this sheet size to the team config">Save size</button>
+                            title="Enter and save a sheet size to the team config">Add size</button>
                     <button type="button" class="btn small" id="btn-save-remnant"
                             title="Save what is left of this sheet as an offcut">Save offcut</button>
                 </div>
                 <div id="stock-note" class="hint"></div>
+                <div id="fixture-panel">
+                    <label class="field inline" id="fixture-toggle">
+                        <input type="checkbox" id="f-fixture" autocomplete="off">
+                        <span>Use removable locator pins and external clamp bolts</span>
+                    </label>
+                    <div id="fixture-options" hidden>
+                        <div class="fixture-fields">
+                            <label class="field">
+                                <span>Stock corner X</span>
+                                <input type="text" id="f-fixture-x" inputmode="text" autocomplete="off" value='0.375"'>
+                            </label>
+                            <label class="field">
+                                <span>Stock corner Y</span>
+                                <input type="text" id="f-fixture-y" inputmode="text" autocomplete="off" value='0.375"'>
+                            </label>
+                            <label class="field">
+                                <span>Dowel diameter</span>
+                                <input type="text" id="f-fixture-pin" inputmode="text" autocomplete="off" value='0.25"'>
+                            </label>
+                            <label class="field">
+                                <span>Clamp-bolt diameter</span>
+                                <input type="text" id="f-fixture-bolt" inputmode="text" autocomplete="off" value='0.25"'>
+                            </label>
+                        </div>
+                        <p id="fixture-note" class="hint"></p>
+                    </div>
+                </div>
 
                 <div id="layout-info" class="dro-strip">
                     <div class="dro">
@@ -489,7 +517,7 @@
                 <!-- Replaced by the result above as soon as there is a program. -->
                 <div class="panel-empty">
                     <strong>No program yet</strong>
-                    <span>Add a part and lay it out, then come back here. PenguinCAM cuts the
+                    <span>Add a part and lay it out, then come back here. UV-CAM cuts the
                           program and plays the toolpath before you save anything.</span>
                 </div>
             </section>
@@ -527,7 +555,7 @@
     <div id="connect-overlay" hidden>
         <div class="connect-card">
             <h2>Connect to Onshape</h2>
-            <p>PenguinCAM needs access to your Onshape document to read parts.</p>
+            <p>UV-CAM needs access to your Onshape document to read parts.</p>
             <button type="button" id="btn-connect" class="btn primary">Connect to Onshape</button>
             <p class="hint" id="connect-status"></p>
         </div>

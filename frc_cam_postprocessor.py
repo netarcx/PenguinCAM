@@ -2724,7 +2724,7 @@ class FRCPostProcessor:
                 continue        # a pocket shapely cannot read is not a placement hazard
         return area
 
-    def _engrave_placement(self, area, text, height):
+    def _engrave_placement(self, area, text, height, preferred=None):
         """Find somewhere the whole label actually fits inside `area`.
 
         Returns (origin_x, origin_y, height, strokes) or None. The old version took the
@@ -2764,12 +2764,18 @@ class FRCPostProcessor:
             # Coarse search: the centre first (where a label belongs when it fits),
             # then a grid. Bounded work - at most 4 heights x 26 positions.
             span_x, span_y = (maxx - minx) - w, (maxy - miny) - tall
-            candidates = [(minx + span_x / 2.0, miny + span_y / 2.0)]
-            steps = 4
-            for i in range(steps + 1):
-                for j in range(steps + 1):
-                    candidates.append((minx + span_x * i / steps,
-                                       miny + span_y * j / steps))
+            if preferred is not None:
+                # The browser supplies the desired text CENTER in the already-placed
+                # part coordinate system. Never silently move a deliberately placed
+                # label somewhere else: either shrink it around that point or warn.
+                candidates = [(preferred[0] - w / 2.0, preferred[1] - tall / 2.0)]
+            else:
+                candidates = [(minx + span_x / 2.0, miny + span_y / 2.0)]
+                steps = 4
+                for i in range(steps + 1):
+                    for j in range(steps + 1):
+                        candidates.append((minx + span_x * i / steps,
+                                           miny + span_y * j / steps))
             for cx, cy in candidates:
                 if area.contains(box_geom(cx, cy, cx + w, cy + tall)):
                     # Shift so the strokes' own extent starts at the proven corner.
@@ -2827,7 +2833,16 @@ class FRCPostProcessor:
 
         min_height = self.tool_diameter * self.ENGRAVE_MIN_HEIGHT_PER_TOOL
         area = self._engrave_available_area()
-        placed = self._engrave_placement(area, text, max(height, min_height))
+        preferred = spec.get('anchor')
+        if preferred is not None:
+            try:
+                preferred = (float(preferred[0]), float(preferred[1]))
+                if not all(math.isfinite(v) for v in preferred):
+                    raise ValueError
+            except (TypeError, ValueError, IndexError):
+                self.warnings.append('The engraving position is invalid; skipped.')
+                return []
+        placed = self._engrave_placement(area, text, max(height, min_height), preferred)
         if placed is None:
             # Name the real obstacle. Blaming the geometry when the cutter is the
             # problem sends someone looking for space they already have.
@@ -2838,7 +2853,10 @@ class FRCPostProcessor:
                     f'{min_height:.3f} in. Use a finer bit or a taller name; skipped.')
             else:
                 self.warnings.append(
-                    f'{text}: no clear space on this part for a legible name; skipped.')
+                    f'{text}: ' + ('the selected label position does not keep the whole '
+                                   'name on this part; move it in Preview or use a finer bit; skipped.'
+                                   if preferred is not None else
+                                   'no clear space on this part for a legible name; skipped.'))
             return []
         ox, oy, height, strokes = placed
 

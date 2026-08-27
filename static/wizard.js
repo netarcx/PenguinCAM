@@ -1,4 +1,4 @@
-/* PenguinCAM multi-part wizard.
+/* UV-CAM multi-part wizard.
  * One codebase for the standalone (/app, source=upload) and embedded
  * (/onshape-panel, source=onshape) contexts; the part source is the only
  * difference and is selected via window.PenguinCAM.source.
@@ -61,6 +61,12 @@
     // and the origin is the SHEET's corner, so a part keeps its place on the material
     // between jobs.
     stock: null,
+    // Optional repeatable table fixture. Three removable dowels locate two stock edges;
+    // external bolts drive low-profile clamps rather than drilling through good stock.
+    // Coordinates are machine-bed coordinates, while every part remains stock-relative.
+    fixture: { on: false,
+               x: 0.375, x_text: '0.375"', y: 0.375, y_text: '0.375"',
+               pin: 0.25, pin_text: '0.25"', bolt: 0.25, bolt_text: '0.25"' },
     //: A one-off message from Auto-arrange / Fill sheet, shown above the layout errors
     //: and cleared as soon as the layout changes under it - a notice about a nest that
     //: no longer exists is worse than no notice.
@@ -263,7 +269,8 @@
         return [c[0] - minX, c[1] - minY];
       });
     });
-    return { pts: norm, holes: holes, inner: inner, w: maxX - minX, h: maxY - minY };
+    return { pts: norm, holes: holes, inner: inner, w: maxX - minX, h: maxY - minY,
+             minX: minX, minY: minY, flipX: fx };
   }
 
   // Parts are stored by their center (cx, cy) so rotation happens in place. The
@@ -283,6 +290,31 @@
   function placedPolygon(part) {
     var p = placement(part);
     return p.shape.pts.map(function (pt) { return [p.x + pt[0], p.y + pt[1]]; });
+  }
+
+  function partLabelText(part) {
+    var number = String(part.number || '').trim();
+    return String(part.name || 'part').trim() + (number ? ' #' + number : '');
+  }
+
+  function placedLabelAnchor(part) {
+    var pl = placement(part), s = pl.shape;
+    var localX = part.label_x == null ? part.width / 2 : part.label_x;
+    var localY = part.label_y == null ? part.height / 2 : part.label_y;
+    var transformed = rotatePoint(s.flipX * localX, localY, part.rotation);
+    return { x: pl.x + transformed[0] - s.minX,
+             y: pl.y + transformed[1] - s.minY };
+  }
+
+  function setLabelAnchorFromWorld(part, wx, wy) {
+    var pl = placement(part), s = pl.shape;
+    if (!pointInPoly([wx, wy], placedPolygon(part))) return false;
+    var transformed = [wx - pl.x + s.minX, wy - pl.y + s.minY];
+    var local = rotatePoint(transformed[0], transformed[1], -part.rotation);
+    part.label_x = s.flipX * local[0];
+    part.label_y = local[1];
+    invalidatePreview();
+    return true;
   }
 
   function segPointDist(px, py, ax, ay, bx, by) {
@@ -357,6 +389,53 @@
     return state.tool_diameter;
   }
 
+  function fixtureGeometry() {
+    if (!state.fixture.on) return { pins: [], bolts: [], errors: [] };
+    var f = state.fixture, s = state.stock, errors = [];
+    if (!s) return { pins: [], bolts: [], errors: ['Choose a stock size before enabling the locator fixture.'] };
+    var right = state.machine.width - f.x - s.width;
+    var top = state.machine.height - f.y - s.height;
+    if (right < -1e-6 || top < -1e-6) {
+      errors.push('The stock at X ' + fmtSize(f.x) + ', Y ' + fmtSize(f.y)
+                  + ' does not fit the configured machine bed.');
+    }
+    // The pin is tangent to the stock; its far edge is one diameter outside the stock
+    // corner. Keep another 0.05" of spoilboard between that edge and the bed boundary.
+    var pinChannel = f.pin + 0.05;
+    if (f.x < pinChannel) errors.push('Stock corner X needs at least ' + fmtSize(pinChannel)
+                                      + ' clearance for the left locator pin.');
+    if (f.y < pinChannel) errors.push('Stock corner Y needs at least ' + fmtSize(pinChannel)
+                                      + ' clearance for the lower locator pins.');
+    var pins = [
+      // Tangent to the stock edge: these are locators, not merely nearby holes.
+      { label: 'P1 lower', x: f.x + s.width * 0.25, y: f.y - f.pin / 2 },
+      { label: 'P2 lower', x: f.x + s.width * 0.75, y: f.y - f.pin / 2 },
+      { label: 'P3 left', x: f.x - f.pin / 2, y: f.y + s.height * 0.5 },
+    ];
+    if (s.width * 0.5 < f.pin + 0.05) {
+      errors.push('The stock is too narrow to separate the two lower dowel holes.');
+    }
+    var boltChannel = f.bolt + 0.10, bolts = [];
+    // Prefer the far edges so pins establish the datum and the clamps push toward it.
+    if (top >= boltChannel) {
+      bolts = [{ label: 'B1 upper', x: f.x + s.width * 0.25, y: f.y + s.height + top / 2 },
+               { label: 'B2 upper', x: f.x + s.width * 0.75, y: f.y + s.height + top / 2 }];
+      if (s.width * 0.5 < f.bolt + 0.05) {
+        errors.push('The stock is too narrow to separate the two upper clamp-bolt holes.');
+      }
+    } else if (right >= boltChannel) {
+      bolts = [{ label: 'B1 right', x: f.x + s.width + right / 2, y: f.y + s.height * 0.25 },
+               { label: 'B2 right', x: f.x + s.width + right / 2, y: f.y + s.height * 0.75 }];
+      if (s.height * 0.5 < f.bolt + 0.05) {
+        errors.push('The stock is too short to separate the two right clamp-bolt holes.');
+      }
+    } else {
+      errors.push('Leave at least ' + fmtSize(boltChannel)
+                  + ' above or to the right of the stock for external clamp bolts.');
+    }
+    return { pins: pins, bolts: bolts, errors: errors, right: right, top: top };
+  }
+
   function validateLayout() {
     // Tubing isn't nested on a sheet: the two faces are opposite walls of one tube, so
     // the machine-bounds and part-overlap checks don't apply. The Layout step exists
@@ -396,6 +475,9 @@
           msgs.push(item.name + ' and its cut path hang off "' + state.stock.name + '".');
         }
       });
+    }
+    if (state.fixture.on) {
+      fixtureGeometry().errors.forEach(function (message) { msgs.push('Fixture: ' + message); });
     }
     for (var i = 0; i < items.length; i++) {
       for (var j = i + 1; j < items.length; j++) {
@@ -903,6 +985,7 @@
         state.tool_diameter = info.tool || parseLength(info.tool_text) || state.tool_diameter;
       }
       if (state.step === 'layout') { updateLayoutInfo(); refitView(); drawLayout(); }
+      updateFixtureUI();
       updateSummary();
     }
     // Persist to the session (fire-and-forget) so a page/iframe reload keeps this machine.
@@ -1118,6 +1201,7 @@
     // the wall, feeding depth per pass and pecking, plus a plywood material that
     // survived the trip back to 2D.
     var sr = $('#stock-row'); if (sr) sr.hidden = isTube;
+    var fp = $('#fixture-panel'); if (fp) fp.hidden = isTube;
     var ab = $('#btn-arrange'); if (ab) ab.hidden = isTube;
     var fb = $('#btn-fill'); if (fb) fb.hidden = isTube;
     var et = $('#engrave-toggle'); if (et) et.hidden = isTube || is25;
@@ -1361,30 +1445,43 @@
       .catch(function (e) { alert('Could not reach the server to save that stock: ' + e); });
   }
 
+  function promptStockLength(label, suggested) {
+    var value = prompt(label + ' (for example 48", 1200mm, or 4ft):', suggested || '');
+    if (value === null) return null;
+    value = value.trim();
+    if (!parseLength(value)) {
+      alert(label + ' is not a valid positive size. Try 48", 1200mm, or 4ft.');
+      return false;
+    }
+    return value;
+  }
+
   function saveCurrentSheet() {
     var bb = combinedBBox();
-    // The parts' exact bounding box is NOT a sheet they fit on: the profile pass rides
-    // half a kerf outside every outline, so a sheet measured flush is rejected the
-    // instant it is selected, with no way out but choosing another one. One kerf of
-    // margin all round - the same allowance auto-arrange leaves - and the nest is moved
-    // into that margin, because a sheet saved for these parts should be one they sit on.
+    // Offer useful defaults, but ask for the actual material dimensions. Deriving the
+    // stock from the parts forced a user with a 48 x 96 sheet to edit YAML just to tell
+    // the layout what was on the table. The nest remains a fallback suggestion when one
+    // exists; with no parts yet, the machine envelope is a better starting point.
     var pad = state.stock ? 0 : jobKerf();
-    var w = state.stock ? state.stock.width : (bb ? bb.w + 2 * pad : 0);
-    var h = state.stock ? state.stock.height : (bb ? bb.h + 2 * pad : 0);
-    if (!(w > 0 && h > 0)) { alert('Nothing to measure yet - add a part or pick a sheet.'); return; }
-    if (!state.stock && bb) {
-      var dx = pad - bb.minX, dy = pad - bb.minY;
-      if (Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9) {
-        state.parts.forEach(function (part) { part.cx += dx; part.cy += dy; });
-        refitView(); drawLayout(); invalidatePreview();
-      }
-    }
+    var w = state.stock ? state.stock.width : (bb ? bb.w + 2 * pad : state.machine.width);
+    var h = state.stock ? state.stock.height : (bb ? bb.h + 2 * pad : state.machine.height);
     var name = prompt('Name this stock (it goes in the team config):',
                       state.stock ? state.stock.name
                                   : fmtSize(w) + ' x ' + fmtSize(h) + ' ' + state.material);
     if (!name) return;
-    postStock({ name: name, width: w, height: h,
-                thickness: state.thickness_text, material: state.material });
+    var widthText = promptStockLength('Stock width', fmtSize(w));
+    if (widthText === null || widthText === false) return;
+    var heightText = promptStockLength('Stock length', fmtSize(h));
+    if (heightText === null || heightText === false) return;
+    postStock({ name: name, width: widthText, height: heightText,
+                thickness: state.thickness_text, material: state.material }, function (result) {
+      var saved = stockList().filter(function (sheet) { return sheet.id === result.saved_id; })[0];
+      if (!saved) return;
+      state.stock = saved;
+      var picker = $('#f-stock'); if (picker) picker.value = saved.id;
+      applyStockUI();
+      invalidatePreview();
+    });
   }
 
   /* The unused part of the sheet, as the largest rectangle left over to the right of
@@ -1424,6 +1521,43 @@
     return (Math.round(inches * 100) / 100) + '"';
   }
 
+  // A repeatable physical placement that needs only a tape measure. This is guidance,
+  // not a coordinate transform: the program remains stock-relative and the operator
+  // sets G54 at the sheet corner after placing it. Centering leaves useful clamp space
+  // on both sides and makes the suggestion work for any stock that fits the bed.
+  function centeredStockPlacement() {
+    if (!state.stock) return null;
+    var x = (state.machine.width - state.stock.width) / 2;
+    var y = (state.machine.height - state.stock.height) / 2;
+    if (x < -1e-6 || y < -1e-6) return null;
+    return { x: Math.max(0, x), y: Math.max(0, y) };
+  }
+
+  function fixturePointText(points) {
+    return points.map(function (p) {
+      return p.label + ' X ' + fmtFixtureSize(p.x) + ', Y ' + fmtFixtureSize(p.y);
+    }).join('; ');
+  }
+
+  function fmtFixtureSize(inches) { return (+inches).toFixed(3) + '"'; }
+
+  function updateFixtureUI() {
+    var toggle = $('#f-fixture'), options = $('#fixture-options'), note = $('#fixture-note');
+    if (!toggle || !options) return;
+    toggle.disabled = !state.stock;
+    if (!state.stock && state.fixture.on) state.fixture.on = false;
+    toggle.checked = state.fixture.on;
+    options.hidden = !state.fixture.on;
+    if (!state.fixture.on || !note) { if (note) note.textContent = ''; return; }
+    var geometry = fixtureGeometry();
+    var bits = [];
+    if (geometry.pins.length) bits.push('Dowel holes: ' + fixturePointText(geometry.pins) + '.');
+    if (geometry.bolts.length) bits.push('Clamp-bolt holes: ' + fixturePointText(geometry.bolts) + '.');
+    if (geometry.errors.length) bits.push('Fix before cutting: ' + geometry.errors.join(' '));
+    else bits.push('Coordinates are measured from the machine-bed lower-left. Remove the dowels after clamping. Clamp bodies are not modeled; keep them outside every toolpath.');
+    note.textContent = bits.join(' ');
+  }
+
   /* What the sheet choice changes: the material and thickness follow it when the sheet
      records them (a 1/4" plywood offcut is 1/4" plywood), the canvas reframes, and the
      usage readout appears. */
@@ -1432,9 +1566,19 @@
     var sheet = state.stock;
     if (usage) usage.hidden = !sheet;
     if (note) {
+      var placement = centeredStockPlacement();
       note.textContent = sheet
-        ? ('Cutting from "' + sheet.name + '". The G54 origin is the sheet’s '
-           + 'lower-left corner, so a part keeps its place on the material.')
+        ? (state.fixture.on
+           ? ('Cutting from "' + sheet.name + '" in the locator fixture. Stock lower-left: X '
+              + fmtFixtureSize(state.fixture.x) + ', Y ' + fmtFixtureSize(state.fixture.y)
+              + ' from the machine-bed lower-left. Set G54 X/Y at the stock corner.')
+           : placement
+           ? ('Cutting from "' + sheet.name + '". To center it on the ' + state.machine.name
+              + ' bed, place its lower-left corner ' + fmtSize(placement.x)
+              + ' from the bed’s left edge and ' + fmtSize(placement.y)
+              + ' from its lower edge. Set G54 X/Y at that sheet corner.')
+           : ('"' + sheet.name + '" is larger than the configured ' + state.machine.name
+              + ' bed and cannot be positioned on it.'))
         : '';
     }
     if (sheet) {
@@ -1452,6 +1596,7 @@
         }
       }
     }
+    updateFixtureUI();
     updateUsage();
     updateSummary();
     refitView();
@@ -1575,11 +1720,39 @@
       var li = document.createElement('li');
       li.className = 'part-item';
       li.innerHTML = thumbnailSVG(p) +
-        '<div class="meta"><div class="name"></div><div class="dims">' +
-        p.width.toFixed(2) + '" x ' + p.height.toFixed(2) + '"</div></div>' +
+        '<div class="meta"><div class="part-identity">' +
+        '<label>Name <input class="part-name" type="text" maxlength="80"></label>' +
+        '<label>Number <input class="part-number" type="text" maxlength="20"></label>' +
+        '</div><div class="dims">' + p.width.toFixed(2) + '" x ' + p.height.toFixed(2) +
+        '" &middot; drag the purple label in Layout</div></div>' +
         '<button class="duplicate" title="Duplicate" aria-label="Duplicate">&#10064;</button>' +
         '<button class="remove" title="Remove" aria-label="Remove">&times;</button>';
-      li.querySelector('.name').textContent = p.name;
+      var nameInput = li.querySelector('.part-name');
+      var numberInput = li.querySelector('.part-number');
+      nameInput.value = p.name;
+      numberInput.value = p.number || '';
+      nameInput.addEventListener('input', function () {
+        var clean = this.value.replace(/[\x00-\x1f\x7f()]/g, '').trimStart();
+        if (this.value !== clean) this.value = clean;
+        p.name = clean;
+        drawLayout(); invalidatePreview();
+      });
+      nameInput.addEventListener('change', function () {
+        p.name = this.value.trim() || 'part';
+        this.value = p.name;
+        partListChanged();
+      });
+      numberInput.addEventListener('input', function () {
+        var clean = this.value.replace(/[\x00-\x1f\x7f()]/g, '').trimStart();
+        if (this.value !== clean) this.value = clean;
+        p.number = clean;
+        drawLayout(); invalidatePreview();
+      });
+      numberInput.addEventListener('change', function () {
+        p.number = this.value.trim();
+        this.value = p.number;
+        partListChanged();
+      });
       li.querySelector('.duplicate').addEventListener('click', function () { duplicatePart(p.id); });
       li.querySelector('.remove').addEventListener('click', function () { removePart(p.id); });
       ul.appendChild(li);
@@ -1627,6 +1800,7 @@
     var p = {
       id: ++partSeq,
       name: data.name || ('part ' + (partSeq)),
+      number: String(partSeq), label_x: data.width / 2, label_y: data.height / 2,
       width: data.width, height: data.height,
       outline: data.outline, holes: data.holes || [], inner: data.inner || [],
       file: file,
@@ -1692,6 +1866,7 @@
     var p = {
       id: ++partSeq,
       name: name,
+      number: String(partSeq), label_x: src.label_x, label_y: src.label_y,
       width: src.width, height: src.height,
       outline: src.outline, holes: src.holes, inner: src.inner,
       file: src.file,
@@ -1976,6 +2151,32 @@
      the screen is in. */
   var printPalette = null;
 
+  function drawFixture(ctx, col) {
+    if (!state.fixture.on || !state.stock) return;
+    var geometry = fixtureGeometry(), f = state.fixture;
+    ctx.save();
+    ctx.font = '10px ' + CANVAS_MONO;
+    ctx.textBaseline = 'middle';
+    geometry.pins.forEach(function (pin) {
+      // fixtureGeometry is in machine coordinates; the layout canvas is stock-relative.
+      var p = worldToCanvas(pin.x - f.x, pin.y - f.y);
+      var r = Math.max(3, f.pin * canvasState.scale / 2);
+      ctx.fillStyle = col.accent; ctx.strokeStyle = col.ink; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = col.ink; ctx.fillText(pin.label.split(' ')[0], p[0] + r + 3, p[1]);
+    });
+    geometry.bolts.forEach(function (bolt) {
+      var p = worldToCanvas(bolt.x - f.x, bolt.y - f.y);
+      var r = Math.max(3, f.bolt * canvasState.scale / 2);
+      ctx.strokeStyle = col.accent; ctx.lineWidth = 2;
+      ctx.strokeRect(p[0] - r, p[1] - r, 2 * r, 2 * r);
+      ctx.beginPath(); ctx.moveTo(p[0] - r, p[1] - r); ctx.lineTo(p[0] + r, p[1] + r);
+      ctx.moveTo(p[0] + r, p[1] - r); ctx.lineTo(p[0] - r, p[1] + r); ctx.stroke();
+      ctx.fillStyle = col.ink; ctx.fillText(bolt.label.split(' ')[0], p[0] + r + 3, p[1]);
+    });
+    ctx.restore();
+  }
+
   function drawLayout() {
     var canvas = $('#layout-canvas');
     if (!canvas) return;
@@ -2009,7 +2210,7 @@
       ink: cssVar('--ink') || '#e9e7e2',
       muted: cssVar('--muted') || '#8d8e8a',
       danger: cssVar('--danger') || '#e4564a',
-      accent: cssVar('--accent') || '#f5a524',
+      accent: cssVar('--accent') || '#a970ff',
       ok: cssVar('--ok') || '#4caf6d',
     };
 
@@ -2037,6 +2238,7 @@
       ctx.strokeRect(Math.min(s0[0], s1[0]), Math.min(s0[1], s1[1]),
                      Math.abs(s1[0] - s0[0]), Math.abs(s1[1] - s0[1]));
       ctx.restore();
+      drawFixture(ctx, col);
     }
 
     // Stock = combined bounding box (dotted). Red if it exceeds the machine. The G54
@@ -2082,6 +2284,18 @@
         });
         ctx.closePath(); ctx.strokeStyle = col.muted; ctx.lineWidth = 1; ctx.stroke();
       });
+      if (state.engrave && state.mode === '2d') {
+        var label = placedLabelAnchor(p);
+        var labelCanvas = worldToCanvas(label.x, label.y);
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = '600 ' + Math.max(11, Math.min(20, 0.18 * canvasState.scale)) + 'px ' + CANVAS_FONT;
+        ctx.fillStyle = col.accent;
+        ctx.fillText(partLabelText(p), labelCanvas[0], labelCanvas[1]);
+        ctx.beginPath(); ctx.arc(labelCanvas[0], labelCanvas[1], 4, 0, Math.PI * 2);
+        ctx.strokeStyle = col.accent; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+      }
       var lc = worldToCanvas(pl.x, pl.y + pl.h);
       ctx.fillStyle = col.ink; ctx.font = '11px ' + CANVAS_FONT;
       ctx.fillText(p.name + (p.flipped ? ' (flipped)' : ''), lc[0] + 3, lc[1] + 12);
@@ -2166,6 +2380,16 @@
     return null;
   }
 
+  function hitLabel(cx, cy) {
+    if (!state.engrave || state.mode !== '2d') return null;
+    for (var i = state.parts.length - 1; i >= 0; i--) {
+      var label = placedLabelAnchor(state.parts[i]);
+      var c = worldToCanvas(label.x, label.y);
+      if (Math.hypot(cx - c[0], cy - c[1]) <= 14) return state.parts[i];
+    }
+    return null;
+  }
+
   function bindLayout() {
     var canvas = $('#layout-canvas');
     function evtCanvas(e) {
@@ -2194,6 +2418,12 @@
     function down(e) {
       var c = evtCanvas(e), w = canvasToWorld(c[0], c[1]);
       if (tubeDesignOn() && window.PCTubeDesigner) { designDown(w, e); return; }
+      var labelHit = hitLabel(c[0], c[1]);
+      if (labelHit) {
+        state.selectedIds = [labelHit.id];
+        canvasState.action = { type: 'label-drag', part: labelHit };
+        drawLayout(); e.preventDefault(); return;
+      }
       var shift = e.shiftKey;
       var selBox = combinedBBox(selectedParts());
       // Rotation handle rotates the whole selection about its center.
@@ -2244,6 +2474,10 @@
         drawLayout();
         e.preventDefault();
         return;
+      }
+      if (act.type === 'label-drag') {
+        setLabelAnchorFromWorld(act.part, w[0], w[1]);
+        drawLayout(); e.preventDefault(); return;
       }
       if (act.type === 'drag') {
         var dx = w[0] - act.startWorld[0], dy = w[1] - act.startWorld[1];
@@ -2327,6 +2561,28 @@
         dbg('stock', state.stock && state.stock.name);
       });
     }
+    var fixtureToggle = $('#f-fixture');
+    function fixtureChanged() {
+      updateFixtureUI();
+      invalidatePreview();
+      drawLayout();
+    }
+    if (fixtureToggle) {
+      fixtureToggle.addEventListener('change', function () {
+        state.fixture.on = this.checked && !!state.stock;
+        fixtureChanged();
+      });
+    }
+    [['#f-fixture-x', 'x'], ['#f-fixture-y', 'y'],
+     ['#f-fixture-pin', 'pin'], ['#f-fixture-bolt', 'bolt']].forEach(function (spec) {
+      bindLengthField($(spec[0]),
+        function () { return state.fixture[spec[1] + '_text']; },
+        function (inches, text) {
+          state.fixture[spec[1]] = inches;
+          state.fixture[spec[1] + '_text'] = text;
+          fixtureChanged();
+        });
+    });
 
     var saveJobBtn = $('#btn-save-job');
     if (saveJobBtn) saveJobBtn.addEventListener('click', saveCurrentJob);
@@ -2500,11 +2756,12 @@
         for (var b = 0; b < bytes.length; b++) binary += String.fromCharCode(bytes[b]);
         var pl = placement(p);
         parts[i] = {
-          name: p.name, dxf_base64: btoa(binary),
+          name: p.name, number: p.number || '', dxf_base64: btoa(binary),
           // The corner for anything that reads a job file the way the wire format
           // means "place", and the centre because that is what a part actually holds.
           place_x: pl.x, place_y: pl.y,
           center_x: p.cx, center_y: p.cy,
+          label_x: p.label_x, label_y: p.label_y,
           rotation: p.rotation, mirror: !!p.flipped,
           ops: p.ops || null,
         };
@@ -2533,6 +2790,7 @@
       tools: multiToolOn() ? (state.tools || null) : null,
       stock: state.stock ? { id: state.stock.id, name: state.stock.name,
                              width: state.stock.width, height: state.stock.height } : null,
+      fixture: state.fixture.on ? Object.assign({}, state.fixture) : null,
     };
   }
 
@@ -2637,6 +2895,20 @@
         var s0 = $('#f-stock'); if (s0) s0.value = '';
       }
     }
+    if (setup.fixture && state.stock) {
+      ['x', 'y', 'pin', 'bolt'].forEach(function (key) {
+        var value = parseFloat(setup.fixture[key]);
+        if (isFinite(value) && value > 0) {
+          state.fixture[key] = value;
+          state.fixture[key + '_text'] = setup.fixture[key + '_text'] || (value + '"');
+          var field = $('#f-fixture-' + (key === 'pin' ? 'pin' : key === 'bolt' ? 'bolt' : key));
+          if (field) field.value = state.fixture[key + '_text'];
+        }
+      });
+      state.fixture.on = true;
+    } else {
+      state.fixture.on = false;
+    }
 
     // Then the parts, through the ordinary upload path.
     state.parts = [];
@@ -2678,6 +2950,7 @@
       uploadDxf(file, function (part) {
         if (part) {
           part.name = saved.name || part.name;
+          part.number = saved.number != null ? String(saved.number) : (part.number || '');
           part.rotation = saved.rotation || 0;
           part.flipped = !!saved.mirror;
           // Rotation and mirror have to be set BEFORE the footprint is measured, or a
@@ -2690,6 +2963,8 @@
             part.cy = (saved.place_y || 0) + s0.h / 2;
           }
           if (saved.ops) part.ops = saved.ops;
+          if (typeof saved.label_x === 'number') part.label_x = saved.label_x;
+          if (typeof saved.label_y === 'number') part.label_y = saved.label_y;
         }
         settle(saved.name || 'a part', !!part);
       });
@@ -2740,6 +3015,21 @@
     if (state.stock) {
       rows.push(['Stock', state.stock.name + '  (' + fmtSize(state.stock.width) + ' x '
                  + fmtSize(state.stock.height) + ')']);
+      var placement = state.fixture.on ? null : centeredStockPlacement();
+      if (state.fixture.on) {
+        var fixture = fixtureGeometry();
+        rows.push(['Fixture stock corner', 'X ' + fmtFixtureSize(state.fixture.x) + ', Y '
+                   + fmtFixtureSize(state.fixture.y) + ' from machine-bed lower-left']);
+        if (fixture.pins.length) rows.push(['Locator dowels', fixturePointText(fixture.pins)]);
+        if (fixture.bolts.length) rows.push(['Clamp bolts', fixturePointText(fixture.bolts)]);
+        rows.push(['Fixture sequence', 'Seat stock against all 3 dowels, tighten external '
+                   + 'clamps, remove dowels, then set G54 at the stock lower-left']);
+        rows.push(['Clamp clearance', 'Bolt holes are shown, but clamp bodies vary. Confirm every clamp stays outside the toolpath.']);
+      } else if (placement) {
+        rows.push(['Place stock', 'Center on bed: sheet lower-left at X '
+                   + fmtSize(placement.x) + ', Y ' + fmtSize(placement.y)
+                   + ' measured from the bed lower-left']);
+      }
     } else if (bb) {
       rows.push(['Stock', fmtSize(bb.w) + ' x ' + fmtSize(bb.h) + ' (the parts)']);
     }
@@ -2793,7 +3083,7 @@
     try {
       if (canvas) {
         printPalette = { ink: '#111111', muted: '#666666', danger: '#b00020',
-                         accent: '#b26a00', ok: '#1a7f37' };
+                         accent: '#6d28d9', ok: '#1a7f37' };
         var ctx = canvas.getContext('2d');
         drawLayout();
         // Paint white UNDER what was drawn, so the PNG is ink on paper rather than
@@ -2813,7 +3103,7 @@
     }
     var partCounts = {};
     state.parts.forEach(function (p) {
-      var base = p.name.replace(/ copy( \d+)?$/, '');
+      var base = partLabelText(p);
       partCounts[base] = (partCounts[base] || 0) + 1;
     });
 
@@ -2847,7 +3137,7 @@
       + 'table{border-collapse:collapse;width:100%;margin-bottom:16px}'
       + 'th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #ddd;vertical-align:top}'
       + 'th{width:150px;color:#444;font-weight:600}'
-      + 'tr.key th,tr.key td{background:#fff6df;font-weight:700}'
+      + 'tr.key th,tr.key td{background:#f3e8ff;font-weight:700}'
       + 'h2{font-size:13px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:.06em;color:#444}'
       + 'ul{margin:0;padding-left:20px}'
       + 'img{max-width:100%;border:1px solid #ccc;margin-top:6px}'
@@ -2856,7 +3146,7 @@
       + '@media print{body{margin:0}.noprint{display:none}}'
       + '</style></head><body>'
       + '<h1>' + esc(setupSheetTitle(partCounts)) + '</h1>'
-      + '<p class="sub">' + esc(filename) + '.nc &middot; PenguinCAM setup sheet &middot; '
+      + '<p class="sub">' + esc(filename) + '.nc &middot; UV-CAM setup sheet &middot; '
       + esc(new Date().toLocaleString()) + '</p>'
       + '<table>' + rows + '</table>'
       + '<h2>Tools, in the order the program asks for them</h2><ul>' + tools + '</ul>'
@@ -2864,6 +3154,7 @@
       + (nest ? '<h2>Nest</h2><img src="' + nest + '" alt="Part layout">' : '')
       + '<div class="check"><h2>Before you press cycle start</h2><ul>'
       + '<li>Stock clamped, and no clamp in the toolpath</li>'
+      + (state.fixture.on ? '<li>Locator dowels removed after the stock was clamped</li>' : '')
       + '<li>The right tool is in the spindle</li>'
       + '<li>Z zeroed on the surface named above &mdash; not the other one</li>'
       + '<li>X and Y zeroed at the lower-left corner</li>'
@@ -3005,8 +3296,12 @@
     }
     state.parts.forEach(function (p, i) {
       var pl = placement(p);
+      var label = placedLabelAnchor(p);
       job.parts.push({
         file_index: i, name: p.name,
+        engrave_text: partLabelText(p),
+        engrave_anchor_x: sheet ? label.x : label.x - bb.minX,
+        engrave_anchor_y: sheet ? label.y : label.y - bb.minY,
         place_x: sheet ? pl.x : pl.x - bb.minX,
         place_y: sheet ? pl.y : pl.y - bb.minY,
         rotation: p.rotation, mirror: !!p.flipped,
@@ -3038,7 +3333,11 @@
     // corner - while the setup sheet told the operator to zero on that corner.
     var placements = state.parts.map(function (p) {
       var pl = placement(p);
-      return sheet ? { x: pl.x, y: pl.y } : { x: pl.x - bb.minX, y: pl.y - bb.minY };
+      var label = placedLabelAnchor(p);
+      return sheet
+        ? { x: pl.x, y: pl.y, label_x: label.x, label_y: label.y }
+        : { x: pl.x - bb.minX, y: pl.y - bb.minY,
+            label_x: label.x - bb.minX, label_y: label.y - bb.minY };
     });
     // A part added after the deburr box was ticked has no chamfer op yet; the sync is
     // idempotent, so re-running it here catches up before the payload is built.

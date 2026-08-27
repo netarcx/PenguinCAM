@@ -213,7 +213,7 @@ class PenguinCAMAuth:
                 if not self._check_authorization(email, domain):
                     return self._render_error_page(
                         'Access Denied',
-                        f'Your account ({email}) is not authorized to access PenguinCAM.'
+                        f'Your account ({email}) is not authorized to access UV-CAM.'
                     )
                 
                 # Save credentials to session
@@ -347,7 +347,7 @@ class PenguinCAMAuth:
         html = f'''<!DOCTYPE html>
 <html>
 <head>
-    <title>{title} - PenguinCAM</title>
+    <title>{title} - UV-CAM</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{
@@ -377,7 +377,7 @@ class PenguinCAMAuth:
         }}
         
         h1 {{
-            color: #FDB515;
+            color: #A970FF;
             margin-bottom: 1rem;
         }}
         
@@ -389,8 +389,8 @@ class PenguinCAMAuth:
         
         a {{
             display: inline-block;
-            background: #FDB515;
-            color: #000;
+            background: #7C3AED;
+            color: #fff;
             padding: 12px 24px;
             border-radius: 8px;
             text-decoration: none;
@@ -398,7 +398,7 @@ class PenguinCAMAuth:
         }}
         
         a:hover {{
-            background: #D99F12;
+            background: #6D28D9;
         }}
     </style>
 </head>
