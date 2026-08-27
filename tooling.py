@@ -1971,14 +1971,20 @@ def _validate_profile_order(job: MultiToolJob) -> List[str]:
 
     With tabs enabled this is all fine and nothing is reported: `defer_tabs` holds the
     removal pass back to the end of the program.
+
+    `remove_tabs: false` is fine too, and used to be refused. The deferral in
+    generate_operation is gated on remove_tabs, so with it off no removal pass is emitted
+    ANYWHERE and the part comes off the machine still held by its tabs, for someone to
+    cut out by hand. The plan is safe and the message the check produced - "the part is
+    cut free and left loose on the table" - was simply untrue. Only the absence of tabs
+    frees the part.
     """
-    if job.config.tabs_enabled and job.config.remove_tabs:
+    if job.config.tabs_enabled:
         return []
 
     errors = []
     multi_part = len(job.parts) > 1
-    reason = ("tabs are disabled in your configuration" if not job.config.tabs_enabled
-              else "tab removal is disabled in your configuration")
+    reason = "tabs are disabled in your configuration"
 
     for part in job.parts:
         perimeter_at = next((i for i, op in enumerate(part.operations)

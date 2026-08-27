@@ -2486,3 +2486,50 @@ class TestSpotDrillCoverage(unittest.TestCase):
             Operation('holes', 2, 'Drill'),
             Operation('perimeter', 3)]))
         self.assertTrue(result.success, result.errors)
+
+
+class TestProfileOrderWithTabsLeftIn(unittest.TestCase):
+    """`tabs_enabled=True, remove_tabs=False` means the machine cuts tabs and LEAVES
+    them: the deferral in generate_operation is gated on remove_tabs, so no removal pass
+    is ever emitted and the part stays anchored until someone cuts it out by hand.
+
+    The order check refused that plan anyway, telling the operator the part was "cut free
+    and left loose on the table" - which is the opposite of what happens.
+    """
+
+    LEAVE_TABS = TeamConfig(
+        {'machining': {'tabs': {'enabled': True, 'remove_tabs': False}}})
+    NO_TABS = TeamConfig({'machining': {'tabs': {'enabled': False}}})
+
+    def _job(self, config, parts=None):
+        return build_job(config=config, parts=parts or [
+            PartOps(dxf_path=make_plate_dxf(), name='plate', operations=[
+                Operation('holes', 1, scope={'max_diameter': 0.4}),
+                Operation('holes', 2, scope={'min_diameter': 0.4}),
+                Operation('pockets', 2), Operation('perimeter', 2),
+                Operation('chamfer', 3,
+                          scope={'targets': ['perimeter'], 'width': 0.02})])])
+
+    def test_leaving_the_tabs_in_allows_work_after_the_profile(self):
+        self.assertEqual(tooling._validate_profile_order(self._job(self.LEAVE_TABS)), [])
+
+    def test_and_the_job_actually_generates(self):
+        result = generate(self._job(self.LEAVE_TABS))
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('CHAMFER', result.gcode)
+        self.assertNotIn('TAB REMOVAL', result.gcode)
+
+    def test_two_parts_are_fine_too_when_the_tabs_stay_in(self):
+        dxf = make_plate_dxf()
+        parts = [PartOps(dxf_path=dxf, name=f'p{i}', operations=[
+            Operation('holes', 1, scope={'max_diameter': 0.4}),
+            Operation('holes', 2, scope={'min_diameter': 0.4}),
+            Operation('pockets', 2), Operation('perimeter', 2)]) for i in (1, 2)]
+        self.assertEqual(
+            tooling._validate_profile_order(self._job(self.LEAVE_TABS, parts)), [])
+
+    def test_tabs_off_is_still_refused(self):
+        """No tabs at all, and the profile really does free the part."""
+        errors = tooling._validate_profile_order(self._job(self.NO_TABS))
+        self.assertTrue(errors)
+        self.assertIn('loose', ' '.join(errors))
