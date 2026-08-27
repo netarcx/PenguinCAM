@@ -176,5 +176,59 @@ class TestMillimetreZFrame(unittest.TestCase):
         self.assertAlmostEqual(inch.peck_return_clearance, 0.02)
 
 
+
+class TestClassifyOrder(unittest.TestCase):
+    """A round part's OUTER boundary is a circle. identify_perimeter_and_pockets is what
+    removes that circle from self.circles once it has been claimed as the perimeter, so
+    it has to run FIRST - the route says so in a comment and does it in that order. Both
+    CLI branches ran classify_holes first, so the outline was also machined as a giant
+    hole: cleared out with a spiral from the centre.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='order_')
+        self.out = os.path.join(self.tmp, 'out.nc')
+        self.dxf = os.path.join(self.tmp, 'round.dxf')
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_circle((3.0, 3.0), 2.5)          # the part outline
+        msp.add_circle((3.0, 3.0), 0.25)         # a bore in the middle of it
+        doc.saveas(self.dxf)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _emitted(self):
+        code, text = run_cli(self.dxf, self.out, '--material', 'plywood',
+                             '--thickness', '0.25', '--tool-diameter', '0.157')
+        self.assertIn(code, (None, 0), text[-800:])
+        produced = [os.path.join(self.tmp, f) for f in os.listdir(self.tmp)
+                    if f.endswith('.nc')]
+        self.assertTrue(produced, text[-800:])
+        with open(produced[0]) as handle:
+            return handle.read(), text
+
+    def test_the_outline_is_the_perimeter_not_a_hole(self):
+        gcode, printed = self._emitted()
+        self.assertIn('PERIMETER', gcode)
+        # One hole only - the 0.25" bore. The 5" outline must not be one of them.
+        self.assertIn('Identified 1 millable holes', printed)
+
+    def test_nothing_is_cleared_at_the_outline_diameter(self):
+        gcode, _ = self._emitted()
+        for line in gcode.splitlines():
+            if line.startswith('(Hole '):
+                self.assertNotIn('5.000"', line,
+                                 'the outline was machined as a giant hole')
+
+    def test_the_tube_pattern_branch_orders_the_same_way(self):
+        code, text = run_cli(self.dxf, self.out, '--mode', 'tube-pattern',
+                             '--tube-height', '1.0', '--material', 'aluminum',
+                             '--thickness', '0.0625', '--tool-diameter', '0.157')
+        self.assertIn(code, (None, 0), text[-800:])
+        self.assertIn('Classified 1 holes', text)
+
+
 if __name__ == '__main__':
     unittest.main()

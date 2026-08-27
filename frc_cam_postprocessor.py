@@ -8452,8 +8452,11 @@ def main():
         else:
             pp.load_dxf(args.input_dxf)
             pp.transform_coordinates('bottom-left', args.rotation)  # Tube jig is always bottom-left
-            pp.classify_holes()
+            # identify_perimeter_and_pockets FIRST: it is what claims a circular outline
+            # as the perimeter and drops that circle from self.circles. Classifying holes
+            # first left a round part's outline machined as a giant hole as well.
             pp.identify_perimeter_and_pockets()
+            pp.classify_holes()
 
         # Debug: Check what was classified
         hole_count = len(pp.holes) if hasattr(pp, 'holes') else 0
@@ -8552,8 +8555,10 @@ def main():
         # Load and process DXF (shared logic)
         pp.load_dxf(args.input_dxf)
         pp.transform_coordinates(args.origin_corner, args.rotation)
-        pp.classify_holes()
+        # Perimeter first, then holes - see the tube branch above and the route in
+        # frc_cam_gui_app, which have always done it in this order.
         pp.identify_perimeter_and_pockets()
+        pp.classify_holes()
 
         # Call API to generate G-code
         base_name = os.path.splitext(os.path.basename(args.output_gcode))[0]
