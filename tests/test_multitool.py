@@ -2533,3 +2533,40 @@ class TestProfileOrderWithTabsLeftIn(unittest.TestCase):
         errors = tooling._validate_profile_order(self._job(self.NO_TABS))
         self.assertTrue(errors)
         self.assertIn('loose', ' '.join(errors))
+
+
+class TestSmallestToolUsesTheJobTolerance(unittest.TestCase):
+    """The survey loads with the smallest hole any tool could make, and a drill counts
+    for slightly less than its diameter because a hole a few thou UNDER the drill is a
+    stocking difference plan_drilled_holes resolves by snapping. That allowance read the
+    DEFAULT tolerance rather than the job's, so a job that had narrowed the tolerance
+    still surveyed as though it were wide - and one that widened it got no benefit.
+    """
+
+    def _job(self, tolerance):
+        return build_job(
+            tools=[Tool(1, '#10 drill', 0.1935, 2, type='drill'),
+                   Tool(2, '1/4 endmill', 0.25, 2)],
+            drill_size_tolerance=tolerance,
+            parts=[PartOps(dxf_path=make_hole_dxf(0.1935), name='p', operations=[
+                Operation('holes', 1), Operation('perimeter', 2)])])
+
+    def test_a_narrowed_tolerance_narrows_the_allowance(self):
+        self.assertAlmostEqual(self._job(0.001).smallest_tool_diameter,
+                               0.1935 - 0.001, places=6)
+
+    def test_a_widened_tolerance_widens_it(self):
+        self.assertAlmostEqual(self._job(0.020).smallest_tool_diameter,
+                               0.1935 - 0.020, places=6)
+
+    def test_the_default_is_unchanged(self):
+        self.assertAlmostEqual(
+            self._job(tooling.DEFAULT_DRILL_SIZE_TOLERANCE).smallest_tool_diameter,
+            0.1935 - tooling.DEFAULT_DRILL_SIZE_TOLERANCE, places=6)
+
+    def test_an_end_mill_gets_no_allowance(self):
+        job = build_job(
+            tools=[Tool(1, '1/4 endmill', 0.25, 2)], drill_size_tolerance=0.020,
+            parts=[PartOps(dxf_path=make_hole_dxf(0.5), name='p', operations=[
+                Operation('holes', 1), Operation('perimeter', 1)])])
+        self.assertAlmostEqual(job.smallest_tool_diameter, 0.25, places=6)

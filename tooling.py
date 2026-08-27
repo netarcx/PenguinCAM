@@ -627,7 +627,7 @@ class MultiToolJob:
         drill against a 0.196 in drawing was rejected as "hole too small for tool" before
         the snapping tolerance ever got a say.
         """
-        return min(t.diameter - (DEFAULT_DRILL_SIZE_TOLERANCE if t.type == 'drill' else 0.0)
+        return min(t.diameter - (self.drill_size_tolerance if t.type == 'drill' else 0.0)
                    for t in self.tools)
 
 
