@@ -29,6 +29,7 @@ from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
 # Local modules
+import dxf_geometry
 from dxf_geometry import entities_to_closed_paths, sample_spline
 from team_config import TeamConfig
 
@@ -1134,16 +1135,17 @@ class FRCPostProcessor:
         # Extract polylines and lines (boundaries/pockets)
         self.polylines = []
         
-        # Method 1: Look for LWPOLYLINE entities
+        # Method 1: Look for LWPOLYLINE entities. polyline_points flattens any bulge
+        # arcs - without it a slot with semicircular ends loaded as a rectangle.
         for entity in msp.query('LWPOLYLINE'):
-            points = [(p[0], p[1]) for p in entity.get_points('xy')]
+            points = dxf_geometry.polyline_points(entity)
             if entity.closed and len(points) > 2:
                 self.polylines.append(points)
-        
+
         # Method 2: Look for POLYLINE entities
         for entity in msp.query('POLYLINE'):
             if entity.is_2d_polyline:
-                points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                points = dxf_geometry.polyline_points(entity)
                 if entity.is_closed and len(points) > 2:
                     self.polylines.append(points)
         
@@ -1232,8 +1234,9 @@ class FRCPostProcessor:
                         # Each HATCH has multiple boundary paths
                         for path in entity.paths:
                             if hasattr(path, 'vertices') and path.vertices:
-                                # Polyline path
-                                coords = [(v[0], v[1]) for v in path.vertices]
+                                # Polyline path, bulge arcs flattened - a HATCH vertex
+                                # carries a bulge just as an LWPOLYLINE one does.
+                                coords = dxf_geometry.hatch_path_points(path)
                                 if len(coords) >= 3:
                                     # Circular boundaries are holes, not pockets -
                                     # recover them as circles so the hole classifier
@@ -1264,13 +1267,13 @@ class FRCPostProcessor:
                 # Extract polylines from this layer (same logic as single-layer)
                 for entity in msp.query('LWPOLYLINE'):
                     if entity.dxf.layer == layer_name:
-                        points = [(p[0], p[1]) for p in entity.get_points('xy')]
+                        points = dxf_geometry.polyline_points(entity)
                         if entity.closed and len(points) > 2:
                             layer_polylines.append(points)
 
                 for entity in msp.query('POLYLINE'):
                     if entity.is_2d_polyline and entity.dxf.layer == layer_name:
-                        points = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+                        points = dxf_geometry.polyline_points(entity)
                         if entity.is_closed and len(points) > 2:
                             layer_polylines.append(points)
 
