@@ -93,6 +93,19 @@ DEFAULT_DRILL_SIZE_TOLERANCE = 0.010
 MAX_OPERATIONS_PER_JOB = 120
 MAX_PARTS_PER_JOB = 60
 
+#: How close a drill must be to the correct TAP drill to count as it. Independent of
+#: the clearance-snap tolerance above, and much tighter, because a tap drill is not a
+#: size you round to: at +/-0.010 a 10-32 accepted #25 (0.1495) through #19 (0.1660),
+#: five drill sizes. The wrong end strips the threads; the other end breaks the tap.
+#: drill_sizes.tap_drill_for already works to 0.002, so acceptance matches it.
+TAP_DRILL_TOLERANCE = 0.002
+
+#: The most a per-operation or job-level `size_tolerance` may widen tap acceptance to.
+#: Widening the CLEARANCE tolerance is legitimate - a shop stocking fractional drills
+#: only genuinely substitutes across a few thou - but the same number must not be
+#: allowed to loosen a tap drill into the next thread's size.
+MAX_TAP_DRILL_TOLERANCE = 0.003
+
 #: Beyond this the difference between the drawn hole and the drill is big enough to
 #: matter to whatever goes through it, so it is called out with the consequence even
 #: when the configured tolerance allows it. Half a 64th.
@@ -1203,6 +1216,9 @@ def plan_drilled_holes(op: Operation, tool: Tool, holes: Sequence[Dict[str, Any]
         return planned, notes, errors
 
     if purpose == drill_sizes.PURPOSE_TAP:
+        # Tap acceptance has its OWN tolerance, and a widened clearance tolerance may
+        # only loosen it as far as MAX_TAP_DRILL_TOLERANCE.
+        tap_tolerance = min(max(tolerance, TAP_DRILL_TOLERANCE), MAX_TAP_DRILL_TOLERANCE)
         for hole in holes:
             drawn = hole['diameter']
             advice = drill_sizes.tap_drill_for(drawn)
@@ -1213,7 +1229,7 @@ def plan_drilled_holes(op: Operation, tool: Tool, holes: Sequence[Dict[str, Any]
                     f"clearance hole, or draw the hole at the tap drill size directly.")
                 continue
             sizes = [d.diameter for d in advice['tap_drills'] if d]
-            if not any(abs(size - tool.diameter) <= tolerance for size in sizes):
+            if not any(abs(size - tool.diameter) <= tap_tolerance for size in sizes):
                 wanted = ', '.join(d.describe() for d in advice['tap_drills'] if d)
                 errors.append(
                     f"{op.label}: to tap {'/'.join(advice['threads'])} at {drawn:.4f} in "

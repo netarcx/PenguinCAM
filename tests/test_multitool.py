@@ -2360,3 +2360,62 @@ class TestSpindleSpeedFollowsTheOperation(unittest.TestCase):
         speeds = [l for l in result.gcode.splitlines()
                   if re.match(r'^S\d+', l.split(';')[0].strip())]
         self.assertEqual(len(speeds), 1, speeds)
+
+
+class TestTapDrillTolerance(unittest.TestCase):
+    """A tap drill is not a size you round to.
+
+    Tap acceptance shared the clearance-snap tolerance, and at +/-0.010 a 10-32 accepted
+    #25 (0.1495) through #19 (0.1660) - five drill sizes. The wrong end strips the
+    threads, the other end breaks the tap. drill_sizes.tap_drill_for itself works to
+    0.002; acceptance now matches it, and the job-level drill_size_tolerance - which is
+    legitimately widened by shops that stock fractional drills only - cannot widen tap
+    acceptance past 0.003.
+    """
+
+    #: 10-32: nominal 0.1900, tap drill #21 = 0.1590.
+    TEN_THIRTYTWO = 0.1900
+
+    def _plan(self, drill, tolerance=None):
+        scope = {'purpose': 'tap'}
+        if tolerance is not None:
+            scope['size_tolerance'] = tolerance
+        job = drill_job(self.TEN_THIRTYTWO, drill, **scope)
+        with redirect_stdout(io.StringIO()):
+            return tooling.generate_multitool_job(job, timestamp='2026-08-20 12:00:00')
+
+    def test_the_right_tap_drills_are_accepted(self):
+        # 0.190 is the nominal of BOTH 10-24 and 10-32, so #25 and #21 are each
+        # correct for one of them; the note says which and flags the ambiguity.
+        for drill, name in ((0.1590, '#21'), (0.1495, '#25')):
+            with self.subTest(drill=name):
+                result = self._plan(drill)
+                self.assertTrue(result.success, result.errors)
+                self.assertTrue(any('TAP DRILL' in w for w in result.warnings),
+                                result.warnings)
+
+    def test_a_drill_that_is_no_thread_s_tap_drill_is_refused(self):
+        # Both sit inside the old +/-0.010 window around #21 or #25 and are neither.
+        for drill, name in ((0.1660, '#19'), (0.1540, '#23')):
+            with self.subTest(drill=name):
+                result = self._plan(drill)
+                self.assertFalse(result.success,
+                                 f'{name} was accepted as a 10-32/10-24 tap drill')
+                self.assertTrue(any('tap' in e.lower() for e in result.errors),
+                                result.errors)
+
+    def test_a_widened_job_tolerance_cannot_widen_tap_acceptance(self):
+        """0.010 is a legitimate CLEARANCE tolerance. It is not a tap tolerance."""
+        result = self._plan(0.1660, tolerance=0.010)
+        self.assertFalse(result.success, 'a widened tolerance let #19 through')
+
+    def test_the_tap_tolerance_constant_is_tight(self):
+        self.assertLessEqual(tooling.TAP_DRILL_TOLERANCE, 0.002)
+        self.assertLessEqual(tooling.MAX_TAP_DRILL_TOLERANCE, 0.003)
+
+    def test_clearance_holes_keep_their_wider_tolerance(self):
+        """The snap tolerance exists for a reason and this must not narrow it."""
+        job = drill_job(0.1960, 0.1935, purpose='clearance', size_tolerance=0.010)
+        with redirect_stdout(io.StringIO()):
+            result = tooling.generate_multitool_job(job, timestamp='2026-08-20 12:00:00')
+        self.assertTrue(result.success, result.errors)
