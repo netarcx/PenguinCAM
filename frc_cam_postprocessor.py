@@ -405,7 +405,8 @@ class FRCPostProcessor:
         self.tabs_enabled = config.tabs_enabled  # Whether tabs are enabled
         self.tab_width = config.tab_width  # Width of tabs (inches)
         self.tab_height = config.tab_height  # How much material to leave in tab (inches)
-        self.tab_spacing = config.tab_spacing  # Desired spacing between tabs (inches)
+        # Config states the spacing in inches; a mm program was placing a tab every 2 mm.
+        self.tab_spacing = self._len(config.tab_spacing)
 
         # Fixturing preferences from config
         self.pause_before_perimeter = config.pause_before_perimeter  # Pause before perimeter for screw fixturing
@@ -2617,6 +2618,43 @@ class FRCPostProcessor:
     # all three together - and the two datums then differ by exactly the stock
     # thickness, move for move (tests/test_unit.py asserts that).
 
+    def _len(self, inches: float) -> float:
+        """A length written in inches, in whatever units this program works in.
+
+        Feeds and several preset lengths were already converted for millimetre mode, but
+        a handful of Z-frame constants were used verbatim - and read as millimetres they
+        are absurd: 0.5 mm of traverse clearance over the stock, a 0.008 mm through-cut
+        overcut (the part stays attached), 0.1 mm of peck chip-clearance. Every inch
+        literal that is a LENGTH goes through here.
+        """
+        return inches * 25.4 if self.units == 'mm' else inches
+
+    #: How far above the last peck the tool rapids back to before cutting again. Enough
+    #: to clear chips left in the flute, small enough not to waste the cycle. Inches.
+    PECK_RETURN_CLEARANCE_IN = 0.02
+
+    #: Chip-clearing retract for a drilled hole: just above the stock, not the full safe
+    #: height - retracting to safe Z between every peck spends the cycle in rapids.
+    DRILL_RETRACT_CLEARANCE_IN = 0.1
+
+    #: Where a spot drill rapids down to before its feed move. Inches.
+    SPOT_APPROACH_CLEARANCE_IN = 0.05
+
+    #: Extra room a dry run leaves above the stock, over and above the clearance height.
+    DRY_RUN_EXTRA_CLEARANCE_IN = 0.25
+
+    @property
+    def peck_return_clearance(self) -> float:
+        return self._len(self.PECK_RETURN_CLEARANCE_IN)
+
+    @property
+    def drill_retract_clearance(self) -> float:
+        return self._len(self.DRILL_RETRACT_CLEARANCE_IN)
+
+    @property
+    def spot_approach_clearance(self) -> float:
+        return self._len(self.SPOT_APPROACH_CLEARANCE_IN)
+
     def _apply_z_frame(self):
         """Place material_top / retract_height / cut_depth for the current datum and
         stock thickness. Called from __init__ and again whenever the thickness or the
@@ -2626,14 +2664,19 @@ class FRCPostProcessor:
         # non-rotating end mill fed through plywood at 50 ipm, under a banner
         # promising the program does not cut anything. The requested lift is a
         # minimum; the stock decides the rest.
+        # The config states these in inches whatever the program's units are, so they
+        # are converted here rather than at every use.
+        clearance = self._len(self.clearance_height)
+        overcut = self._len(self.sacrifice_board_depth)
         self.dry_run_lift = (max(self.dry_run_request,
-                                 self.material_thickness + self.clearance_height + 0.25)
+                                 self.material_thickness + clearance
+                                 + self._len(self.DRY_RUN_EXTRA_CLEARANCE_IN))
                              if self.dry_run_request else 0.0)
         top = 0.0 if self.z_datum == Z_DATUM_STOCK_TOP else self.material_thickness
         top += self.dry_run_lift          # 0 for a real program
         self.material_top = top                                  # top face of the stock
-        self.retract_height = top + self.clearance_height        # rapid height over it
-        self.cut_depth = top - self.material_thickness - self.sacrifice_board_depth
+        self.retract_height = top + clearance                    # rapid height over it
+        self.cut_depth = top - self.material_thickness - overcut
 
     @property
     def stock_bottom(self) -> float:
@@ -2817,7 +2860,7 @@ class FRCPostProcessor:
         on any part with a central bearing bore.
         """
         poly = Polygon(self.perimeter)
-        margin = self.tool_radius + 0.05
+        margin = self.tool_radius + self._len(0.05)
         area = poly.buffer(-margin)
         if area.is_empty:
             return area
@@ -4113,10 +4156,6 @@ class FRCPostProcessor:
         half_angle = math.radians(max(1.0, min(179.0, point_angle)) / 2.0)
         return (diameter / 2.0) / math.tan(half_angle)
 
-    #: How far above the last peck the tool rapids back to before cutting again. Enough
-    #: to clear chips left in the flute, small enough not to waste the cycle.
-    PECK_RETURN_CLEARANCE = 0.02
-
     def _emit_peck_cycle(self, gcode: List[str], cx: float, cy: float,
                          final_depth: float, retract_plane: float,
                          peck_depth: float, feed: float) -> None:
@@ -4151,7 +4190,7 @@ class FRCPostProcessor:
             if previous < retract_plane:
                 # Coming back after a chip-clearing retract: rapid down to just above
                 # where the last peck stopped, then cut from there.
-                gcode.append(f"G0 Z{previous + self.PECK_RETURN_CLEARANCE:.4f}  "
+                gcode.append(f"G0 Z{previous + self.peck_return_clearance:.4f}  "
                              f"; Rapid back to just above the last peck")
             gcode.append(f"G1 Z{target:.4f} F{feed:.1f}  ; Peck {peck} of {pecks}")
             if peck < pecks:
@@ -4173,7 +4212,7 @@ class FRCPostProcessor:
 
         # Chip-clearing retract: just above the stock, not the full safe height - a G83
         # that retracts to safe Z between every peck spends the whole cycle in rapids.
-        retract_plane = self.material_top + 0.1
+        retract_plane = self.material_top + self.drill_retract_clearance
         if through:
             final_depth = self.cut_depth - point
             note = (f"(Through hole: {self.material_thickness:.4f} in stock plus "
@@ -4245,7 +4284,8 @@ class FRCPostProcessor:
         target = self.material_top - depth
         return [
             f"G0 X{cx:.4f} Y{cy:.4f}  ; Rapid over hole centre",
-            f"G0 Z{self.material_top + 0.05:.4f}  ; Down to just above the stock",
+            f"G0 Z{self.material_top + self.spot_approach_clearance:.4f}  "
+            f"; Down to just above the stock",
             f"G1 Z{target:.4f} F{self.plunge_rate:.1f}  ; Spot",
             f"G0 Z{self.retract_height:.4f}  ; Retract",
         ]
@@ -4267,7 +4307,8 @@ class FRCPostProcessor:
 
         # Peck drilling parameters (from material settings)
         peck_depth = self.peck_drill_depth
-        retract_plane = self.material_top + 0.1  # 0.1" above stock for chip clearing (not full retract)
+        # Just above the stock for chip clearing, not a full retract.
+        retract_plane = self.material_top + self.drill_retract_clearance
         final_depth = self.cut_depth  # Bottom of cut (negative value)
 
         # A hole at (essentially) the tool diameter has no material to clear beyond the

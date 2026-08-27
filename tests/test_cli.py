@@ -100,5 +100,81 @@ class TestTubeModesAreInchOnly(unittest.TestCase):
         self.assertIn(code, (None, 0), text[-800:])
 
 
+
+class TestMillimetreZFrame(unittest.TestCase):
+    """In mm mode the feeds are converted and some preset lengths are, but a handful of
+    inch constants in the Z frame were used verbatim. The numbers that came out are
+    absurd once you read them as millimetres: 0.5 mm of traverse clearance over the
+    stock, a 0.008 mm through-cut overcut (the part stays attached), 0.1 mm of peck
+    chip-clearance, tabs every 2 mm.
+    """
+
+    def _pp(self, units, thickness):
+        with contextlib.redirect_stdout(io.StringIO()):
+            pp = frc_cam_postprocessor.FRCPostProcessor(thickness, 4.0 if units == 'mm'
+                                                        else 0.157, units=units)
+            pp.apply_material_preset('plywood')
+        return pp
+
+    def test_clearance_and_overcut_scale(self):
+        inch = self._pp('inch', 0.25)
+        mm = self._pp('mm', 6.35)
+        self.assertAlmostEqual(mm.retract_height - mm.material_top,
+                               (inch.retract_height - inch.material_top) * 25.4,
+                               places=4)
+        self.assertGreaterEqual(mm.retract_height - mm.material_top, 12.0)
+        overcut = mm.stock_bottom - mm.cut_depth
+        self.assertAlmostEqual(overcut,
+                               (inch.stock_bottom - inch.cut_depth) * 25.4, places=4)
+        self.assertGreaterEqual(overcut, 0.15)
+
+    def test_peck_return_clearance_scales(self):
+        mm = self._pp('mm', 6.35)
+        self.assertAlmostEqual(mm.peck_return_clearance, 0.02 * 25.4, places=4)
+        self.assertGreaterEqual(mm.peck_return_clearance, 0.5)
+
+    def test_tab_spacing_scales(self):
+        inch = self._pp('inch', 0.25)
+        mm = self._pp('mm', 6.35)
+        self.assertAlmostEqual(mm.tab_spacing, inch.tab_spacing * 25.4, places=4)
+        self.assertGreater(mm.tab_spacing, 100.0)
+
+    def test_drill_chip_clearance_planes_scale(self):
+        inch = self._pp('inch', 0.25)
+        mm = self._pp('mm', 6.35)
+        self.assertAlmostEqual(mm.drill_retract_clearance,
+                               inch.drill_retract_clearance * 25.4, places=4)
+        self.assertGreaterEqual(mm.drill_retract_clearance, 2.0)
+        self.assertAlmostEqual(mm.spot_approach_clearance,
+                               inch.spot_approach_clearance * 25.4, places=4)
+        self.assertGreaterEqual(mm.spot_approach_clearance, 1.0)
+
+    def test_a_mm_program_retracts_and_overcuts_properly(self):
+        tmp = tempfile.mkdtemp(prefix='mmz_')
+        try:
+            dxf = plate_dxf(os.path.join(tmp, 'p.dxf'), holes=[(10.0, 7.0, 5.0)],
+                            size=(20.0, 15.0))
+            with contextlib.redirect_stdout(io.StringIO()):
+                pp = frc_cam_postprocessor.FRCPostProcessor(6.35, 4.0, units='mm')
+                pp.apply_material_preset('plywood')
+                pp.load_dxf(dxf)
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                result = pp.generate_gcode(timestamp='2026-08-27 12:00')
+            self.assertTrue(result.success, result.errors)
+            self.assertGreaterEqual(pp.retract_height, pp.material_top + 12.0)
+            self.assertGreaterEqual(pp.stock_bottom - pp.cut_depth, 0.15)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_inch_mode_is_untouched(self):
+        inch = self._pp('inch', 0.25)
+        self.assertAlmostEqual(inch.retract_height - inch.material_top, 0.5)
+        self.assertAlmostEqual(inch.stock_bottom - inch.cut_depth, 0.008)
+        self.assertAlmostEqual(inch.peck_return_clearance, 0.02)
+
+
 if __name__ == '__main__':
     unittest.main()
