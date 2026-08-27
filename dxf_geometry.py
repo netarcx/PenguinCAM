@@ -151,7 +151,8 @@ def hatch_path_points(path, distance=CHORD_TOLERANCE):
 
 
 def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylines=(),
-                             snap=0.001, close_tolerance=0.1, on_open_loop=None):
+                             snap=0.001, close_tolerance=0.1, on_open_loop=None,
+                             on_welded_gap=None):
     """Sample and stitch open DXF entities into closed boundary paths.
 
     Shared endpoints in a CAD export land sub-micron apart, so exact-match stitching
@@ -167,6 +168,9 @@ def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylin
         on_open_loop: optional callback(coords, gap) invoked for a merged chain that did
             NOT close - lets callers warn about a dropped boundary loop (e.g. a lost
             perimeter) instead of silently discarding it.
+        on_welded_gap: optional callback(coords, gap) invoked for a chain that DID close,
+            but only because the gap was bridged. Closing a real gap moves an edge; the
+            caller decides how big a bridge is worth mentioning.
 
     Returns:
         List of closed paths, each a list of (x, y) points (no duplicated closing point).
@@ -211,6 +215,8 @@ def entities_to_closed_paths(lines=(), arcs=(), ellipses=(), splines=(), polylin
             if coords[0] == coords[-1]:
                 coords = coords[:-1]
             closed_paths.append(coords)
+            if gap > 0 and on_welded_gap is not None:
+                on_welded_gap(coords, gap)
         elif on_open_loop is not None:
             on_open_loop(coords, gap)
     return closed_paths

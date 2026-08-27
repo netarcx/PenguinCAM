@@ -423,6 +423,12 @@ class FRCPostProcessor:
         # refuses the program. A skipped engraving is the case that needs it: silence
         # would leave an operator expecting a label that is not there.
         self.warnings = []
+        # Advice from reading the DXF (an unclosed outline, a bridged gap). Separate
+        # from self.warnings because that one is cleared at generation time.
+        self.geometry_warnings = []
+        #: Chains that did not close, so identify_perimeter_and_pockets can tell a lost
+        #: outer profile from a stray line.
+        self.open_chains = []
 
         # Tube facing parameters
         self.tube_facing_offset = 0.0625  # Hole offset to align with faced surface at Y=+1/16" (inches)
@@ -1099,6 +1105,10 @@ class FRCPostProcessor:
     def load_dxf(self, filename: str):
         """Load DXF file and extract geometry, organized by layer if multi-layer DXF"""
         print(f"Loading {filename}...")
+        # Advice raised while READING the drawing, kept apart from self.warnings, which
+        # every generate_* entry point clears before it builds a toolpath.
+        self.geometry_warnings = []
+        self.open_chains = []
         doc = ezdxf.readfile(filename)
         msp = doc.modelspace()
 
@@ -1336,13 +1346,40 @@ class FRCPostProcessor:
                 self._apply_z_frame()
                 print(f"  Derived stock thickness from CAD layers: {max_depth:.4f}\"")
 
+    #: A bridged gap bigger than this moves a real edge, so the operator hears about it.
+    #: Below it, the difference is CAD endpoint noise and saying so would be chatter.
+    GAP_REPORT_THRESHOLD = 0.02
+
     def _chain_entities_to_paths(self, lines, arcs, splines, unclosed_polylines=None, ellipses=None):
         """Stitch individual LINE/ARC/ELLIPSE/SPLINE and unclosed LWPOLYLINE entities into
         closed boundary paths. Delegates to the shared dxf_geometry stitcher (also used by
-        the 2.5D DXF reconstruction) so sampling + stitching live in exactly one place."""
+        the 2.5D DXF reconstruction) so sampling + stitching live in exactly one place.
+
+        A chain that does NOT close is recorded rather than dropped in silence. That
+        silence is what let a part with an unclosed outer profile promote its biggest
+        POCKET to perimeter and profile through the middle of the part, with tabs.
+        """
+        def note_open(coords, gap):
+            self.open_chains.append({'coords': coords, 'gap': gap})
+            start, end = coords[0], coords[-1]
+            self.geometry_warnings.append(
+                f'A boundary in the drawing does not close: a {gap:.4f}" gap between '
+                f'({start[0]:.3f}, {start[1]:.3f}) and ({end[0]:.3f}, {end[1]:.3f}). '
+                f'That outline was not machined.')
+
+        def note_weld(coords, gap):
+            if gap <= self.GAP_REPORT_THRESHOLD:
+                return
+            start = coords[0]
+            self.geometry_warnings.append(
+                f'A boundary was closed across a {gap:.4f}" gap near '
+                f'({start[0]:.3f}, {start[1]:.3f}). The cut edge there is PenguinCAM\'s '
+                f'straight line, not something you drew.')
+
         return entities_to_closed_paths(
             lines=lines, arcs=arcs, ellipses=ellipses or [],
-            splines=splines, polylines=unclosed_polylines or [])
+            splines=splines, polylines=unclosed_polylines or [],
+            on_open_loop=note_open, on_welded_gap=note_weld)
 
     def _mirror_geometry_x(self):
         """Mirror all loaded geometry across the X axis (x -> -x), for a part 'flipped
@@ -2161,8 +2198,45 @@ class FRCPostProcessor:
 
         print(f"\nIdentified perimeter and {len(self.pockets)} pockets")
 
+        self._check_open_chains_against_perimeter(candidate_perimeter)
+
         # Sort pockets to minimize travel time
         self._sort_pockets()
+
+    def _check_open_chains_against_perimeter(self, perimeter_points) -> None:
+        """Refuse the part when a DROPPED chain is bigger than the perimeter we chose.
+
+        An outer profile that fails to close is discarded, and the biggest remaining
+        closed loop - a POCKET - gets promoted to perimeter. The program then profiles
+        through the middle of the part, with tabs, and looks perfectly ordinary. The
+        signature is unmistakable: something we threw away was larger than the outline
+        we kept. A smaller open chain is a stray line and only earns the warning it
+        already has.
+        """
+        if not getattr(self, 'open_chains', None) or not perimeter_points:
+            return
+
+        def extents(points):
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            return (max(xs) - min(xs), max(ys) - min(ys))
+
+        perimeter_w, perimeter_h = extents(perimeter_points)
+        for chain in self.open_chains:
+            coords = chain['coords']
+            if len(coords) < 2:
+                continue
+            width, height = extents(coords)
+            if width * height <= perimeter_w * perimeter_h + 1e-6:
+                continue
+            start, end = coords[0], coords[-1]
+            self._add_error(
+                f'The outer profile did not close: a {chain["gap"]:.4f}" gap between '
+                f'({start[0]:.3f}, {start[1]:.3f}) and ({end[0]:.3f}, {end[1]:.3f}). '
+                f'That outline is bigger than the boundary PenguinCAM would otherwise '
+                f'profile, so the program would cut through the middle of the part. '
+                f'Close the outline in CAD and export again.')
+            return
 
     def _generate_interior_gcode(self, emit_contour_pauses: bool) -> List[str]:
         """Generate the interior-feature toolpath (holes + pockets) for this part.
@@ -2444,7 +2518,9 @@ class FRCPostProcessor:
             success=True,
             gcode='\n'.join(gcode),
             filename=filename,
-            warnings=warnings + [w for w in self.warnings if w not in warnings],
+            warnings=(warnings
+                      + [w for w in self.geometry_warnings if w not in warnings]
+                      + [w for w in self.warnings if w not in warnings]),
             stats={
                 'num_holes': len(self.holes) if hasattr(self, 'holes') else 0,
                 'num_pockets': len(self.pockets) if hasattr(self, 'pockets') else 0,
@@ -2526,7 +2602,7 @@ class FRCPostProcessor:
 
         return {'interior': interior, 'perimeter': perimeter, 'chamfer': chamfer,
                 'tab_removal': tab_removal, 'errors': list(self.errors),
-                'warnings': list(self.warnings)}
+                'warnings': list(self.geometry_warnings) + list(self.warnings)}
 
     # ---- Portability helpers: work-coordinate safe moves + optional coolant/park -------
     # Everything below emits G54 work-coordinate G-code by default. Machine-coordinate

@@ -299,5 +299,91 @@ class TestCircleClassification(unittest.TestCase):
                     self.assertAlmostEqual(found['diameter'], 1.0, delta=0.05)
 
 
+
+def gapped_outline(path, gap, size=(4.0, 3.0), pocket=True):
+    """A rectangle drawn as four LINEs with `gap` missing from one side, plus an inner
+    closed pocket. This is how a CAD export loses an outer profile: one edge short."""
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
+    w, h = size
+    msp.add_line((0, 0), (w, 0))
+    msp.add_line((w, 0), (w, h))
+    msp.add_line((w, h), (gap, h))          # short by `gap`
+    msp.add_line((0, h), (0, 0))
+    if pocket:
+        msp.add_lwpolyline([(1, 1), (3, 1), (3, 2), (1, 2)], close=True)
+    doc.saveas(path)
+    return path
+
+
+class TestOpenOutlines(unittest.TestCase):
+    """An outer profile that does not close is not a cosmetic problem.
+
+    The chain was dropped in silence, the biggest remaining closed loop - the POCKET -
+    was promoted to perimeter, and the program profiled through the middle of the part
+    with tabs. And a gap under the 0.1" closing tolerance was welded shut with no word
+    either, quietly moving an edge.
+    """
+
+    def _load(self, gap, **kwargs):
+        path = tempfile.mktemp(suffix='.dxf')
+        gapped_outline(path, gap, **kwargs)
+        try:
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(0.25, 0.157)
+                pp.apply_material_preset('plywood')
+                pp.load_dxf(path)
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                result = pp.generate_gcode(timestamp='2026-08-27 12:00')
+            return pp, result
+        finally:
+            os.remove(path)
+
+    def test_a_lost_outer_profile_is_a_hard_error(self):
+        pp, result = self._load(0.15)
+        self.assertFalse(result.success,
+                         'the pocket was promoted to perimeter and a program shipped')
+        joined = ' '.join(result.errors)
+        self.assertIn('0.15', joined)
+        self.assertTrue('close' in joined.lower() or 'gap' in joined.lower(), joined)
+
+    def test_a_welded_gap_is_reported(self):
+        pp, result = self._load(0.08)
+        self.assertTrue(result.success, result.errors)
+        joined = ' '.join(result.warnings)
+        self.assertIn('0.08', joined)
+
+    def test_a_tight_gap_stays_quiet(self):
+        """CAD endpoints land microns apart. That is not news."""
+        pp, result = self._load(0.005)
+        self.assertTrue(result.success, result.errors)
+        self.assertFalse([w for w in result.warnings if 'gap' in w.lower()],
+                         result.warnings)
+
+    def test_a_stray_open_chain_does_not_block_a_good_part(self):
+        """An open chain SMALLER than the perimeter is a stray line, not a lost
+        outline. Warn about it; do not refuse the part."""
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (4, 0), (4, 3), (0, 3)], close=True)
+        msp.add_line((1, 1), (2, 1))        # a stray, going nowhere
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        try:
+            with redirect_stdout(io.StringIO()):
+                pp = FRCPostProcessor(0.25, 0.157)
+                pp.apply_material_preset('plywood')
+                pp.load_dxf(path)
+                pp.transform_coordinates('bottom-left', 0)
+                pp.identify_perimeter_and_pockets()
+                pp.classify_holes()
+                result = pp.generate_gcode(timestamp='2026-08-27 12:00')
+            self.assertTrue(result.success, result.errors)
+        finally:
+            os.remove(path)
+
+
 if __name__ == '__main__':
     unittest.main()
