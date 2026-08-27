@@ -7000,7 +7000,27 @@ class FRCPostProcessor:
 
         Returns:
             PostProcessorResult with gcode string and stats
+
+        Raises:
+            ValueError: when the tube height or wall thickness is not physical.
         """
+        # The whole Z frame here is built from these two: the face-2 toolpath is lifted by
+        # (tube_height - wall thickness) and facing cuts to just over half the height. A
+        # wall thicker than half the tube therefore puts the cut through the far wall and
+        # into the jig, and a non-finite height crashed deeper in with an AttributeError
+        # from the coordinate rewriter. Only the Flask route checked this, so the CLI and
+        # any future caller had no guard at all. The route keeps its friendlier wording.
+        if not math.isfinite(tube_height) or tube_height <= 0:
+            raise ValueError(
+                f'Tube height must be a positive, finite number of inches, '
+                f'got {tube_height!r}.')
+        wall = self.material_thickness
+        if not math.isfinite(wall) or not 0 < wall < tube_height / 2:
+            raise ValueError(
+                f'The tube wall thickness ({wall!r} in) must be positive and less than '
+                f'half the {tube_height:.3f} in tube height. Anything thicker and the '
+                f'toolpath goes through the far wall into the jig.')
+
         self._force_board_datum_for_tube()
         # The second face is machined from a processor of its own, built by the caller -
         # so forcing the datum on `self` alone left face 2 on whatever the team config

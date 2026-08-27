@@ -516,5 +516,49 @@ class TestTubeFacingToolEdgePositions(unittest.TestCase):
         self.assertAlmostEqual(phase2_finishing_edge, 0.0, places=3)
 
 
+
+class TestTubeWallHeightGuard(unittest.TestCase):
+    """Only the Flask route checked that the wall is thinner than half the tube.
+
+    The generator's own Z arithmetic depends on it - the face-2 lift is
+    (tube_height - wall thickness), and facing cuts to just over half the height - so a
+    wall thicker than half the tube puts the toolpath through the far wall and into the
+    jig. The route keeps its friendlier message; this guard covers the CLI and any
+    future caller.
+    """
+
+    def _generate(self, tube_height, wall):
+        pp = FRCPostProcessor(wall, 0.157)
+        pp.apply_material_preset('aluminum_tube')
+        pp.tube_height = tube_height
+        pp.load_tube_pattern(2.0, 12.0, mode='lightening')
+        return pp.generate_tube_pattern_gcode(
+            tube_height=tube_height, square_end=False, cut_to_length=False,
+            tube_width=2.0, tube_length=12.0, timestamp='2026-08-27 12:00')
+
+    def test_a_wall_thicker_than_half_the_tube_is_refused(self):
+        for height, wall in ((1.0, 0.5), (1.0, 0.75), (1.0, 2.0)):
+            with self.subTest(height=height, wall=wall):
+                with self.assertRaises(ValueError) as caught:
+                    self._generate(height, wall)
+                self.assertIn('wall', str(caught.exception).lower())
+
+    def test_a_non_physical_height_is_refused(self):
+        for height in (0.0, -1.0, float('nan'), float('inf')):
+            with self.subTest(height=height):
+                with self.assertRaises(ValueError):
+                    self._generate(height, 0.0625)
+
+    def test_a_non_physical_wall_is_refused(self):
+        for wall in (0.0, -0.0625, float('nan')):
+            with self.subTest(wall=wall):
+                with self.assertRaises(ValueError):
+                    self._generate(1.0, wall)
+
+    def test_an_ordinary_tube_still_generates(self):
+        result = self._generate(1.0, 0.0625)
+        self.assertTrue(result.success, result.errors)
+
+
 if __name__ == '__main__':
     unittest.main()
