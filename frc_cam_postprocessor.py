@@ -5195,6 +5195,17 @@ class FRCPostProcessor:
 
         gcode.append(f"(Contour-parallel clearing: {len(contours)} offset passes)")
 
+        # Every link between rings, and onto the final boundary trace, goes through the
+        # SAME guard the plain pocket path uses: a straight feed only when the link stays
+        # inside the already-cleared region, otherwise retract, rapid over, ramp back
+        # down. Without it the tool fed in a straight line at full depth from wherever it
+        # was to the next ring's start - and with an island between them, straight
+        # through it. Only circular islands were diverted (to the spiral clearer), so a
+        # rectangular one was gouged.
+        link_tol = 1e-4
+        final_cut_z = ramp_start_height - num_helical_passes * depth_per_pass
+        cur_pos = (entry_x, entry_y)
+
         # Cut contours from outside-in
         pass_number = 0
         for contour_geom in reversed(contours):
@@ -5211,37 +5222,37 @@ class FRCPostProcessor:
 
                 # Canonical orientation (exterior CCW) = climb milling for interior pockets.
                 poly_to_cut = orient(poly_to_cut, 1.0)
-                contour_coords = list(poly_to_cut.exterior.coords)
+                contour_coords = list(poly_to_cut.exterior.coords)[:-1]
                 if len(contour_coords) < 3:
                     continue
 
                 pass_number += 1
                 gcode.append(f"(Contour pass {pass_number})")
-
-                gcode.append(f"G1 X{contour_coords[0][0]:.4f} Y{contour_coords[0][1]:.4f} F{self.feed_rate}")
-                for point in contour_coords[1:]:
-                    gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
+                cur_pos = self._link_and_cut_ring(gcode, contour_coords, cur_pos,
+                                                  offset_poly, ramp_start_height,
+                                                  final_cut_z, link_tol)
 
         # Final pass - trace tool-compensated boundary (exterior + interiors). Canonical
         # orientation makes the exterior CCW (climb around the pocket wall) and interiors CW
         # (climb around any island), matching the CCW hole/helical toolpaths.
         if isinstance(offset_poly, Polygon):
             offset_poly = orient(offset_poly, 1.0)
-        exterior_coords = list(offset_poly.exterior.coords)[:-1]
+        exterior_coords = (list(offset_poly.exterior.coords)[:-1]
+                           if hasattr(offset_poly, 'exterior') else [])
         if len(exterior_coords) >= 3:
             pass_number += 1
             gcode.append(f"(Contour pass {pass_number} - final outer perimeter)")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
-            for point in exterior_coords[1:]:
-                gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
+            cur_pos = self._link_and_cut_ring(gcode, exterior_coords, cur_pos,
+                                              offset_poly, ramp_start_height,
+                                              final_cut_z, link_tol)
 
             # Spring pass: re-trace the exterior at zero stepover to relieve
-            # tool deflection.
+            # tool deflection. The tool is already on the ring.
             gcode.append(f"(Spring pass - compensate for tool deflection)")
-            for point in exterior_coords[1:]:
+            spring = self._reorder_closed_ring(exterior_coords, cur_pos)
+            for point in spring[1:]:
                 gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-            gcode.append(f"G1 X{exterior_coords[0][0]:.4f} Y{exterior_coords[0][1]:.4f} F{self.feed_rate}")
+            gcode.append(f"G1 X{spring[0][0]:.4f} Y{spring[0][1]:.4f} F{self.feed_rate}")
 
         # Also trace interior boundaries of the tool-compensated ring
         if hasattr(offset_poly, 'interiors'):
@@ -5250,16 +5261,16 @@ class FRCPostProcessor:
                 if len(interior_coords) >= 3:
                     pass_number += 1
                     gcode.append(f"(Contour pass {pass_number} - inner boundary)")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
-                    for point in interior_coords[1:]:
-                        gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
+                    cur_pos = self._link_and_cut_ring(gcode, interior_coords, cur_pos,
+                                                      offset_poly, ramp_start_height,
+                                                      final_cut_z, link_tol)
 
                     # Spring pass on this interior boundary.
                     gcode.append(f"(Spring pass - compensate for tool deflection)")
-                    for point in interior_coords[1:]:
+                    spring = self._reorder_closed_ring(interior_coords, cur_pos)
+                    for point in spring[1:]:
                         gcode.append(f"G1 X{point[0]:.4f} Y{point[1]:.4f} F{self.feed_rate}")
-                    gcode.append(f"G1 X{interior_coords[0][0]:.4f} Y{interior_coords[0][1]:.4f} F{self.feed_rate}")
+                    gcode.append(f"G1 X{spring[0][0]:.4f} Y{spring[0][1]:.4f} F{self.feed_rate}")
 
         # Retract
         gcode.append(f"G0 Z{self.retract_height:.4f}  ; Retract")

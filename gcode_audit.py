@@ -577,6 +577,60 @@ def check_standing_tabs(name, gcode):
             return
 
 
+def audit_island_pocket(name, outer, island, tool=0.25, thickness=0.25):
+    """Audit the island-aware pocket path: does anything cut through the island?
+
+    The pocket generator that handles islands linked its contour rings with a bare feed
+    move at full depth. Only CIRCULAR islands were diverted to the spiral clearer, so a
+    rectangular one was fed straight across. This drives the generator directly with a
+    known island and checks every cutting move against it - the audit cannot infer where
+    an island is from the G-code, so the geometry has to be supplied here.
+    """
+    from shapely.geometry import LineString, Polygon
+
+    global checked
+    checked += 1
+    with redirect_stdout(io.StringIO()):
+        pp = FRCPostProcessor(thickness, tool)
+        pp.apply_material_preset('plywood')
+        pp.material_top = thickness
+        pp.cut_depth = -0.008
+        lines = pp._generate_pocket_gcode_from_polygon(Polygon(outer, [island]))
+    if not lines:
+        fail(name, 'the island-aware pocket produced no toolpath')
+        return
+    check_text_rules(name, lines)
+
+    keep = Polygon(island).buffer(pp.tool_radius - 1e-3)
+    x = y = None
+    z = thickness + 1.0
+    previous = None
+    crossings = 0
+    first = ''
+    for raw in lines:
+        code = re.sub(r'\(.*?\)', '', raw.split(';')[0]).strip()
+        m = re.match(r'^(G0|G1|G2|G3)\b', code)
+        if not m:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        x, y, z = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        if (m.group(1) != 'G0' and previous is not None and None not in previous
+                and None not in (x, y) and min(previous[2], z) < pp.material_top - 1e-9
+                and keep.intersects(LineString([(previous[0], previous[1]), (x, y)]))):
+            crossings += 1
+            first = first or code
+        previous = (x, y, z)
+    if crossings:
+        fail(name, f'{crossings} cutting move(s) cross the island: {first[:60]}')
+
+    # ...and it still has to CLEAR the pocket, or "no gouges" is trivially satisfied.
+    xs = [float(v) for raw in lines
+          for v in re.findall(r'\bX(-?[\d.]+)', raw.split(';')[0])]
+    left, right = min(p[0] for p in island), max(p[0] for p in island)
+    if not any(v < left for v in xs) or not any(v > right for v in xs):
+        fail(name, 'the pocket was not cleared on both sides of the island')
+
+
 def max_lateral_engagement(gcode):
     """Independently measure the deepest bite any straight feed move takes.
 
@@ -1080,6 +1134,15 @@ def main():
     # here so the cross-section check has something real to prove.
     audit_tube('tube/1x1/thick-wall/facing+cut', 1.0, 12.0, 1.0, mode='lightening',
                tool=0.125, wall=0.125, square_end=True, cut_to_length=True)
+
+    # Pockets with a standing island, square and rectangular - the shapes the circular
+    # ring detector does NOT divert, and so the ones that were gouged.
+    audit_island_pocket('pocket/island/square',
+                        [(0, 0), (4, 0), (4, 3), (0, 3)],
+                        [(1.5, 1.0), (2.5, 1.0), (2.5, 2.0), (1.5, 2.0)])
+    audit_island_pocket('pocket/island/long',
+                        [(0, 0), (6, 0), (6, 3), (0, 3)],
+                        [(1.0, 1.2), (5.0, 1.2), (5.0, 1.8), (1.0, 1.8)], tool=0.157)
 
     # Custom designs: a mixed-size face (which no single drill could make), the same
     # design on a narrow face, and one that also squares the end - allowed here because
