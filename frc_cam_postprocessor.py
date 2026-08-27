@@ -4908,6 +4908,15 @@ class FRCPostProcessor:
 
         # Calculate helical entry parameters
         helix_radius = self.tool_radius * self.helix_radius_multiplier  # Helix radius from material preset
+
+        # A helical entry bores a hole of tool_radius + helix_radius from the centre, and
+        # a narrow pocket has nowhere to put it: in a 0.20" slot the preset radius on a
+        # 0.157" cutter swept 0.137 against a 0.100 half-width, cutting 0.037" into each
+        # wall before the toolpath proper began. Same clamp as the island-aware sibling.
+        max_helix_radius = offset_poly.boundary.distance(Point(entry_x, entry_y))
+        if helix_radius > max_helix_radius * 0.9:  # 90% safety factor
+            helix_radius = max(max_helix_radius * 0.9, self.tool_radius * 0.25)  # Floor at 25% of tool_radius
+
         ramp_start_height = self.material_top + self.ramp_start_clearance
         num_helical_passes, depth_per_pass = self._calculate_helical_passes(helix_radius, ramp_start_height=ramp_start_height)
 
