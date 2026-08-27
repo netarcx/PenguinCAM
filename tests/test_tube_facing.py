@@ -740,5 +740,49 @@ class TestTubeEnvelopeUsesSweptExtents(unittest.TestCase):
         self.assertTrue(result.success, result.errors)
 
 
+
+class TestOffsetLeavesCommentsAlone(unittest.TestCase):
+    """The Y/Z offset for a tube face is applied by a regex over the whole line, so it
+    rewrote numbers inside comments too - "Depth level 1/2" became "Depth level 1/2.0000"
+    and a hole's stated diameter silently gained the offset. Comments describe the
+    PRE-offset frame; if one should reflect the offset, it gets written that way where it
+    is emitted, not patched afterwards by a regex that cannot tell prose from a word.
+    """
+
+    def setUp(self):
+        self.pp = FRCPostProcessor(0.25, 0.157)
+
+    def test_a_trailing_paren_comment_is_untouched(self):
+        line = 'G1 X1.0000 Y2.0000 F30.0 (Y2.0000 is the drawn position)'
+        result = self.pp._offset_coordinate(line, 'Y', 0.5)
+        self.assertIn('Y2.5000 F30.0', result)
+        self.assertTrue(result.endswith('(Y2.0000 is the drawn position)'), result)
+
+    def test_a_semicolon_comment_is_untouched(self):
+        line = 'G1 Z0.1000 F35.0  ; Down to Z0.1000, the engraving depth'
+        result = self.pp._offset_coordinate(line, 'Z', 0.9)
+        self.assertIn('Z1.0000 F35.0', result)
+        self.assertTrue(result.endswith('; Down to Z0.1000, the engraving depth'), result)
+
+    def test_a_whole_line_comment_is_untouched(self):
+        for line in ('(Depth level 1/2 - cutting to Z0.9647)',
+                     '(Hole 0.201" dia: helical entry at 0.0220" radius)',
+                     '; Y0.5 in a bare semicolon comment'):
+            with self.subTest(line=line):
+                self.assertEqual(self.pp._offset_coordinate(line, 'Y', 0.25), line)
+                self.assertEqual(self.pp._offset_coordinate(line, 'Z', 0.25), line)
+
+    def test_the_code_before_a_comment_is_still_offset(self):
+        line = 'G3 X1.0 Y-0.0787 I-0.1 J0. ; arc'
+        result = self.pp._offset_coordinate(line, 'Y', 0.175)
+        self.assertIn('Y0.0963', result)
+        self.assertIn('I-0.1', result)       # only the named axis moves
+        self.assertTrue(result.endswith('; arc'))
+
+    def test_an_ordinary_line_is_unaffected_by_the_change(self):
+        self.assertIn('Y0.0000',
+                      self.pp._offset_coordinate('G1 X1.0 Y-0.175 Z0.5', 'Y', 0.175))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -6425,8 +6425,16 @@ class FRCPostProcessor:
             new_val = coord_val + offset
             return f'{axis}{new_val:.4f}'
 
+        # Only the CODE, never the comment. A comment describes the pre-offset frame and
+        # is prose, not words the machine reads: rewriting numbers in it turned
+        # "Depth level 1/2" into "Depth level 1/2.0000" and quietly moved every diameter
+        # a comment stated. If a comment should reflect the offset, it is written that
+        # way where it is emitted.
+        cut = min((i for i in (line.find('('), line.find(';')) if i >= 0),
+                  default=len(line))
+        code, comment = line[:cut], line[cut:]
         # Match axis letter followed by optional minus and digits
-        return re.sub(rf'{axis}(-?\d+\.?\d*)', replace_coord, line)
+        return re.sub(rf'{axis}(-?\d+\.?\d*)', replace_coord, code) + comment
 
     def _adjust_y_coordinate(self, line: str, y_offset: float) -> str:
         """
