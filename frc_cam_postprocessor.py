@@ -1103,6 +1103,39 @@ class FRCPostProcessor:
         else:
             return int_part + frac_value
 
+    #: $INSUNITS codes this cares about. Every other value (0 = unitless, and the
+    #: exotic ones: metres, feet, microns) is not worth second-guessing.
+    _INSUNITS_NAMES = {1: ('inch', 'inches'), 4: ('mm', 'millimetres')}
+
+    def _check_header_units(self, doc) -> None:
+        """Cross-check the drawing's own declared units against the job's.
+
+        $INSUNITS says what the drawing thinks its numbers mean. If it contradicts the
+        units this job was set up in, one of the two is wrong by a factor of 25.4 -
+        every coordinate, every thickness, every feed - and nothing else in the pipeline
+        would ever notice. So it is worth saying out loud.
+
+        WARN, never auto-convert. The header is unreliable in the wild: plenty of
+        exporters leave it at 0 or set it to whatever the template had, so trusting it
+        enough to rescale the geometry would break more parts than it saved.
+        """
+        try:
+            code = int(doc.header.get('$INSUNITS', 0) or 0)
+        except (TypeError, ValueError):
+            return
+        named = self._INSUNITS_NAMES.get(code)
+        if named is None or named[0] == self.units:
+            return
+        drawing_units = named[1]
+        job_units = 'inches' if self.units == 'inch' else 'millimetres'
+        message = (
+            f'The drawing says its units are {drawing_units} ($INSUNITS), but this job '
+            f'is set up in {job_units}. If the drawing is right, every dimension in the '
+            f'program is off by a factor of 25.4. Check the part size in the preview '
+            f'before you cut, and re-export or change the job units if it is wrong.')
+        print(f"  WARNING: {message}")
+        self.geometry_warnings.append(message)
+
     def load_dxf(self, filename: str):
         """Load DXF file and extract geometry, organized by layer if multi-layer DXF"""
         print(f"Loading {filename}...")
@@ -1112,6 +1145,7 @@ class FRCPostProcessor:
         self.open_chains = []
         doc = ezdxf.readfile(filename)
         msp = doc.modelspace()
+        self._check_header_units(doc)
 
         # Check for multi-layer structure
         layers_with_depths = {}

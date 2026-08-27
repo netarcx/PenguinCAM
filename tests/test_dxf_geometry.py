@@ -385,5 +385,63 @@ class TestOpenOutlines(unittest.TestCase):
             os.remove(path)
 
 
+
+class TestHeaderUnitsCrossCheck(unittest.TestCase):
+    """$INSUNITS says what the drawing thinks its numbers mean. When it contradicts the
+    units the job was set up in, one of the two is wrong by a factor of 25.4 - and
+    nothing else in the pipeline would ever notice. The header is unreliable in the
+    wild, so this warns; it never converts.
+    """
+
+    def _load(self, insunits, units='inch', thickness=0.25, tool=0.157):
+        doc = ezdxf.new('R2010')
+        doc.header['$INSUNITS'] = insunits
+        doc.modelspace().add_lwpolyline([(0, 0), (4, 0), (4, 3), (0, 3)], close=True)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        try:
+            with redirect_stdout(io.StringIO()) as out:
+                pp = FRCPostProcessor(thickness, tool, units=units)
+                pp.apply_material_preset('plywood')
+                pp.load_dxf(path)
+            return pp, out.getvalue()
+        finally:
+            os.remove(path)
+
+    def test_a_millimetre_drawing_in_an_inch_job_warns(self):
+        pp, printed = self._load(4)                    # 4 = millimetres
+        joined = ' '.join(pp.geometry_warnings)
+        self.assertIn('25.4', joined, pp.geometry_warnings)
+        self.assertIn('millimet', joined.lower())
+        self.assertIn('inch', joined.lower())
+        self.assertIn('25.4', printed)                 # and loudly, on the console
+
+    def test_an_inch_drawing_in_a_millimetre_job_warns(self):
+        pp, _ = self._load(1, units='mm', thickness=6.35, tool=4.0)
+        joined = ' '.join(pp.geometry_warnings)
+        self.assertIn('25.4', joined, pp.geometry_warnings)
+
+    def test_agreement_is_silent(self):
+        for insunits, units, thickness, tool in ((1, 'inch', 0.25, 0.157),
+                                                 (4, 'mm', 6.35, 4.0)):
+            with self.subTest(insunits=insunits):
+                pp, _ = self._load(insunits, units, thickness, tool)
+                self.assertFalse([w for w in pp.geometry_warnings if '25.4' in w],
+                                 pp.geometry_warnings)
+
+    def test_unitless_is_silent(self):
+        """0 means "no units stated", which is most exports. Not news."""
+        pp, _ = self._load(0)
+        self.assertFalse([w for w in pp.geometry_warnings if '25.4' in w],
+                         pp.geometry_warnings)
+
+    def test_an_exotic_unit_is_silent(self):
+        """Only inches and millimetres are worth cross-checking; a drawing in metres or
+        feet is not something PenguinCAM can second-guess usefully."""
+        pp, _ = self._load(6)                          # 6 = metres
+        self.assertFalse([w for w in pp.geometry_warnings if '25.4' in w],
+                         pp.geometry_warnings)
+
+
 if __name__ == '__main__':
     unittest.main()
