@@ -710,34 +710,47 @@ class FRCPostProcessor:
             notes.append(f"feed scaled to {self.feed_rate:.1f} {unit} for the "
                          f"{diameter_in:.3f} in tool, from the 4 mm reference")
 
-        # The aluminum ceiling is a proven one-flute feed. With two flutes at the same
-        # RPM each tooth receives half the chip, rubs, builds heat, and welds aluminum
-        # to the edge. We deliberately do not raise the unproven feed; lower RPM just
-        # enough to preserve the material's minimum chipload, but never below the
+        # The preset feed is a proven ONE-FLUTE number. With two flutes at the same RPM
+        # each tooth receives half the chip and rubs - in aluminum it builds heat and
+        # welds to the edge; in wood and plastics it burnishes and burns. Either way the
+        # answer is the same and it is not to raise the unproven feed: lower RPM just
+        # enough to preserve the material's minimum chipload, and never below the
         # machine's spindle floor.
-        if feeds_speeds.is_aluminum_material(material_key):
-            minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+        #
+        # This was aluminum-only while the chipload REFUSAL below applied to every
+        # modelled material, so a plywood config the shop had used for years - 70 IPM,
+        # 18000 RPM, two flutes, 0.0019 per tooth against a 0.002 minimum - stopped
+        # generating instead of getting the RPM correction that would have fixed it.
+        chipload_model = feeds_speeds.MATERIALS.get(material_key) or {}
+        minimum = chipload_model.get('chipload_min')
+        if minimum:
+            is_aluminum = feeds_speeds.is_aluminum_material(material_key)
             machine_key = (self.machine_preset_id
                            if self.machine_preset_id in feeds_speeds.MACHINES
                            else 'omio_x8')
             spindle_floor = feeds_speeds.MACHINES[machine_key]['rpm_min']
             base_rpm_ceiling = ((self.feed_rate * to_inch)
                                 / (self.tool_flutes * minimum))
-            rpm_ceiling = ((self.feed_rate * to_inch) * self.corner_min_feed_scale
-                           / (self.tool_flutes * minimum))
+            # Aluminum coordinates against the CORNER feed as well as the straight one,
+            # so a slowed corner move cannot drop into the rubbing regime. The softer,
+            # heat-limited materials are held to the straight feed only.
+            rpm_ceiling = (base_rpm_ceiling * self.corner_min_feed_scale
+                           if is_aluminum else base_rpm_ceiling)
             if base_rpm_ceiling < spindle_floor - 1e-9:
+                material_name = chipload_model.get('name', material_key)
                 raise ValueError(
                     f'{diameter_in:.3f} in {self.tool_flutes}-flute cutter cannot make '
-                    f'the minimum aluminum chip at the {spindle_floor} RPM spindle '
-                    f'floor and the protected feed. Use a larger or 1-flute cutter.')
+                    f'the minimum {material_name} chip at the {spindle_floor} RPM '
+                    f'spindle floor and this feed. Use a larger or 1-flute cutter.')
             protected_rpm = max(spindle_floor, min(self.spindle_speed,
                                                    math.floor(rpm_ceiling)))
             if protected_rpm < self.spindle_speed:
                 old_rpm = self.spindle_speed
                 self.spindle_speed = int(protected_rpm)
+                scope = ('straight and corner' if is_aluminum else 'straight')
                 notes.append(f"spindle reduced from {old_rpm} to {self.spindle_speed} RPM "
-                             f"for {self.tool_flutes} flutes so straight and corner "
-                             f"chipload stay above {minimum:.4f} in/tooth")
+                             f"for {self.tool_flutes} flutes so {scope} "
+                             f"chipload stays above {minimum:.4f} in/tooth")
 
         # Pocket corners deliberately run below base_feed. Do not let that force
         # protection cross into rubbing: the lowest emitted F word must still make the
