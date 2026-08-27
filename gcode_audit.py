@@ -462,6 +462,121 @@ def audit_tube_design(name, design, face_width, tube_length, tube_height,
         fail(name, 'a 1.125" bearing bore was cut without a helical entry')
 
 
+def _point_to_segment(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def check_standing_tabs(name, gcode):
+    """Do the tabs really stand as tall as the program says they do?
+
+    A tab is the only thing holding a profiled part while the machine keeps cutting, and
+    the program states its own claim out loud: every `; Tab N start` lifts the cutter to
+    the top of the standing tab. The claim is checkable - nothing before the removal
+    pass may cut BELOW that Z at a tab.
+
+    It did not hold. Only the final pass lifted, so on 5-pass 1/4" aluminum the four
+    intermediate passes milled straight through the tab zones and the tabs ended up one
+    pass-depth tall - 0.054" of a designed 0.15". This audits the emitted program rather
+    than the generator, which is how it can disagree with the code that wrote it.
+    """
+    lines = gcode.splitlines()
+    removal = next((i for i, l in enumerate(lines) if 'TAB REMOVAL PASS' in l), None)
+    if removal is None:
+        return
+
+    # Where each tab is, from the removal pass's own moves.
+    paths, current = [], None
+    for raw in lines[removal:]:
+        mx = re.search(r'X(-?[\d.]+)', raw)
+        my = re.search(r'Y(-?[\d.]+)', raw)
+        if 'tab start (in kerf)' in raw and mx and my:
+            if current and len(current) > 1:
+                paths.append(current)
+            current = [(float(mx.group(1)), float(my.group(1)))]
+        elif 'Cut through tab' in raw and current is not None and mx and my:
+            point = (float(mx.group(1)), float(my.group(1)))
+            if point != current[-1]:
+                current.append(point)
+    if current and len(current) > 1:
+        paths.append(current)
+    unique = {}
+    for path in paths:
+        unique.setdefault(path[0], path)
+    paths = list(unique.values())
+    if not paths:
+        return
+
+    centres = []
+    for path in paths:
+        spans = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(path, path[1:])]
+        half = sum(spans) / 2.0
+        walked = 0.0
+        for (a, b), span in zip(zip(path, path[1:]), spans):
+            if span and walked + span >= half:
+                t = (half - walked) / span
+                centres.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+                break
+            walked += span
+        else:
+            centres.append(path[len(path) // 2])
+
+    # The tab top the program itself announces.
+    tops = [float(re.search(r'Z(-?[\d.]+)', l).group(1)) for l in lines[:removal]
+            if re.search(r';\s*Tab (?:\d+ start|lift during ramp)', l)
+            and re.search(r'Z(-?[\d.]+)', l)]
+    if not tops:
+        fail(name, 'a tab-removal pass exists but no pass ever lifted over a tab')
+        return
+    declared_top = min(tops)
+
+    floors = {c: 1e9 for c in centres}
+    radius = 0.0
+    in_chamfer = False
+    x = y = z = None
+    previous = None
+    for raw in lines[:removal]:
+        found = (re.search(r'\(Tool: ([\d.]+)"', raw)
+                 or re.search(r'\(Tool ([\d.]+) in diameter', raw))
+        if found:
+            radius = float(found.group(1)) / 2.0
+        if raw.startswith('(===== '):
+            # A chamfer deliberately breaks the top edge all the way round, tabs
+            # included. It is a few thou deep by design and says nothing about whether
+            # the tab still holds the part.
+            in_chamfer = 'CHAMFER' in raw.upper() or 'DEBURR' in raw.upper()
+        if in_chamfer:
+            previous = None
+            continue
+        code = re.sub(r'\(.*?\)', '', raw.split(';')[0]).strip()
+        m = re.match(r'^(G0|G1|G2|G3)\b', code)
+        if not m:
+            continue
+        words = dict((w[0], float(w[1])) for w in NUM.findall(code))
+        x, y, z = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        if None not in (x, y, z) and previous is not None and None not in previous:
+            if m.group(1) != 'G0':
+                for centre in centres:
+                    # Strictly inside the cutter's sweep. A tool tangent at the tab
+                    # centre is the boundary case that says the tab is exactly as wide
+                    # as the cutter, which is a tab-width question, not a height one.
+                    if _point_to_segment(centre[0], centre[1], previous[0], previous[1],
+                                         x, y) < radius - 1e-4:
+                        floors[centre] = min(floors[centre], previous[2], z)
+        previous = (x, y, z)
+
+    for centre, floor in floors.items():
+        if floor < 1e8 and floor < declared_top - 1e-4:
+            fail(name,
+                 f'the tab at ({centre[0]:.3f}, {centre[1]:.3f}) is cut to Z{floor:.4f} '
+                 f'but the program lifts to Z{declared_top:.4f} over it - it stands '
+                 f'{declared_top - floor:.4f}" less than the program claims')
+            return
+
+
 def max_lateral_engagement(gcode):
     """Independently measure the deepest bite any straight feed move takes.
 
@@ -572,6 +687,8 @@ def audit(name, job, expect_drill=False, max_engagement=None):
         if bite > max_engagement * 1.35 + 1e-6:
             fail(name, f'a straight feed move bites {bite:.4f}" of material, far over '
                        f'the {max_engagement:.4f}" per-pass limit: {line[:60]}')
+
+    check_standing_tabs(name, g)
 
     # --- header claims vs reality ---------------------------------------------------
     sim = simulate(g)
