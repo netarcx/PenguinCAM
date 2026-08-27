@@ -8458,6 +8458,26 @@ def main():
             pp.identify_perimeter_and_pockets()
             pp.classify_holes()
 
+        # NOW the explicit flags, honouring the "explicit feed flags come last" comment
+        # above. A drilled hole pattern's loader runs apply_twist_drill_feeds, which
+        # overwrote every feed the operator had just pinned - so --plunge-rate on an
+        # unusual drill was accepted and then discarded. They are still bounded: argparse
+        # rejects anything over the diameter-scaled aluminum ceiling before we get here,
+        # and validate_aluminum_cutting_parameters checks the final numbers at
+        # generation time.
+        if args.spindle_speed != 18000:
+            pp.spindle_speed = args.spindle_speed
+        if args.feed_rate is not None:
+            pp.feed_rate = args.feed_rate
+        if args.plunge_rate is not None:
+            pp.plunge_rate = args.plunge_rate
+            # A drilled hole has no lateral cut: its feed IS the plunge, and the peck
+            # moves read feed_rate. Leaving those apart would command the model's rate
+            # on the way down and the operator's nowhere at all.
+            if use_pattern and args.tube_pattern == 'holes' and args.feed_rate is None:
+                pp.feed_rate = args.plunge_rate
+                pp.ramp_feed_rate = args.plunge_rate
+
         # Debug: Check what was classified
         hole_count = len(pp.holes) if hasattr(pp, 'holes') else 0
         pocket_count = len(pp.pockets) if hasattr(pp, 'pockets') else 0

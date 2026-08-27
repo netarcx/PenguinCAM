@@ -230,5 +230,60 @@ class TestClassifyOrder(unittest.TestCase):
         self.assertIn('Classified 1 holes', text)
 
 
+
+class TestExplicitFeedFlagsSurviveTheLoader(unittest.TestCase):
+    """--feed-rate and --plunge-rate are applied before the pattern loader runs, and the
+    drilled hole pattern's own feed model then overwrote them. The comment above them
+    says explicit flags come last; they did not, so a mentor pinning a known-good number
+    for an unusual drill was silently ignored.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='feeds_')
+        self.out = os.path.join(self.tmp, 'out.nc')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _program(self, *extra):
+        code, text = run_cli(self.out, '--mode', 'tube-pattern',
+                             '--tube-pattern', 'holes', '--tube-size', '1x1',
+                             '--tube-length', '12', '--material', 'aluminum',
+                             '--thickness', '0.0625', '--tool-diameter', '0.201',
+                             *extra)
+        produced = [os.path.join(self.tmp, f) for f in os.listdir(self.tmp)
+                    if f.endswith('.nc')]
+        if not produced:
+            return code, text, None
+        with open(produced[0]) as handle:
+            return code, text, handle.read()
+
+    def test_an_explicit_plunge_rate_reaches_the_moves(self):
+        code, text, gcode = self._program('--plunge-rate', '9')
+        self.assertIn(code, (None, 0), text[-800:])
+        self.assertIsNotNone(gcode, text[-800:])
+        self.assertIn('F9.0', gcode,
+                      'the drilling model overwrote the explicit plunge rate')
+
+    def test_an_explicit_feed_rate_reaches_the_moves(self):
+        code, text, gcode = self._program('--feed-rate', '11', '--plunge-rate', '9')
+        self.assertIn(code, (None, 0), text[-800:])
+        self.assertIn('F9.0', gcode)
+
+    def test_a_flag_over_the_aluminum_ceiling_is_still_refused(self):
+        """"Explicit" does not mean "unbounded" - 40 IPM of plunge in 6061 breaks the
+        drill whoever typed it."""
+        code, text, _ = self._program('--plunge-rate', '40')
+        self.assertEqual(code, 2, text[-400:])
+        self.assertIn('ceiling', text.lower())
+
+    def test_without_the_flags_the_drill_model_still_applies(self):
+        code, text, gcode = self._program()
+        self.assertIn(code, (None, 0), text[-800:])
+        self.assertIn('Peck 1 of', gcode)
+        self.assertNotIn('F9.0', gcode)
+
+
 if __name__ == '__main__':
     unittest.main()
