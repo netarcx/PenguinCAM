@@ -1,23 +1,50 @@
+# PenguinCAM on UP2 - local (no-Onshape) deployment. See docs/LOCAL_MODE.md.
+#
+# This file IS the production config: it is deployed verbatim to
+# /mnt/user/appdata/penguincam/docker-compose.yml on the UP2 (one level above the
+# rsynced build/ tree, hence the ./build context). Edit it here, not on the server.
+#
+# Lives in /mnt/user/appdata (array storage) on purpose: Unraid's / is RAM-backed and
+# restored from the USB flash at boot, so a build context or config under /root would
+# be gone after a reboot.
+#
+# Dockflare publishes this local-mode instance only through the existing authenticated
+# access group. Do not remove dockflare.access.group: local mode has no app-level login.
 services:
   penguincam:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ./build
     image: penguincam:local
-    init: true
+    container_name: penguincam
     restart: unless-stopped
-    environment:
-      PORT: "6238"
-      PENGUINCAM_LOCAL: "1"
-      EMBED_COOKIES: "0"
-      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:-penguincam-local-development-key}"
-      PENGUINCAM_CONFIG: /app/PenguinCAM-config.yaml
+    labels:
+      dockflare.enable: "true"
+      dockflare.hostname: "cam.roemen.org"
+      dockflare.service: "http://penguincam:6238"
+      dockflare.access.group: "pocketid-apprise"
     ports:
-      # Local mode has no sign-in, so expose it only on the Docker host.
-      - "127.0.0.1:${PENGUINCAM_PORT:-6238}:6238"
+      # LAN-reachable on the shop network. Local mode has no authentication, so
+      # anyone who can reach this host on 6238 can use it.
+      - "6238:6238"
+    environment:
+      # Turns off the Onshape OAuth gate (local_mode.is_local_mode).
+      PENGUINCAM_LOCAL: "1"
+      # Must be explicit. frc_cam_gui_app auto-enables SameSite=None; Secure cookies
+      # whenever PORT or FLASK_SECRET_KEY is set - correct for the HTTPS Railway
+      # deployment, but it silently breaks sessions over plain http:// on the LAN.
+      EMBED_COOKIES: "0"
+      # Persistent sessions across container restarts.
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:?set FLASK_SECRET_KEY in .env}"
+      PORT: "6238"
+      TZ: "America/Chicago"
     volumes:
-      # Set PENGUINCAM_CONFIG_FILE to use a different team's machine config.
-      - type: bind
-        source: "${PENGUINCAM_CONFIG_FILE:-./PenguinCAM-config-2129.yaml}"
-        target: /app/PenguinCAM-config.yaml
-        read_only: true
+      # Team config mounted read-only rather than baked into the image, so the
+      # image never silently ships one team's feeds and machine limits.
+      - ./config/PenguinCAM-config-2129.yaml:/app/PenguinCAM-config.yaml:ro
+    networks:
+      - default
+      - cloudflare-net
+
+networks:
+  cloudflare-net:
+    external: true
