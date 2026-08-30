@@ -29,6 +29,28 @@
     return !!(window.PCMultiTool && window.PCMultiTool.enabled());
   }
 
+  function drilledTubePatternOn() {
+    return state.mode === 'tubing' && state.tubePattern === 'holes';
+  }
+
+  // A drilled pattern substitutes a fixed 0.201" twist drill. That tool may only peck
+  // the holes; the generator deliberately refuses to push it sideways to face an end.
+  function tubeEndMillingAvailable() {
+    return state.mode === 'tubing' && !drilledTubePatternOn();
+  }
+
+  function engraveOn() {
+    return state.mode === '2d' && state.engrave;
+  }
+
+  function effectiveToolText() {
+    return drilledTubePatternOn() ? '0.201" twist drill' : state.tool_diameter_text;
+  }
+
+  function effectiveToolDiameter() {
+    return drilledTubePatternOn() ? 0.201 : state.tool_diameter;
+  }
+
   var state = {
     source: CFG.source,
     step: 'setup',
@@ -84,7 +106,6 @@
     squareEnd: false,
     cutToLength: false,
     thicknessTouched: false,
-    tubeHeightTouched: false,
     thicknessBeforeTube: null,
     tubeSize: '2x1-flat',
     tubePattern: 'none',          // 'none' = pattern comes from the user's DXF
@@ -532,7 +553,7 @@
       // A drilled pattern runs a 0.201" twist drill whatever the tool field says - the
       // server substitutes it. The chip is what an operator reads before loading a tool,
       // so it has to name the real one.
-      chips.push(state.tubePattern === 'holes' && state.mode === 'tubing'
+      chips.push(drilledTubePatternOn()
         ? '⌀ 0.201" twist drill'
         : '⌀ ' + state.tool_diameter_text + ' / ' + state.tool_flutes + '-flute tool');
     }
@@ -550,6 +571,8 @@
     chips.push(state.mode === 'tubing' ? 'Z0 = tube origin'
                : (state.zDatum === 'stock_top' ? 'Z0 = stock top' : 'Z0 = spoilboard'));
     if (state.mode === 'tubing') {
+      if (tubeEndMillingAvailable() && state.squareEnd) chips.push('square near end');
+      if (tubeEndMillingAvailable() && state.cutToLength) chips.push('cut far end');
       if (!tubePatternOn()) chips.push(state.parts.length + ' face' + (state.parts.length === 1 ? '' : 's'));
     } else {
       if (idx >= list.indexOf('layout')) {
@@ -743,7 +766,6 @@
 
   /* --------------------------------------------------------------- setup */
   var thicknessBound = false;
-  var tubeHeightBound = false;
 
   function bindSetup() {
     var machineSel = $('#f-machine');
@@ -772,7 +794,7 @@
     if (engraveBox) {
       engraveBox.addEventListener('change', function () {
         state.engrave = this.checked;
-        var note = $('#engrave-note'); if (note) note.style.display = this.checked ? '' : 'none';
+        updateConditionalSettings();
         updateSummary();
         invalidatePreview();
       });
@@ -836,16 +858,14 @@
     thicknessBound = true;   // bindLengthField commits the rendered default first
     $('#f-material').addEventListener('change', function () {
       if (state.mode !== 'tubing') state.material = this.value;
-      invalidatePreview();
+      invalidatePreview(); updateSummary();
     });
     bindLengthField($('#f-tube-height'),
       function () { return state.tubeHeight_text; },
       function (inches, text) {
         state.tubeHeight = inches; state.tubeHeight_text = text;
-        if (tubeHeightBound) state.tubeHeightTouched = true;
-        invalidatePreview();
+        invalidatePreview(); updateSummary();
       });
-    tubeHeightBound = true;
     var sizeSel = $('#f-tube-size');
     if (sizeSel) {
       state.tubeSize = sizeSel.value;
@@ -859,7 +879,7 @@
     if (patSel) {
       patSel.addEventListener('change', function () {
         state.tubePattern = this.value; applyTubePatternUI(); updatePartsModeNote();
-        invalidatePreview(); refreshTubePatternGeometry();
+        invalidatePreview(); refreshTubePatternGeometry(); updateSummary();
       });
     }
     bindLengthField($('#f-tube-pattern-length'),
@@ -868,8 +888,14 @@
         state.tubePatternLength = inches; state.tubePatternLength_text = text;
         applyTubePatternUI(); invalidatePreview(); refreshTubePatternGeometry();
       });
-    $('#f-square-end').addEventListener('change', function () { state.squareEnd = this.checked; });
-    $('#f-cut-to-length').addEventListener('change', function () { state.cutToLength = this.checked; });
+    $('#f-square-end').addEventListener('change', function () {
+      state.squareEnd = this.checked;
+      invalidatePreview(); updateSummary();
+    });
+    $('#f-cut-to-length').addEventListener('change', function () {
+      state.cutToLength = this.checked;
+      invalidatePreview(); updateSummary();
+    });
     var maxPass = $('#f-max-pass');
     if (maxPass) {
       // Optional field: blank is a valid state (automatic), so bindLengthField's
@@ -1096,10 +1122,70 @@
       .catch(function () { /* the note falls back to its own arithmetic */ });
   }
 
+  /* One visibility table for controls whose values only apply in certain workflows.
+     Keeping these rules together prevents a hidden setting from continuing to affect
+     output, and prevents separate event handlers from disagreeing about what is shown. */
+  function updateConditionalSettings() {
+    var is2d = state.mode === '2d';
+    var is25 = state.mode === '2.5d';
+    var isTube = state.mode === 'tubing';
+    var drilled = drilledTubePatternOn();
+    var on = multiToolOn();
+
+    var guidance = $('#mode-guidance');
+    if (guidance) {
+      guidance.textContent = isTube
+        ? 'Tube workflow: choose the real tube orientation and wall thickness. Sheet nesting, fixtures, Z datum, engraving and multi-tool operations do not apply.'
+        : is25
+          ? '2.5D workflow: depth comes from the CAD layers. The part is placed at the program origin; sheet nesting, fixtures, engraving and multi-tool operations do not apply.'
+          : '2D workflow: choose the cutter, material and thickness, then add and nest as many flat parts as fit on the stock.';
+    }
+
+    var el = $('#thickness-field'); if (el) el.hidden = is25;
+    el = $('#thickness-derived'); if (el) el.hidden = !is25;
+    el = $('#material-field'); if (el) el.hidden = isTube;
+    el = $('#tube-fields'); if (el) el.hidden = !isTube;
+    el = $('#chamfer-fields'); if (el) el.hidden = !is2d;
+    el = $('#max-pass-field'); if (el) el.hidden = isTube;
+    el = $('#max-pass-hint'); if (el) el.hidden = isTube;
+
+    // A sheet and its locator fixture feed only /process-job, the flat 2D path. The
+    // 2.5D single-part route normalizes its own origin and tube jobs use their jig.
+    el = $('#stock-row'); if (el) el.hidden = !is2d;
+    el = $('#fixture-panel'); if (el) el.hidden = !is2d;
+    el = $('#btn-arrange'); if (el) el.hidden = !is2d;
+    el = $('#btn-fill'); if (el) el.hidden = !is2d;
+
+    el = $('#engrave-toggle'); if (el) el.hidden = !is2d;
+    el = $('#engrave-note'); if (el) el.hidden = !engraveOn();
+    el = $('#multitool-toggle'); if (el) el.hidden = !is2d;
+    el = $('#multitool-note'); if (el) el.hidden = !on;
+
+    // The generated drilled pattern owns its tool. Do not show editable end-mill fields
+    // whose values will be ignored, or end-facing choices the drill cannot perform.
+    var hideSingleTool = on || drilled;
+    ['#tool-field', '#tool-flutes-field', '#tool-bit-field'].forEach(function (id) {
+      var field = $(id);
+      if (field) field.hidden = hideSingleTool
+        || (id === '#tool-bit-field' && !Object.keys(toolLibrary()).length);
+    });
+    el = $('#tube-tool-notice');
+    if (el) {
+      el.hidden = !drilled;
+      el.textContent = drilled
+        ? 'Tool is fixed for this pattern: load a 0.201" #10-clearance twist drill. Cutter diameter, flute count and saved end mills are not used.'
+        : '';
+    }
+    el = $('#tube-end-fields'); if (el) el.hidden = drilled;
+    el = $('#tube-end-note'); if (el) el.hidden = !drilled;
+  }
+
   function applyTubePatternUI() {
     var box = $('#tube-pattern-fields');
     if (box) box.hidden = !tubePatternOn();
     if (window.PCTubeDesigner) window.PCTubeDesigner.render();
+    updateConditionalSettings();
+    updateLayoutInfo();
     var note = $('#tube-pattern-note');
     if (!note) return;
     if (!tubePatternOn()) { note.textContent = ''; return; }
@@ -1160,7 +1246,7 @@
 
   function syncTubeHeightToSize() {
     var h = TUBE_HEIGHTS[state.tubeSize];
-    if (!h || state.tubeHeightTouched) return;
+    if (!h) return;
     state.tubeHeight = h;
     state.tubeHeight_text = h + '"';
     var field = $('#f-tube-height');
@@ -1178,36 +1264,21 @@
     var is25 = state.mode === '2.5d';
     var isTube = state.mode === 'tubing';
     updateZDatumUI();   // tubing has a jig zero of its own; the choice is hidden there
-    $('#thickness-field').style.display = is25 ? 'none' : '';
-    $('#thickness-derived').style.display = is25 ? '' : 'none';
     var tl = $('#thickness-label'); if (tl) tl.textContent = isTube ? 'Tube wall thickness' : 'Material thickness';
-    var mf = $('#material-field'); if (mf) mf.style.display = isTube ? 'none' : '';
     if (isTube) {
       state.material = 'aluminum_tube';
     } else {
       var msel = $('#f-material'); if (msel) state.material = msel.value;
     }
-    var tf = $('#tube-fields'); if (tf) tf.hidden = !isTube;
-    // The deburr / chamfer pass is 2D-only: 2.5D refuses it server-side (layered
-    // depths) and tubing runs its own program. In multi-tool mode the same checkbox
-    // stays and drives the operations editor instead (a V-bit + chamfer op per part).
-    var cf = $('#chamfer-fields'); if (cf) cf.hidden = is25 || isTube;
-    // Depth-per-pass ceiling applies anywhere contours are milled except tubing.
-    var mp = $('#max-pass-field'); if (mp) mp.hidden = isTube;
-    var mph = $('#max-pass-hint'); if (mph) mph.hidden = isTube;
-    // A tube is held in a jig, not nested on a sheet. Leaving these on in tubing let a
+    // A tube is held in a jig, not nested on a sheet; 2.5D is normalized to its program
+    // origin and likewise does not consume sheet placement. Leaving these active let a
     // sheet be chosen for a tube - and picking one rewrote the "thickness" field, which
     // in tubing is the WALL thickness, from 0.0625" to the sheet's 0.25". Four times
     // the wall, feeding depth per pass and pecking, plus a plywood material that
     // survived the trip back to 2D.
-    var sr = $('#stock-row'); if (sr) sr.hidden = isTube;
-    var fp = $('#fixture-panel'); if (fp) fp.hidden = isTube;
-    var ab = $('#btn-arrange'); if (ab) ab.hidden = isTube;
-    var fb = $('#btn-fill'); if (fb) fb.hidden = isTube;
-    var et = $('#engrave-toggle'); if (et) et.hidden = isTube || is25;
-    if (isTube && state.stock) {
+    if ((isTube || is25) && state.stock) {
       // Chosen in another mode and still selected: drop it rather than carry a sheet
-      // into a program that has no sheet.
+      // into a program that has no sheet or placement fields.
       state.stock = null;
       var ss = $('#f-stock'); if (ss) ss.value = '';
       applyStockUI();
@@ -1230,9 +1301,6 @@
       setThicknessField(parseLength(back) || 0.25, back);
     }
     applyTubePatternUI();
-    // Several tools per part is a 2D-only plan for now: 2.5D takes its depths from the
-    // CAD layers and tubing runs a fixed program of its own.
-    var mtToggle = $('#multitool-toggle'); if (mtToggle) mtToggle.style.display = (is25 || isTube) ? 'none' : '';
     applyMultiToolUI();
     updatePartsModeNote();
     // In full-page grid mode the Layout canvas and the operations editor are on screen
@@ -1253,15 +1321,9 @@
   // the extra grid column, the step bar, and the explanatory note.
   function applyMultiToolUI() {
     var on = multiToolOn();
-    var toolField = $('#tool-field'); if (toolField) toolField.style.display = on ? 'none' : '';
-    var fluteField = $('#tool-flutes-field'); if (fluteField) fluteField.style.display = on ? 'none' : '';
-    // The picker fills the single-tool field, so it goes wherever that field goes: in a
-    // multi-tool job the bits are chosen per row in the Tools panel instead.
-    var bitField = $('#tool-bit-field'); if (bitField) bitField.style.display = on ? 'none' : '';
-    var note = $('#multitool-note'); if (note) note.style.display = on ? '' : 'none';
-    // The deburr checkbox stays in both flavors of 2D; entering multi-tool mode with
-    // it already checked materializes the V-bit + chamfer ops in the editor.
-    var cf = $('#chamfer-fields'); if (cf) cf.hidden = state.mode !== '2d';
+    updateConditionalSettings();
+    // The deburr checkbox stays in both flavors of 2D; entering multi-tool mode with it
+    // already checked materializes the V-bit + chamfer ops in the editor.
     if (on && state.chamfer.on && window.PCMultiTool) window.PCMultiTool.applyDeburr(state.chamfer);
     $('#wizard').classList.toggle('has-tools', on);
     // The toggle changes which steps exist, and gotoStep is the ONLY thing that decides
@@ -1321,9 +1383,9 @@
     if (!sel || !field) return;
     var lib = toolLibrary();
     var ids = Object.keys(lib);
-    // `hidden` here, style.display in applyMultiToolUI - they must not fight, so this
-    // one only ever hides an EMPTY list and leaves a populated one to the mode logic.
-    field.hidden = !ids.length;
+    // Empty libraries, multi-tool plans and fixed-drill patterns each own their own tool
+    // choice, so the saved single-tool picker has nothing truthful to show there.
+    field.hidden = !ids.length || multiToolOn() || drilledTubePatternOn();
     if (!ids.length) return;
     var team = ids.filter(function (id) { return lib[id].source === 'team'; });
     var builtin = ids.filter(function (id) { return lib[id].source !== 'team'; });
@@ -1565,6 +1627,7 @@
     var note = $('#stock-note'), usage = $('#dro-usage');
     var sheet = state.stock;
     if (usage) usage.hidden = !sheet;
+    var remnant = $('#btn-save-remnant'); if (remnant) remnant.hidden = !sheet;
     if (note) {
       var placement = centeredStockPlacement();
       note.textContent = sheet
@@ -2451,10 +2514,15 @@
           resetHandleDir();
         } else {
           if (!isSelected(hit.id)) { state.selectedIds = [hit.id]; resetHandleDir(); }
-          canvasState.action = {
-            type: 'drag', startWorld: w,
-            snap: selectedParts().map(function (p) { return { p: p, cx: p.cx, cy: p.cy }; })
-          };
+          // /process places a 2.5D part at the program origin and accepts rotation but
+          // no X/Y placement. Let the part be selected for its rotation handle without
+          // offering a drag gesture whose result would be ignored at generation time.
+          if (state.mode !== '2.5d') {
+            canvasState.action = {
+              type: 'drag', startWorld: w,
+              snap: selectedParts().map(function (p) { return { p: p, cx: p.cx, cy: p.cy }; })
+            };
+          }
         }
         drawLayout();
         e.preventDefault();
@@ -2681,7 +2749,7 @@
       // Show the kerf actually being enforced, not the (hidden) single-tool field.
       el.textContent = multiToolOn()
         ? jobKerf().toFixed(4) + '" widest'
-        : state.tool_diameter_text;
+        : effectiveToolText();
     }
   }
 
@@ -2704,6 +2772,10 @@
       el.textContent = 'Drag the round handle to rotate the tube in 90 deg steps. ' +
         'Orient each face so the tube runs vertically (the Y axis) — that is the axis of the ' +
         'tube jig on the machine. Both faces rotate together.';
+    } else if (state.mode === '2.5d') {
+      el.textContent = 'Use the round handle to rotate the part. Its lower-left is placed '
+        + 'at the G54 origin automatically; sheet position and dragging do not apply to '
+        + 'this single-part workflow.';
     } else {
       el.textContent = 'Click to select (Shift-click for multiple), ' +
         'drag to move, drag the round handle to rotate (snaps to 45°). The dotted box is the stock; ' +
@@ -2784,7 +2856,7 @@
       mode: state.mode, z_datum: state.zDatum,
       tab_spacing: state.tab_spacing,
       max_pass_depth: state.max_pass_depth,
-      engrave: state.engrave,
+      engrave: engraveOn(),
       chamfer: state.chamfer.on ? state.chamfer : null,
       multitool: multiToolOn(),
       tools: multiToolOn() ? (state.tools || null) : null,
@@ -2857,9 +2929,6 @@
     }
     state.engrave = !!setup.engrave;
     var eb = $('#f-engrave'); if (eb) eb.checked = state.engrave;
-    // The note is only toggled by the change handler, so setting .checked alone left
-    // the UI and the state disagreeing about what the box means.
-    var en = $('#engrave-note'); if (en) en.style.display = state.engrave ? '' : 'none';
     if (setup.max_pass_depth) state.max_pass_depth = setup.max_pass_depth;
     if (setup.tab_spacing) state.tab_spacing = setup.tab_spacing;
 
@@ -3227,8 +3296,8 @@
     // rotation to every face. Tube rotation is hard-snapped to 90 deg in the Layout step.
     fd.append('rotation', p ? ((Math.round((p.rotation || 0) / 90) * 90) % 360 + 360) % 360 : 0);
     fd.append('tube_height', state.tubeHeight);
-    fd.append('square_end', state.squareEnd ? '1' : '0');
-    fd.append('cut_to_length', state.cutToLength ? '1' : '0');
+    fd.append('square_end', tubeEndMillingAvailable() && state.squareEnd ? '1' : '0');
+    fd.append('cut_to_length', tubeEndMillingAvailable() && state.cutToLength ? '1' : '0');
     fd.append('tube_size', state.tubeSize);
     fd.append('tube_pattern', state.tubePattern);
     if (generated) fd.append('tube_pattern_length', state.tubePatternLength);
@@ -3286,7 +3355,7 @@
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     job.z_datum = state.zDatum;
     if (state.dryRun) job.dry_run = '1';
-    if (state.engrave) job.engrave = '1';
+    if (engraveOn()) job.engrave = '1';
     var sheet = state.stock;
     if (sheet) {
       // The sheet is the stock, so placements are absolute on it and the origin is
@@ -3378,7 +3447,7 @@
     if (state.max_pass_depth) fd.append('max_pass_depth', state.max_pass_depth);
     fd.append('z_datum', state.zDatum);
     if (state.dryRun) fd.append('dry_run', '1');
-    if (state.engrave) fd.append('engrave', '1');
+    if (engraveOn()) fd.append('engrave', '1');
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
     return submitToProcess(fd, 'process');
@@ -3523,7 +3592,7 @@
       stockWidth: W, stockDepth: D,
       // Tube jobs keep their own jig frame whatever the sheet setting says.
       stockTopZ: (state.mode !== 'tubing' && state.zDatum === 'stock_top') ? 0 : stockH,
-      stockHeight: stockH, toolDiameter: multiToolOn() ? jobKerf() : state.tool_diameter,
+      stockHeight: stockH, toolDiameter: multiToolOn() ? jobKerf() : effectiveToolDiameter(),
       // Present only for a generated tube pattern, where the server knows the real
       // shape. The viewer then draws the tube itself with the pattern cut through it,
       // instead of a translucent box around the toolpath.

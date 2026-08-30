@@ -1338,6 +1338,17 @@ def process_file():
             # and a wall thicker than the tube pecked four inches through the jig.
             if not math.isfinite(tube_height) or not 0 < tube_height <= 12:
                 return jsonify({'error': 'Tube height must be between 0 and 12 inches'}), 400
+            # The selected orientation describes the complete cross-section. Treat the
+            # posted height as a stale-client cross-check, never as a second dimension
+            # that can contradict it: 2x1 on its 1" face is always 2" tall. Generated
+            # patterns already followed this rule; drawn DXF faces did not, so the same
+            # GUI selection produced different safe-Z heights in the two workflows.
+            _declared_width, declared_height = FRCPostProcessor._parse_tube_size(
+                None, tube_size)
+            if abs(tube_height - declared_height) > 1e-6:
+                log(f"Tube height {tube_height:.3f}\" does not match {tube_size}; "
+                    f"using {declared_height:.3f}\" from the tube size")
+            tube_height = declared_height
             if not math.isfinite(thickness) or not 0 < thickness < tube_height / 2:
                 return jsonify({'error': 'Wall thickness must be positive and less than '
                                          'half the tube height'}), 400
@@ -1406,11 +1417,7 @@ def process_file():
             # the safe-Z retract (tube_height + 0.25) landed 0.75in INSIDE the tube and
             # every hole was drilled an inch below the wall. The CLI already derived it;
             # only this path did not.
-            tube_width, size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
-            if abs(tube_height - size_height) > 1e-6:
-                log(f"Tube height {tube_height:.3f}\" does not match {tube_size}; "
-                    f"using {size_height:.3f}\" from the tube size")
-                tube_height = size_height
+            tube_width, _size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
             tube_length = pattern_length
             log(f"\U0001f4d0 Pre-designed {tube_size} pattern on a {tube_length:.3f}\" tube "
                 f"(face {tube_width:.3f}\")")
@@ -1420,7 +1427,7 @@ def process_file():
             # features sit inboard (any ordinary hole pattern) measures narrower than
             # the tube it goes on. The LENGTH is genuinely drawn, so that is measured.
             # The generator cross-checks the two and warns when they disagree.
-            tube_width, size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
+            tube_width, _size_height = FRCPostProcessor._parse_tube_size(None, tube_size)
             _detected_width, tube_length = _detect_tube_dims(input_path, rotation)
             # Built outside the f-string: a backslash escape inside an f-string
             # expression is Python 3.12+ syntax, and the deployment image runs 3.11.

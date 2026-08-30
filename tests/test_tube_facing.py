@@ -678,6 +678,17 @@ class TestTubeRouteUsesTheDeclaredWidth(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('tube size', response.get_json()['error'].lower())
 
+    def test_drawn_face_height_follows_the_selected_orientation(self):
+        """The generated-pattern route already derived this; the drawn-face route used
+        the stale editable form value and could put safe Z inside a standing 2x1 tube."""
+        response = self._post(self._inboard_face_dxf(),
+                              tube_size='2x1-standing', tube_height='1.0')
+        self.assertEqual(response.status_code, 200,
+                         response.get_data(as_text=True)[:400])
+        body = response.get_json()
+        self.assertAlmostEqual(body['parameters']['tube_height'], 2.0, places=4)
+        self.assertIn('( Tube height: 2.000" )', body['gcode'])
+
 
 
 class TestTubeEnvelopeUsesSweptExtents(unittest.TestCase):

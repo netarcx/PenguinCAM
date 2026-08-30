@@ -71,6 +71,8 @@
             <section class="step" data-step="setup">
                 <div class="panel-head"><h2>Setup</h2></div>
 
+                <p id="mode-guidance" class="setting-notice" aria-live="polite"></p>
+
                 {% if machines and machines|length > 1 %}
                 <label class="field">
                     <span>Machine</span>
@@ -160,7 +162,7 @@
                 </div>
                 <p class="hint" id="zzero-hint"></p>
 
-                <p class="hint" id="thickness-derived" style="display:none">
+                <p class="hint" id="thickness-derived" hidden>
                     Thickness is derived from the CAD part in 2.5D mode.
                 </p>
                 <p class="hint" id="max-pass-hint">
@@ -172,7 +174,7 @@
                     <input type="checkbox" id="f-multitool" autocomplete="off">
                     <span>Use several tools per part</span>
                 </label>
-                <p class="hint" id="multitool-note" style="display:none">
+                <p class="hint" id="multitool-note" hidden>
                     The Tools &amp; Ops panel replaces the single tool above. The program
                     pauses for a manual tool change, and you re-zero Z, at every switch.
                 </p>
@@ -181,7 +183,7 @@
                     <input type="checkbox" id="f-engrave" autocomplete="off">
                     <span>Engrave each part&rsquo;s name and number into it</span>
                 </label>
-                <p class="hint" id="engrave-note" style="display:none">
+                <p class="hint" id="engrave-note" hidden>
                     Cut shallow into the face while the sheet is still whole, so a nest of
                     similar parts is not a puzzle once it is off the machine. Needs a fine
                     cutter &mdash; edit each name and number in Parts, then drag its purple
@@ -230,10 +232,10 @@
                 <!-- Tubing-only settings (shown when mode = tubing). -->
                 <div id="tube-fields" class="subpanel" hidden>
                     <div class="fieldgrid">
-                        <label class="field">
+                        <label class="field" id="tube-height-field">
                             <span>Tube height</span>
                             <input type="text" id="f-tube-height" inputmode="text" autocomplete="off" spellcheck="false"
-                                   placeholder='1" or 25mm' value="1.0">
+                                   value='1"' readonly aria-describedby="tube-size-note">
                         </label>
                         <label class="field">
                             <span>Tube size</span>
@@ -244,6 +246,10 @@
                             </select>
                         </label>
                     </div>
+                    <p class="hint" id="tube-size-note">
+                        Height follows the selected tube orientation so the safe retract
+                        always clears the real tube.
+                    </p>
                     <label class="field">
                         <span>Pattern</span>
                         <select id="f-tube-pattern" autocomplete="off">
@@ -264,14 +270,22 @@
                         </label>
                         <p class="hint" id="tube-pattern-note"></p>
                     </div>
-                    <label class="field inline">
-                        <input type="checkbox" id="f-square-end" autocomplete="off">
-                        <span>Square the tube end before machining</span>
-                    </label>
-                    <label class="field inline">
-                        <input type="checkbox" id="f-cut-to-length" autocomplete="off">
-                        <span>Machine the far end to length</span>
-                    </label>
+                    <p id="tube-tool-notice" class="setting-notice" hidden></p>
+                    <div id="tube-end-fields">
+                        <label class="field inline">
+                            <input type="checkbox" id="f-square-end" autocomplete="off">
+                            <span>Square the tube end before machining</span>
+                        </label>
+                        <label class="field inline">
+                            <input type="checkbox" id="f-cut-to-length" autocomplete="off">
+                            <span>Machine the far end to length</span>
+                        </label>
+                    </div>
+                    <p id="tube-end-note" class="hint" hidden>
+                        End facing is unavailable for a drilled pattern because the
+                        loaded tool is a twist drill. Square or cut the tube separately,
+                        or choose a milled pattern.
+                    </p>
                 </div>
             </section>
 
