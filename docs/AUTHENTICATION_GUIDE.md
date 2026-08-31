@@ -1,4 +1,4 @@
-# PenguinCAM Authentication Guide
+# UV-CAM Authentication Guide
 
 **Complete guide to setting up Google Workspace authentication with OAuth 2.0 and Drive API access**
 
@@ -10,7 +10,7 @@
 2. [Google Cloud Console Setup](#google-cloud-console-setup)
 3. [OAuth Consent Screen](#oauth-consent-screen)
 4. [Creating OAuth Credentials](#creating-oauth-credentials)
-5. [Configuring PenguinCAM](#configuring-penguincam)
+5. [Configuring UV-CAM](#configuring-penguincam)
 6. [Testing Authentication](#testing-authentication)
 7. [Troubleshooting](#troubleshooting)
 
@@ -18,7 +18,7 @@
 
 ## Overview
 
-PenguinCAM uses **Google OAuth 2.0** to:
+UV-CAM uses **Google OAuth 2.0** to:
 - ✅ Authenticate users (only your Workspace domain)
 - ✅ Access Google Drive API (for uploading G-code)
 - ✅ Maintain user sessions securely
@@ -37,7 +37,7 @@ PenguinCAM uses **Google OAuth 2.0** to:
 4. Click **"New Project"**
 
 **Project Configuration:**
-- **Project name:** `PenguinCAM` (or your choice)
+- **Project name:** `UV-CAM` (or your choice)
 - **Organization:** Select your Workspace organization (critical!)
   - If you don't see your organization, you may need to enable Google Cloud for your Workspace
   - Must be set to organization to use "Internal" OAuth consent screen
@@ -90,7 +90,7 @@ The consent screen is what users see when they log in. Setting it to "Internal" 
 
 ### Step 2: App Information
 
-**App name:** `PenguinCAM`
+**App name:** `UV-CAM`
 
 **User support email:** Your team email address
 
@@ -116,7 +116,7 @@ Click **"Save and Continue"**
 
 ### Step 3: Add Scopes
 
-Scopes define what permissions PenguinCAM requests.
+Scopes define what permissions UV-CAM requests.
 
 Click **"Add or Remove Scopes"**
 
@@ -163,7 +163,7 @@ Click **"Save and Continue"**
 
 Review your configuration:
 - User type: Internal
-- App name: PenguinCAM
+- App name: UV-CAM
 - Scopes: 4 scopes (openid, email, profile, drive.file)
 
 Click **"Back to Dashboard"**
@@ -174,7 +174,7 @@ Click **"Back to Dashboard"**
 
 ## Creating OAuth Credentials
 
-Now create the actual credentials (Client ID and Secret) that PenguinCAM will use.
+Now create the actual credentials (Client ID and Secret) that UV-CAM will use.
 
 ### Step 1: Create Credentials
 
@@ -186,7 +186,7 @@ Now create the actual credentials (Client ID and Secret) that PenguinCAM will us
 
 **Application type:** `Web application`
 
-**Name:** `PenguinCAM Web`
+**Name:** `UV-CAM Web`
 (This name is for your reference only, users don't see it)
 
 ### Step 3: Authorized JavaScript Origins
@@ -194,7 +194,7 @@ Now create the actual credentials (Client ID and Secret) that PenguinCAM will us
 Add your app's base URL:
 
 ```
-https://penguincam.popcornpenguins.com
+https://cam.roemen.org
 ```
 
 **Important:**
@@ -208,7 +208,7 @@ https://penguincam.popcornpenguins.com
 Add the OAuth callback endpoint:
 
 ```
-https://penguincam.popcornpenguins.com/auth/callback
+https://cam.roemen.org/auth/callback
 ```
 
 **Important:**
@@ -233,7 +233,7 @@ Click **"Download JSON"** to save a backup (optional but recommended)
 
 ---
 
-## Configuring PenguinCAM
+## Configuring UV-CAM
 
 ### Environment Variables in Railway
 
@@ -244,7 +244,7 @@ Add these variables:
 ```bash
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
-BASE_URL=https://penguincam.popcornpenguins.com
+BASE_URL=https://cam.roemen.org
 AUTH_ENABLED=true
 ALLOWED_DOMAINS=popcornpenguins.com
 ```
@@ -252,7 +252,7 @@ ALLOWED_DOMAINS=popcornpenguins.com
 **Replace:**
 - `your-client-id` with your actual Client ID
 - `your-client-secret` with your actual Client Secret
-- `penguincam.popcornpenguins.com` with your domain
+- `cam.roemen.org` with your domain
 - `popcornpenguins.com` with your Workspace domain
 
 ### Optional: Restrict to Specific Emails
@@ -277,7 +277,7 @@ Railway will automatically redeploy when you add variables.
 
 ### Step 1: Visit Your App
 
-Go to: `https://penguincam.popcornpenguins.com`
+Go to: `https://cam.roemen.org`
 
 You should be redirected to `/auth/login`
 
@@ -293,7 +293,7 @@ You should be redirected to `/auth/login`
 
 ### Step 3: Verify Success
 
-- You should be redirected back to PenguinCAM
+- You should be redirected back to UV-CAM
 - You should see the main interface
 - Top-right should show your profile picture/name
 
@@ -321,7 +321,7 @@ You should be redirected to `/auth/login`
 
 ### "Access Denied" After Login
 
-**Problem:** User is authenticated but blocked from PenguinCAM
+**Problem:** User is authenticated but blocked from UV-CAM
 
 **Causes:**
 1. **Wrong domain:** User email domain doesn't match `ALLOWED_DOMAINS`
@@ -346,9 +346,9 @@ You should be redirected to `/auth/login`
 **Solution:**
 1. Verify all three match exactly:
    ```
-   Google Cloud: https://penguincam.example.com/auth/callback
-   BASE_URL:     https://penguincam.example.com
-   Visiting:     https://penguincam.example.com
+   Google Cloud: https://cam.example.com/auth/callback
+   BASE_URL:     https://cam.example.com
+   Visiting:     https://cam.example.com
    ```
 2. No trailing slashes
 3. HTTPS (not HTTP) in production

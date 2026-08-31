@@ -3,7 +3,7 @@
 Read this before changing `tooling.py`, the `/process-multitool` or `/part-features`
 routes, `static/multitool.js`, or the chamfer code in `frc_cam_postprocessor.py`.
 
-A normal PenguinCAM job uses one cutter for the whole part. That is the right default —
+A normal UV-CAM job uses one cutter for the whole part. That is the right default —
 it's fast, it needs no operator intervention, and it's what most FRC plates want. But
 some parts genuinely need more than one:
 
@@ -190,7 +190,7 @@ post-processor built for the operation that follows it.
 
 When `machining.z_reference.tool_change_height` is configured, a tool change without a
 verified G53 park retracts to that roomier height instead of stopping just above the
-stock. PenguinCAM also creates a standalone resume file at every `TCxx` checkpoint and a
+stock. UV-CAM also creates a standalone resume file at every `TCxx` checkpoint and a
 one-click ZIP containing the main program plus all of those recovery files. A
 resume file begins stopped, asks the operator to reference or home the machine if needed,
 verify the unchanged G54 X/Y zero, load the named tool, and re-zero G54 Z. Only then does it
@@ -614,7 +614,7 @@ full format. Add `--config PenguinCAM-config.yaml` to use your team's settings.
 
 ## Related
 
-- `docs/LOCAL_MODE.md` — running PenguinCAM without Onshape
+- `docs/LOCAL_MODE.md` — running UV-CAM without Onshape
 - `docs/TOOL_COMPENSATION_GUIDE.md` — how offsets work for each feature type
 - `docs/Z_COORDINATE_SYSTEM.md` — where Z=0 is and why re-zeroing matters
 - `docs/ASSUMPTIONS.md` — controller compatibility rules the output must obey

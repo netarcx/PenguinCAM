@@ -23,7 +23,7 @@ Key files: `templates/wizard.html`, `static/wizard.js`, `static/gcode_viewer.js`
 [![Demo video](https://img.youtube.com/vi/gFReFDz-_LI/0.jpg)](https://youtu.be/zPZCTVh2n2Q)
 
 
-🔗 **Live app:** https://penguincam.popcornpenguins.com
+🔗 **Live app:** https://cam.roemen.org
 
 ---
 
@@ -40,7 +40,7 @@ UV-CAM streamlines the workflow from CAD design to CNC machining for FRC teams:
 
 Designed to feel like 3D printer slicers or laser cutter software. Get the design, orient it on the machine, and go. Launching directly from Onshape means no export/import steps, lost files or inconsistent naming. Every part designed by your team members automatically get the same CNC behavior. Students don't have to know feeds & speeds, understand ramp angles, risk machine collisions. Just select the part and go.
 
-**Multi-team support:** Other teams can use the hosted service at https://penguincam.popcornpenguins.com! Just upload a `PenguinCAM-config.yaml` file to your Onshape documents to customize settings for your CNC machine. See "For Other FRC Teams" below.
+**Multi-team support:** Other teams can use the hosted service at https://cam.roemen.org! Just upload a `PenguinCAM-config.yaml` file to your Onshape documents to customize settings for your CNC machine. See "For Other FRC Teams" below.
 
 ---
 
@@ -131,7 +131,7 @@ Designed to feel like 3D printer slicers or laser cutter software. Get the desig
 
 **For offline work or non-Onshape files:**
 1. **Export DXF** from your CAD software
-2. **Visit** https://penguincam.popcornpenguins.com
+2. **Visit** https://cam.roemen.org
 3. **Upload DXF file** via drag-and-drop
 4. **Orient & generate** - Same as above
 5. **Download or save to Drive**
@@ -178,7 +178,7 @@ and the new G54 Z zero. Do not use a temporary G92 zero; restart blocks cancel G
 **For teams using the hosted service:**
 
 Create a `PenguinCAM-config.yaml` file to customize machine settings for your CNC:
-- Download template: [`PenguinCAM-config-template.yaml`](https://github.com/6238/PenguinCAM/blob/main/PenguinCAM-config-template.yaml)
+- Start from the tracked Team 2129 example: [`PenguinCAM-config-2129.yaml`](https://github.com/netarcx/PenguinCAM/blob/uvcam/PenguinCAM-config-2129.yaml)
 - Edit for your team (machine park position, controller type, feeds/speeds, etc.)
 - Save as `PenguinCAM-config.yaml` and drag into your Onshape documents folder
 - Done! Your settings load automatically when team members use UV-CAM
@@ -340,7 +340,7 @@ penguincam/
 ├── ROADMAP.md                         # Future plans
 ├── requirements.txt                   # Python dependencies
 ├── Procfile                           # Railway deployment
-├── PenguinCAM-config-template.yaml    # Team configuration template
+├── PenguinCAM-config-2129.yaml        # Worked machine/team configuration example
 │
 ├── docs/                              # Documentation
 │   ├── DEPLOYMENT_GUIDE.md            # Setup & deployment
@@ -454,14 +454,14 @@ This project is licensed under the [MIT License](LICENSE.txt).
 **Built by FRC Team 6238 Popcorn Penguins**
 
 For questions or support:
-- GitHub Issues: https://github.com/6238/PenguinCAM/issues
+- GitHub Issues: https://github.com/netarcx/PenguinCAM/issues
 - Team mentor: Josh Sirota <josh@popcornpenguins.com>
 
 ---
 
 ## For Other FRC Teams
 
-Interested in using UV-CAM for your team? Great! **You can use the hosted service at https://penguincam.popcornpenguins.com** - no deployment required!
+Interested in using UV-CAM for your team? Great! **You can use the hosted service at https://cam.roemen.org** - no deployment required!
 
 ### Recommended Approach: Use the Hosted Service
 
@@ -470,7 +470,7 @@ UV-CAM is designed to support multiple teams using the same hosted instance. Eac
 **Setup steps (5 minutes):**
 
 1. **Download the configuration template:**
-   - Get [`PenguinCAM-config-template.yaml`](https://github.com/6238/PenguinCAM/blob/main/PenguinCAM-config-template.yaml) from this repository
+   - Get [`PenguinCAM-config-2129.yaml`](https://github.com/netarcx/PenguinCAM/blob/uvcam/PenguinCAM-config-2129.yaml) from this repository and adapt the worked example
 
 2. **Edit for your team:**
    - Update team number and name
@@ -484,7 +484,7 @@ UV-CAM is designed to support multiple teams using the same hosted instance. Eac
    - The file should appear alongside your parts and assemblies
 
 4. **Authenticate:**
-   - Visit https://penguincam.popcornpenguins.com
+   - Visit https://cam.roemen.org
    - Sign in with Onshape (one-time setup per team member)
    - Your team's configuration will be automatically loaded!
 

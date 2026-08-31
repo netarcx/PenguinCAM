@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PenguinCAM is a web-based CAM post-processor that generates CNC G-code from DXF files exported from Onshape. Built for FRC Team 6238, it automates the CAD-to-CNC workflow for flat plates without requiring CAM software.
+UV-CAM is a web-based CAM post-processor that generates CNC G-code from DXF files exported from Onshape. Built for FRC Team 6238, it automates the CAD-to-CNC workflow for flat plates without requiring CAM software.
 
-**Live deployment:** https://penguincam.popcornpenguins.com
+**Live deployment:** https://cam.roemen.org
 
 ## Development Commands
 
@@ -155,7 +155,7 @@ Detailed documentation lives in the `docs/` directory. **Read these before modif
 
 ## Testing
 
-Tests compare PenguinCAM output against Fusion 360 CAM output using the `pygcode` library. Test fixtures are DXF files with known expected G-code.
+Tests compare UV-CAM output against Fusion 360 CAM output using the `pygcode` library. Test fixtures are DXF files with known expected G-code.
 
 ```bash
 make test  # Runs all comparison tests

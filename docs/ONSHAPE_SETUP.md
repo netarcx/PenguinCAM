@@ -2,7 +2,7 @@
 
 **For Team Admins & Mentors**
 
-This guide shows how to install the PenguinCAM extension in your Onshape classroom account so students can export parts with one click.
+This guide shows how to install the UV-CAM extension in your Onshape classroom account so students can export parts with one click.
 
 ---
 
@@ -10,7 +10,7 @@ This guide shows how to install the PenguinCAM extension in your Onshape classro
 
 - Onshape classroom account
 - Admin access to manage classroom extensions ("owner", not "admin")
-- PenguinCAM deployed and OAuth configured (see [Integrations Guide](INTEGRATIONS_GUIDE.md))
+- UV-CAM deployed and OAuth configured (see [Integrations Guide](INTEGRATIONS_GUIDE.md))
 
 ---
 
@@ -29,12 +29,12 @@ This guide shows how to install the PenguinCAM extension in your Onshape classro
 
 **Name:**
 ```
-Send to PenguinCAM
+Send to UV-CAM
 ```
 
 **Description:**
 ```
-Send this part to PenguinCAM for CNC
+Send this part to UV-CAM for CNC
 ```
 
 **Location:**
@@ -53,7 +53,7 @@ Selected part
 
 **Action URL:** (the UI runs as an Onshape right-side element panel)
 ```
-https://penguincam.popcornpenguins.com/onshape/element-panel?documentId={$documentId}&workspaceId={$workspaceId}&elementId={$elementId}&partId={$partId}
+https://cam.roemen.org/onshape/element-panel?documentId={$documentId}&workspaceId={$workspaceId}&elementId={$elementId}&partId={$partId}
 ```
 
 ⚠️ **IMPORTANT:** Use `{$documentId}` (dollar sign INSIDE braces), not `${documentId}`
@@ -78,20 +78,20 @@ Upload an SVG icon (max 100 KB) or leave blank for default
 3. **Test it!**
    - Open any Part Studio
    - Right-click a part in the feature tree
-   - Look for "Send to PenguinCAM" in the Applications menu
+   - Look for "Send to UV-CAM" in the Applications menu
 
 ---
 
 ## How Students Use It
 
 ### **First Time:**
-1. Right-click part → "Send to PenguinCAM"
+1. Right-click part → "Send to UV-CAM"
 2. Sign in with team Google account (one-time)
 3. Approve Onshape access (one-time)
-4. Part loads automatically in PenguinCAM!
+4. Part loads automatically in UV-CAM!
 
 ### **After Setup:**
-1. Right-click part → "Send to PenguinCAM"
+1. Right-click part → "Send to UV-CAM"
 2. Part loads immediately!
 3. Orient, generate, download
 
@@ -112,7 +112,7 @@ Upload an SVG icon (max 100 KB) or leave blank for default
 
 **Check:**
 - Action URL correct? (`{$documentId}` not `${documentId}`)
-- PenguinCAM URL correct? (https://penguincam.popcornpenguins.com)
+- UV-CAM URL correct? (https://cam.roemen.org)
 - Onshape OAuth configured? (See [Integrations Guide](INTEGRATIONS_GUIDE.md))
 
 ### **Authentication fails**
@@ -120,7 +120,7 @@ Upload an SVG icon (max 100 KB) or leave blank for default
 **Check:**
 - Google OAuth configured?
 - Student using team Google account?
-- Allowed domains configured in PenguinCAM?
+- Allowed domains configured in UV-CAM?
 
 ### **Part doesn't load**
 
@@ -141,16 +141,16 @@ Look for:
 - Extension uses OAuth 2.0 for secure authentication
 - Students only see their own authenticated sessions
 - No API keys exposed to client
-- All requests go through your PenguinCAM server
+- All requests go through your UV-CAM server
 
 ---
 
 ## Alternative: Manual DXF Upload
 
-If you can't install company extensions, students can still use PenguinCAM:
+If you can't install company extensions, students can still use UV-CAM:
 
 1. Right-click face in Onshape → Export → DXF
-2. Go to https://penguincam.popcornpenguins.com
+2. Go to https://cam.roemen.org
 3. Upload DXF file
 4. Orient, generate, download
 
@@ -166,4 +166,4 @@ Less convenient but fully functional!
 
 ---
 
-**Questions?** Check Railway logs or contact your PenguinCAM administrator.
+**Questions?** Check Railway logs or contact your UV-CAM administrator.

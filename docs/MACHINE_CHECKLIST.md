@@ -1,4 +1,4 @@
-Before running PenguinCAM-generated G-code, confirm the following.
+Before running UV-CAM-generated G-code, confirm the following.
 
 Required for the default (portable, G54-only) output:
 ☐ Work zero (G54) set at the part origin: X=0/Y=0 at the lower-left, Z=0 at the sacrifice-board surface
@@ -24,5 +24,5 @@ permanently-fixtured tube jig):
 
 Notes:
 - Easel (Inventables) is not a supported target (rejects arcs and non-G54 offsets). On an
-  Easel machine, send PenguinCAM output directly to the underlying GRBL controller instead.
+  Easel machine, send UV-CAM output directly to the underlying GRBL controller instead.
 ❌ If a required box is unchecked, review or modify the post-processor before running.

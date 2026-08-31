@@ -213,7 +213,7 @@ function legacyCopy(text) {
 
 function toYaml(r) {
     return [
-        '# PenguinCAM material block (feeds/speeds)',
+        '# UV-CAM material block (feeds/speeds)',
         'spindle_speed: ' + r.rpm,
         'feed_rate: ' + r.feed_xy,
         'ramp_feed_rate: ' + r.ramp_feed,

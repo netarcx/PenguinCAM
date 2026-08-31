@@ -1,6 +1,6 @@
-# PenguinCAM Deployment Guide
+# UV-CAM Deployment Guide
 
-**Complete guide to deploying PenguinCAM on Railway**
+**Complete guide to deploying UV-CAM on Railway**
 
 For the shop's local UP2 deployment and GitHub Actions rollout, see
 [Automatic deployment to UP2](UP2_DEPLOYMENT.md).
@@ -22,7 +22,7 @@ For the shop's local UP2 deployment and GitHub Actions rollout, see
 
 Before deploying, you need:
 
-- ✅ GitHub account with PenguinCAM repository
+- ✅ GitHub account with UV-CAM repository
 - ✅ Railway account (free tier available)
 - ✅ Google Cloud Console credentials (see [AUTHENTICATION_GUIDE.md](AUTHENTICATION_GUIDE.md))
 - ✅ Onshape OAuth credentials (see [INTEGRATIONS_GUIDE.md](INTEGRATIONS_GUIDE.md))
@@ -42,7 +42,7 @@ Before deploying, you need:
 
 1. Click **"New Project"**
 2. Select **"Deploy from GitHub repo"**
-3. Choose your **PenguinCAM repository**
+3. Choose your **UV-CAM repository**
 4. Railway will automatically:
    - Detect it's a Python app
    - Read `Procfile` for startup command
@@ -81,7 +81,7 @@ Navigate to your Railway service → **Variables** tab:
 #### **Base Configuration**
 ```bash
 BASE_URL=https://your-domain.com
-# Example: https://penguincam.popcornpenguins.com
+# Example: https://cam.roemen.org
 # IMPORTANT: Must be HTTPS, no trailing slash
 ```
 
@@ -144,7 +144,7 @@ FLASK_ENV=production
 
 1. Go to your service → **Settings** → **Domains**
 2. Click **"Custom Domain"**
-3. Enter your subdomain: `penguincam.yourdomain.com`
+3. Enter your subdomain: `cam.yourdomain.com`
 4. Railway will show you the CNAME target
 
 #### Step 2: Configure DNS
@@ -170,7 +170,7 @@ TTL:    Auto or 3600
 Once domain is active, update:
 
 ```bash
-BASE_URL=https://penguincam.yourdomain.com
+BASE_URL=https://cam.yourdomain.com
 ```
 
 Also update in Google Cloud Console and Onshape:
@@ -289,7 +289,7 @@ If needed, you can trigger a manual redeploy:
 4. View real-time logs
 
 **Health check:**
-Visit your app URL - you should see the PenguinCAM interface.
+Visit your app URL - you should see the UV-CAM interface.
 
 ---
 
@@ -357,7 +357,7 @@ Railway dashboard shows current usage and costs in real-time.
 - Railway Discord: https://discord.gg/railway
 - Railway Docs: https://docs.railway.app
 
-**PenguinCAM Issues:**
+**UV-CAM Issues:**
 - GitHub Issues: [Your repo URL]
 - Team mentor: [Your contact]
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the tube facing mode in PenguinCAM that squares the ends of box tubing held in a jig. The operation uses a pre-generated Fusion 360 adaptive toolpath with Y-coordinate offsets applied for a two-pass flip strategy.
+This document describes the tube facing mode in UV-CAM that squares the ends of box tubing held in a jig. The operation uses a pre-generated Fusion 360 adaptive toolpath with Y-coordinate offsets applied for a two-pass flip strategy.
 
 **Purpose**: Create a perfectly square, flat end face on 1x1 or 2x1 box tubing from rough bandsaw cuts.
 
@@ -342,7 +342,7 @@ M30
 
 ---
 
-## Differences from Standard PenguinCAM Mode
+## Differences from Standard UV-CAM Mode
 
 | Aspect | Standard Mode | Tube Facing Mode |
 |--------|---------------|------------------|
@@ -352,7 +352,7 @@ M30
 | Z during cut | Constant depth | Multiple Z levels |
 | Operation | Holes, pockets, perimeter | Adaptive facing + profile |
 | Multi-pass | Single piece | Two-pass with 180° flip |
-| Tool compensation | Applied by PenguinCAM | Built into Fusion toolpath |
+| Tool compensation | Applied by UV-CAM | Built into Fusion toolpath |
 
 ---
 

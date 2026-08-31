@@ -75,7 +75,7 @@ Each exists because it was actually violated at some point in development:
 - **Drill sizing** — a drill only gets holes drawn at its own size, ±tolerance; undersize
   substitutions state the consequence.
 - **Feature coverage** — every hole and pocket must be cut exactly once.
-- **No canned cycles** — GRBL 1.1 has no G81–G89, and PenguinCAM's own estimator, preview
+- **No canned cycles** — GRBL 1.1 has no G81–G89, and UV-CAM's own estimator, preview
   and simulator all parse only G0–G3.
 - **Flute count in aluminum** — 3+ flute cutters are refused outright, not derated. The
   gullets pack, the packed chips weld, and the tool snaps; this is the WCP-0543 failure.

@@ -1,6 +1,6 @@
-# Machine-Specific Assumptions for PenguinCAM-Generated G-Code
+# Machine-Specific Assumptions for UV-CAM-Generated G-Code
 
-This document describes **implicit machine, controller, and interpreter assumptions** made by PenguinCAM when generating G-code.
+This document describes **implicit machine, controller, and interpreter assumptions** made by UV-CAM when generating G-code.
 
 These assumptions are **independent of user-configurable inputs** such as material, thickness, tool diameter, feeds/speeds, tab count, retract heights, or cut depth. If any assumption below is false on a target machine, the generated G-code may behave incorrectly or unsafely.
 
@@ -15,7 +15,7 @@ controllers without machine-coordinate moves.
 
 **No canned cycles.** Drilling and pecking are emitted as explicit `G0`/`G1` moves, never
 as `G81`–`G89`. GRBL 1.1 does not implement canned cycles at all — a `G83` there is
-`error:20 Unsupported command` and the program halts — and PenguinCAM's own cycle-time
+`error:20 Unsupported command` and the program halts — and UV-CAM's own cycle-time
 estimator, 3D preview and heightmap simulator all parse only `G0`–`G3`, so a canned cycle
 would be invisible to every one of them. See `FRCPostProcessor._emit_peck_cycle`. The
 audit script fails any program containing a `G8x` word.
@@ -38,8 +38,8 @@ every controller supports:
 Still assumed regardless: standard modal behavior and state persistence.
 
 Note: **Easel** (Inventables) is **not a supported target** — its importer rejects arcs
-(`G2/G3`) and non-`G54` work offsets, which PenguinCAM relies on. Teams on Easel-based
-machines should send PenguinCAM output **directly to the underlying GRBL controller** with a
+(`G2/G3`) and non-`G54` work offsets, which UV-CAM relies on. Teams on Easel-based
+machines should send UV-CAM output **directly to the underlying GRBL controller** with a
 general G-code sender rather than importing it into Easel.
 
 ---

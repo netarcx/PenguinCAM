@@ -2,7 +2,7 @@
 
 ## Overview
 
-PenguinCAM now supports hosting for multiple FRC teams with team-specific configuration stored in Onshape. This architecture allows each team to customize their PenguinCAM experience without requiring separate deployments.
+UV-CAM now supports hosting for multiple FRC teams with team-specific configuration stored in Onshape. This architecture allows each team to customize their UV-CAM experience without requiring separate deployments.
 
 ## Architecture Changes
 
@@ -43,7 +43,7 @@ ui:
 
 ### 3. User Identity from Onshape
 
-When launched from Onshape, PenguinCAM fetches:
+When launched from Onshape, UV-CAM fetches:
 - **User info:** Name, email from `/users/sessioninfo`
 - **Team info:** Company/org name from document owner
 - **Team config:** YAML file from team's documents
@@ -72,7 +72,7 @@ Features are enabled/disabled based on team config:
 ### New Files
 
 - **`team_config.py`** - TeamConfig class for loading/managing config
-- **`PenguinCAM-config-template.yaml`** - Template for teams to customize
+- **`PenguinCAM-config-2129.yaml`** - Worked example for teams to customize
 
 ### Modified Files
 
@@ -85,7 +85,7 @@ Features are enabled/disabled based on team config:
 ### Scenario 1: Standalone DXF Upload (Anonymous)
 
 ```
-User visits penguincam.popcornpenguins.com
+User visits cam.roemen.org
   ↓
 No authentication required
   ↓
@@ -97,7 +97,7 @@ Downloads .nc file
 ### Scenario 2: Onshape Import with Drive Save
 
 ```
-User clicks "Send to PenguinCAM" in Onshape
+User clicks "Send to UV-CAM" in Onshape
   ↓
 Onshape OAuth (one-time per session)
   ↓
@@ -122,7 +122,7 @@ Saves to team's configured Drive folder
    - Name it: `PenguinCAM-config.yaml`
 
 2. **Copy Template:**
-   - Use `PenguinCAM-config-template.yaml` as starting point
+   - Use `PenguinCAM-config-2129.yaml` as a starting point
    - Update team number, name
    - Add Google Drive folder ID if using Drive
 
@@ -193,7 +193,7 @@ safety:
 - **Per-Team Branding:** Custom logo, colors in UI header
 - **Custom Material Presets:** Team-specific feed rates
 - **Usage Analytics:** Track G-code generation per team
-- **Team Directory:** Public list of teams using PenguinCAM
+- **Team Directory:** Public list of teams using UV-CAM
 
 ## Migration from Single-Team
 
@@ -225,12 +225,12 @@ safety:
 
 ### For Teams
 
-- **No barriers to entry:** Try PenguinCAM without any setup
+- **No barriers to entry:** Try UV-CAM without any setup
 - **Easy customization:** Edit YAML file in Onshape
 - **Secure:** Each team's Drive folder is isolated
 - **Familiar:** YAML format used in FRC robot code
 
-### For PenguinCAM
+### For UV-CAM
 
 - **Single deployment:** One app serves all teams
 - **Scalable:** Add teams without code changes

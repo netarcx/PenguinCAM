@@ -1,4 +1,4 @@
-# Local Mode — running PenguinCAM without Onshape
+# Local Mode — running UV-CAM without Onshape
 
 Read this before changing `local_mode.py`, `penguincam_local.py`, or any of the
 authentication gates in `frc_cam_gui_app.py`.
@@ -103,6 +103,6 @@ in nothing, and a `Secure` cookie there is browser-dependent at best.
 can reach the app.
 
 Rate limits stay on. Local mode removes authentication and nothing else, so
-`--host 0.0.0.0` puts an unauthenticated PenguinCAM on your network — the launcher warns
+`--host 0.0.0.0` puts an unauthenticated UV-CAM on your network — the launcher warns
 out loud before it does that. Don't expose the port, and don't set `PENGUINCAM_LOCAL` on a
 deployed instance.

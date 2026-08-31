@@ -1,6 +1,6 @@
 # Metrics Collection
 
-PenguinCAM collects usage metrics to help understand how the tool is being used. The system is designed to be minimal, fail-safe, and unobtrusive.
+UV-CAM collects usage metrics to help understand how the tool is being used. The system is designed to be minimal, fail-safe, and unobtrusive.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ PenguinCAM collects usage metrics to help understand how the tool is being used.
 ## Railway Setup
 
 1. **Create a volume** in your Railway project:
-   - Name: `penguincam-metrics` (or any name you prefer)
+   - Name: `uvcam-metrics` (or any name you prefer)
    - Railway will automatically provide these environment variables:
      - `RAILWAY_VOLUME_NAME` - name of the volume
      - `RAILWAY_VOLUME_MOUNT_PATH` - mount path (e.g., `/data`)

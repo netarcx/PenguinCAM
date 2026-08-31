@@ -1,4 +1,4 @@
-# PenguinCAM Integrations Guide
+# UV-CAM Integrations Guide
 
 **Complete guide to setting up Onshape API and Google Drive integration**
 
@@ -8,7 +8,7 @@
 
 1. [Onshape Integration](#onshape-integration)
    - [Creating OAuth Application](#creating-onshape-oauth-application)
-   - [Configuring PenguinCAM](#configuring-penguincam-for-onshape)
+   - [Configuring UV-CAM](#configuring-penguincam-for-onshape)
    - [Browser Extension Setup](#onshape-browser-extension)
    - [Testing Onshape Import](#testing-onshape-import)
 2. [Google Drive Integration](#google-drive-integration)
@@ -21,7 +21,7 @@
 
 ## Onshape Integration
 
-PenguinCAM integrates with Onshape to:
+UV-CAM integrates with Onshape to:
 - ✅ Export DXF files directly from Part Studios
 - ✅ Auto-detect the top face of parts
 - ✅ Streamline workflow (no manual DXF export)
@@ -40,21 +40,21 @@ PenguinCAM integrates with Onshape to:
 
 Click **"Create new OAuth application"**
 
-**Application Name:** `PenguinCAM`  
+**Application Name:** `UV-CAM`
 (This is what users see during authorization)
 
 **Primary Format:** `JSON`
 
 **Redirect URLs:** Add these two:
 ```
-https://penguincam.popcornpenguins.com/onshape/oauth/callback
+https://cam.roemen.org/onshape/oauth/callback
 http://localhost:6238/onshape/oauth/callback
 ```
 
 **Important:**
 - First URL: Your production domain
 - Second URL: For local testing (optional)
-- Replace `penguincam.popcornpenguins.com` with your actual domain
+- Replace `cam.roemen.org` with your actual domain
 
 **Permissions:**
 - ☑️ **Read documents** (required)
@@ -74,14 +74,14 @@ Click **"Show"** next to Client Secret to reveal it, then copy.
 
 ---
 
-### Configuring PenguinCAM for Onshape
+### Configuring UV-CAM for Onshape
 
 Add these environment variables in Railway:
 
 ```bash
 ONSHAPE_CLIENT_ID=your-onshape-client-id
 ONSHAPE_CLIENT_SECRET=your-onshape-client-secret
-BASE_URL=https://penguincam.popcornpenguins.com
+BASE_URL=https://cam.roemen.org
 ```
 
 **Replace:**
@@ -97,13 +97,13 @@ Railway will automatically redeploy with new variables.
 
 **Status:** Currently blocked pending Onshape support resolution
 
-The browser extension would allow right-clicking parts in Onshape and selecting "Export to PenguinCAM". Configuration exists but visibility issues are being resolved with Onshape support.
+The browser extension would allow right-clicking parts in Onshape and selecting "Export to UV-CAM". Configuration exists but visibility issues are being resolved with Onshape support.
 
 #### Current Configuration (for reference)
 
 In Onshape Developer Portal → OAuth app → **Extensions** tab:
 
-**Extension Name:** `Export to PenguinCAM`
+**Extension Name:** `Export to UV-CAM`
 
 **Location:** `Element tab` (recommended)
 - Shows in the ☰ menu when viewing a Part Studio
@@ -116,7 +116,7 @@ In Onshape Developer Portal → OAuth app → **Extensions** tab:
 
 **Action URL:**
 ```
-https://penguincam.popcornpenguins.com/onshape/element-panel
+https://cam.roemen.org/onshape/element-panel
 ```
 
 **Action Type:** `GET`
@@ -130,9 +130,9 @@ https://penguincam.popcornpenguins.com/onshape/element-panel
 1. Open Part Studio in Onshape
 2. Copy the URL from browser address bar
    - Example: `https://cad.onshape.com/documents/abc123.../w/xyz789.../e/def456...`
-3. In PenguinCAM, there will be an "Import from Onshape" option
+3. In UV-CAM, there will be an "Import from Onshape" option
 4. Paste the URL
-5. PenguinCAM extracts document/workspace/element IDs automatically
+5. UV-CAM extracts document/workspace/element IDs automatically
 
 ---
 
@@ -140,7 +140,7 @@ https://penguincam.popcornpenguins.com/onshape/element-panel
 
 #### Step 1: Authenticate with Onshape
 
-1. Visit PenguinCAM: `https://penguincam.popcornpenguins.com`
+1. Visit UV-CAM: `https://cam.roemen.org`
 2. You should see "Connect to Onshape" button or link
 3. Click it
 4. Onshape authorization page appears
@@ -148,7 +148,7 @@ https://penguincam.popcornpenguins.com/onshape/element-panel
    - Read your documents
    - Read user information
 6. Click **"Allow"**
-7. Redirected back to PenguinCAM
+7. Redirected back to UV-CAM
 
 #### Step 2: Import a Test Part
 
@@ -158,8 +158,8 @@ https://penguincam.popcornpenguins.com/onshape/element-panel
    - Rectangle with a couple holes
    - Make sure it's a flat plate
 2. Copy the Part Studio URL
-3. In PenguinCAM, use import feature with URL
-4. PenguinCAM should:
+3. In UV-CAM, use import feature with URL
+4. UV-CAM should:
    - Auto-detect the top face
    - Export DXF
    - Generate G-code preview
@@ -173,7 +173,7 @@ https://penguincam.popcornpenguins.com/onshape/element-panel
 
 ## Google Drive Integration
 
-PenguinCAM uploads generated G-code to your team's **Shared Drive** so everyone can access files.
+UV-CAM uploads generated G-code to your team's **Shared Drive** so everyone can access files.
 
 ### Shared Drive Setup
 
@@ -249,7 +249,7 @@ Only set these if you want different names/paths.
 
 #### Step 1: Process a Test File
 
-1. Log in to PenguinCAM
+1. Log in to UV-CAM
 2. Upload a sample DXF or import from Onshape
 3. Generate G-code
 4. Preview looks correct
@@ -291,7 +291,7 @@ Have another team member:
 **Solutions:**
 1. Verify redirect URLs in Onshape app settings match exactly:
    ```
-   https://penguincam.yourdomain.com/onshape/oauth/callback
+   https://cam.yourdomain.com/onshape/oauth/callback
    ```
 2. Check `ONSHAPE_CLIENT_ID` and `ONSHAPE_CLIENT_SECRET` in Railway
 3. Ensure `BASE_URL` matches your domain exactly
@@ -313,7 +313,7 @@ Have another team member:
 1. Verify Part Studio has actual geometry
 2. Check user has "View" or "Edit" access to document
 3. Try with a document you own
-4. Check PenguinCAM logs in Railway for specific error
+4. Check UV-CAM logs in Railway for specific error
 
 ---
 
@@ -434,7 +434,7 @@ Have another team member:
 
 Here's how everything works together:
 
-1. **Student logs in to PenguinCAM**
+1. **Student logs in to UV-CAM**
    - Google Workspace authentication
    - Gets Drive access tokens
 
@@ -446,12 +446,12 @@ Here's how everything works together:
    - Creates flat plate in Part Studio
    - Adds holes, pockets, perimeter
 
-4. **Student exports to PenguinCAM**
+4. **Student exports to UV-CAM**
    - Copies Part Studio URL
-   - Pastes into PenguinCAM import
+   - Pastes into UV-CAM import
    - OR uses browser extension (when available)
 
-5. **PenguinCAM processes part**
+5. **UV-CAM processes part**
    - Auto-detects top face
    - Exports DXF from Onshape
    - Generates G-code
@@ -495,7 +495,7 @@ Team Documents/
 ```
 Popcorn Penguins/
 ├── CNC/
-│   ├── G-code/           ← PenguinCAM uploads here
+│   ├── G-code/           ← UV-CAM uploads here
 │   ├── Setup Sheets/
 │   └── CAM Projects/
 ├── Designs/
@@ -503,7 +503,7 @@ Popcorn Penguins/
 ```
 
 **File naming:**
-- Auto-generated by PenguinCAM
+- Auto-generated by UV-CAM
 - Format: `{dxf_name}_{timestamp}.nc`
 - Keeps versions separate
 
@@ -543,7 +543,7 @@ Before going live with students:
 - [ ] Check permissions are correct
 
 **Integration:**
-- [ ] End-to-end: Onshape → PenguinCAM → Drive
+- [ ] End-to-end: Onshape → UV-CAM → Drive
 - [ ] Test with student account
 - [ ] Verify on mobile (responsive)
 - [ ] Check error messages are helpful

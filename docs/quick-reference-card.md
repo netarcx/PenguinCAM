@@ -57,7 +57,7 @@ Done! 🎉
 
 ### Leveling the bed / surfacing the spoilboard
 
-Open **Level bed** in PenguinCAM when the spoilboard needs to be made parallel to the
+Open **Level bed** in UV-CAM when the spoilboard needs to be made parallel to the
 machine's XY travel. Enter the surfacing cutter, area, shallow cut depth, stepover, feed,
 and spindle speed; inspect the raster preview before downloading the `.nc` file.
 
@@ -413,7 +413,7 @@ In the UV-CAM web interface:
    - Save the file
 
 2. **In UV-CAM:**
-   - Go to https://penguincam.popcornpenguins.com
+   - Go to https://cam.roemen.org
    - Sign in with @popcornpenguins.com account
    - Drag & drop DXF file (or click to browse)
    
