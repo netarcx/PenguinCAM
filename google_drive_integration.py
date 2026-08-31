@@ -39,19 +39,28 @@ class GoogleDriveUploader:
     def _load_config(self):
         """Load drive configuration (folder IDs, etc.)"""
         config_file = 'drive_config.json'
+        config = {}
         if os.path.exists(config_file):
             with open(config_file, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
 
-        # Environment variables override
+        # Environment variables override the checked-in defaults.  Returning as soon
+        # as drive_config.json existed meant Railway ignored every DRIVE_* variable;
+        # this repository ships that file, so the documented deployment settings could
+        # never take effect.
         # Check both GOOGLE_DRIVE_FOLDER_ID (preferred) and DRIVE_FOLDER_ID (legacy)
         folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID') or os.environ.get('DRIVE_FOLDER_ID')
 
-        return {
-            'shared_drive_name': os.environ.get('DRIVE_NAME', 'Popcorn Penguins'),
-            'folder_path': os.environ.get('DRIVE_FOLDER', 'CNC/G-code'),
-            'folder_id': folder_id
-        }
+        config.setdefault('shared_drive_name', 'Popcorn Penguins')
+        config.setdefault('folder_path', 'CNC/G-code')
+        config.setdefault('folder_id', None)
+        if os.environ.get('DRIVE_NAME'):
+            config['shared_drive_name'] = os.environ['DRIVE_NAME']
+        if os.environ.get('DRIVE_FOLDER'):
+            config['folder_path'] = os.environ['DRIVE_FOLDER']
+        if folder_id:
+            config['folder_id'] = folder_id
+        return config
     
     def _save_config(self):
         """Save configuration"""
@@ -99,14 +108,20 @@ class GoogleDriveUploader:
         current_folder_id = None
         
         for folder_name in folder_names:
+            # Drive query strings quote literals with single quotes and escape both
+            # apostrophes and backslashes.  A perfectly ordinary folder such as
+            # ``Robots' G-code`` otherwise produced a malformed query.
+            escaped_name = folder_name.replace('\\', '\\\\').replace("'", "\\'")
             query_parts = [
-                f"name='{folder_name}'",
+                f"name='{escaped_name}'",
                 "mimeType='application/vnd.google-apps.folder'",
-                "trashed=false"
+                "trashed=false",
             ]
-            
-            if current_folder_id:
-                query_parts.append(f"'{current_folder_id}' in parents")
+            # The first component must be directly under the shared-drive root.  With
+            # no parent constraint, a same-named folder nested anywhere in the drive
+            # could be selected and uploads would land in the wrong tree.
+            parent_id = current_folder_id or drive_id
+            query_parts.append(f"'{parent_id}' in parents")
             
             query = ' and '.join(query_parts)
             

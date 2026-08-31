@@ -98,7 +98,12 @@ def parse_moves(text):
     Z linearly across the arc (handles helical entry). kind is 'rapid' for G0,
     'feed' otherwise. Modal motion mode and modal coordinates are honored.
     """
-    x = y = z = 0.0
+    # A G-code file does not define where the cutter was before its first commanded
+    # move.  Assuming (0, 0, 0) makes the normal opening ``G0 Z<safe>`` look like a
+    # physical move up from inside the stock, so the heightmap stamps a phantom hole at
+    # the origin.  Learn each coordinate from the program and only emit a segment once
+    # both endpoints are known.
+    x = y = z = None
     motion = None  # 0,1,2,3
     moves = []
 
@@ -137,9 +142,13 @@ def parse_moves(text):
 
         if motion in (0, 1):
             kind = "rapid" if motion == 0 else "feed"
-            moves.append((kind, x, y, z, nx, ny, nz))
+            if None not in (x, y, z, nx, ny, nz):
+                moves.append((kind, x, y, z, nx, ny, nz))
             x, y, z = nx, ny, nz
         else:  # arc
+            if None in (x, y, z, nx, ny, nz):
+                x, y, z = nx, ny, nz
+                continue
             i = words.get("I", 0.0)
             j = words.get("J", 0.0)
             for seg in _tessellate_arc(x, y, z, nx, ny, nz, i, j, ccw=(motion == 3)):

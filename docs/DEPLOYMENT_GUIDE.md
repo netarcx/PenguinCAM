@@ -2,6 +2,9 @@
 
 **Complete guide to deploying PenguinCAM on Railway**
 
+For the shop's local UP2 deployment and GitHub Actions rollout, see
+[Automatic deployment to UP2](UP2_DEPLOYMENT.md).
+
 ---
 
 ## Table of Contents

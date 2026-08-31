@@ -39,6 +39,7 @@
   // non-faces. We only act on REQUESTED_SELECTION (the restricted response) and ignore
   // Onshape's generic SELECTION events. active gates stray responses after leaving.
   var active = false;
+  var session = 0;
 
   function arm() {
     counter++;
@@ -54,10 +55,21 @@
     dbg('onshape:arm', counter);
   }
 
-  P.startFaceSelection = function () { active = true; arm(); };
-  P.stopFaceSelection = function () { active = false; };
+  P.startFaceSelection = function () {
+    if (active) return;
+    active = true;
+    session++;
+    arm();
+  };
+  P.stopFaceSelection = function () {
+    if (!active) return;
+    active = false;
+    session++;                    // invalidate an export that is still in flight
+    if (P.onSelectionBusy) P.onSelectionBusy(false);
+  };
 
   window.addEventListener('message', function (e) {
+    if (e.source !== window.parent) return;
     if (!isOnshapeOrigin(e.origin)) return;
     var d = e.data || {};
     if (d.messageName !== 'REQUESTED_SELECTION') return;  // ignore generic SELECTION (non-faces)
@@ -71,10 +83,10 @@
     var faceId = s.selectionId || s.entityId || s.id;
     var partId = s.partId || s.bodyId || null;
     if (!faceId) { arm(); return; }
-    exportFace(faceId, partId);
+    exportFace(faceId, partId, session);
   });
 
-  function exportFace(faceId, partId) {
+  function exportFace(faceId, partId, mine) {
     if (P.onSelectionBusy) P.onSelectionBusy(true);
     // In 2.5D mode the backend builds a depth-layered DXF of all parallel faces;
     // otherwise it exports the single selected face flat. Read the mode live so a
@@ -93,6 +105,7 @@
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
+        if (mine !== session || !active) return;
         if (P.onSelectionBusy) P.onSelectionBusy(false);
         if (!res.ok || !res.j.success) {
           if (P.onSelectionError) P.onSelectionError((res.j && res.j.error) || 'export failed');
@@ -108,6 +121,7 @@
         if (active) arm();  // imported — go straight back into select-a-face mode
       })
       .catch(function (err) {
+        if (mine !== session || !active) return;
         if (P.onSelectionBusy) P.onSelectionBusy(false);
         if (P.onSelectionError) P.onSelectionError(String(err));
         if (active) arm();

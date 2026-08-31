@@ -13,6 +13,7 @@ A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout �
 - **Onshape embedding:** popup OAuth with `SameSite=None; Secure` cookies, continuous face-selection, light/dark theme tied to Onshape's `?theme=`.
 - **Multi-tool operations:** an ordered operation list per part, each operation with its own tool and its own scope (small holes on the 1/8", pockets and profile on the 1/4", edge break on a V-bit). The job groups the work by tool and pauses for a manual tool change at each switch. See [docs/MULTI_TOOL_GUIDE.md](docs/MULTI_TOOL_GUIDE.md).
 - **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF/STEP files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
+- **Bed leveling:** generate and preview a guarded spoilboard-surfacing raster from the **Level bed** utility, with machine-travel validation and a downloadable `.nc` program.
 - **Save:** split "Download Program / Send to Google Drive" button (Drive gated by config, remembers last choice).
 - The wizard is the whole app: `/` (and `/app`) serve it full-screen in DXF-upload mode; the Onshape panel serves the same wizard with face-selection as the source.
 
@@ -190,6 +191,7 @@ For teams self-hosting PenguinCAM, it's can be deployed on Railway (server-based
 
 **Setup guides:**
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) - Deploy to Railway, environment variables
+- [UP2 Deployment](docs/UP2_DEPLOYMENT.md) - Automatic tested deployments to the shop server
 - [Authentication Guide](docs/AUTHENTICATION_GUIDE.md) - Google OAuth and Workspace setup
 - [Integrations Guide](docs/INTEGRATIONS_GUIDE.md) - Onshape and Google Drive configuration
 - [Onshape Extension Setup](docs/ONSHAPE_SETUP.md) - Install one-click export in Onshape ⭐

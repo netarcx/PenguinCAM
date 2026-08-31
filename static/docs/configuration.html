@@ -225,6 +225,28 @@
             also moves X/Y away from the work.
         </p>
 
+        <h3>Bed Leveling</h3>
+        <p>
+            The Level bed utility takes the selected bed's X/Y/Z travel from
+            <code>machine.dimensions</code>. Its other starting values come from that same
+            machine's <code>default_tool</code>, <code>z_reference</code>, and default material
+            preset. A dedicated surfacing cutter can be configured explicitly:
+        </p>
+        <pre><code>bed_leveling:
+  tool_diameter: "1in"
+  stepover_percent: 60
+  depth: 0.01
+  safe_z: 0.5
+  feed_rate: 75
+  plunge_rate: 20
+  spindle_speed: 18000</code></pre>
+        <p>
+            Put this block under <code>machining</code>. Lengths accept the same inch or
+            metric notation as the rest of the file. The form remains editable for a
+            one-off smaller area, but the server refuses X/Y/Z values outside the
+            configured travel.
+        </p>
+
         <h3>Material Presets</h3>
         <p>
             Define materials with appropriate feed rates and speeds for your machine's rigidity:

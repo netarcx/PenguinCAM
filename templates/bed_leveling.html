@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ theme|default('dark') }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bed Leveling · PenguinCAM</title>
+    <link rel="icon" href="{{ url_for('static', filename='popcornlogo.svg') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
+    <link rel="stylesheet" href="{{ url_for('static', filename='wizard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='bed_leveling.css') }}">
+</head>
+<body>
+    <div id="leveler">
+        <header id="wiz-header">
+            <a class="brand" href="/app" aria-label="Back to PenguinCAM">
+                <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+                    <path class="bm-fill" d="M12 12V3.5A8.5 8.5 0 0 0 3.5 12z"></path>
+                    <path class="bm-fill" d="M12 12v8.5a8.5 8.5 0 0 0 8.5-8.5z"></path>
+                    <circle class="bm-ring" cx="12" cy="12" r="8.5"></circle>
+                    <path class="bm-ring" d="M12 0.5v23M0.5 12h23"></path>
+                </svg>
+                <span class="brand-name">Penguin<b>CAM</b></span>
+            </a>
+            <span class="utility-title">Bed leveling</span>
+            <a class="btn small header-back" href="/app">Back to CAM</a>
+        </header>
+
+        <main class="level-grid">
+            <form id="level-form" class="level-panel">
+                <div class="panel-head"><h2>Surfacing setup</h2></div>
+                <p class="level-intro">True the spoilboard with one continuous raster cut. All dimensions are inches.</p>
+
+                {% if machines and machines|length > 1 %}
+                <label class="field">
+                    <span>Machine</span>
+                    <select id="level-machine" autocomplete="off">
+                        {% for mid, m in machines.items() %}
+                        <option value="{{ mid }}" {% if mid == current_machine_id %}selected{% endif %}>{{ m.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                {% endif %}
+
+                <div class="fieldgrid">
+                    <label class="field">
+                        <span>Surface width (X)</span>
+                        <input id="level-width" type="number" min="0.1" max="{{ machine_x_max }}" step="0.001" value="{{ machine_x_max }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Surface height (Y)</span>
+                        <input id="level-height" type="number" min="0.1" max="{{ machine_y_max }}" step="0.001" value="{{ machine_y_max }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Surfacing cutter</span>
+                        <input id="level-tool" type="number" min="0.01" step="0.001" value="{{ bed_leveling_defaults.tool_diameter }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Stepover (%)</span>
+                        <input id="level-stepover" type="number" min="10" max="90" step="1" value="{{ bed_leveling_defaults.stepover_percent }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Cut depth</span>
+                        <input id="level-depth" type="number" min="0.001" max="0.125" step="0.001" value="{{ bed_leveling_defaults.depth }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Safe Z</span>
+                        <input id="level-safe-z" type="number" min="0.05" max="{{ machine_z_max }}" step="0.01" value="{{ bed_leveling_defaults.safe_z }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Feed rate (in/min)</span>
+                        <input id="level-feed" type="number" min="1" max="500" step="1" value="{{ bed_leveling_defaults.feed_rate }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Plunge rate (in/min)</span>
+                        <input id="level-plunge" type="number" min="1" max="200" step="1" value="{{ bed_leveling_defaults.plunge_rate }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Spindle (RPM)</span>
+                        <input id="level-rpm" type="number" min="1000" max="40000" step="100" value="{{ bed_leveling_defaults.spindle_speed }}" required>
+                    </label>
+                </div>
+
+                <div class="zero-callout">
+                    <strong>Work zero</strong>
+                    <span>Set G54 X0 Y0 at the lower-left of the area and Z0 on the current spoilboard top.</span>
+                </div>
+                <div id="level-error" class="errors" role="alert" aria-live="polite"></div>
+                <button class="btn primary level-generate" type="submit">Generate leveling program</button>
+            </form>
+
+            <section class="level-panel preview-panel">
+                <div class="panel-head">
+                    <h2>Toolpath preview</h2>
+                    <div id="level-stats" class="level-stats"></div>
+                </div>
+                <div class="level-canvas-wrap">
+                    <canvas id="level-canvas" aria-label="Bed leveling raster toolpath"></canvas>
+                    <div id="level-empty" class="panel-empty">
+                        <strong>No program yet</strong>
+                        <span>Generate the program to inspect every surfacing pass.</span>
+                    </div>
+                </div>
+                <p class="hint origin-hint">The amber dot is G54 X0 Y0. The shaded stroke shows the cutter&rsquo;s swept width.</p>
+            </section>
+
+            <section class="level-panel code-panel">
+                <div class="panel-head">
+                    <h2>Program</h2>
+                    <button id="level-download" class="btn primary small" type="button" disabled>Download .nc</button>
+                </div>
+                <textarea id="level-gcode" readonly spellcheck="false" aria-label="Generated bed leveling G-code"></textarea>
+            </section>
+        </main>
+    </div>
+
+    <script>
+      window.BedLeveling = {
+        machineId: {{ current_machine_id|tojson }},
+        machines: {{ machines_info|tojson }}
+      };
+    </script>
+    <script src="{{ url_for('static', filename='bed_leveling.js') }}"></script>
+</body>
+</html>

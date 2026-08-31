@@ -154,6 +154,19 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 600; }
   white-space: nowrap;
 }
 .brand-name b { font-weight: 700; color: var(--accent-text); }
+.header-utility {
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--ink-2);
+  font: 600 10px/1.2 var(--font-display);
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.header-utility:hover { border-color: var(--line-3); background: var(--hover); color: var(--ink); }
 
 /* Which team config resolved, so it can be confirmed at a glance (it decides
    every feed, speed and machine limit downstream). */

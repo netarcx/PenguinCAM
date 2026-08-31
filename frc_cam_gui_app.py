@@ -80,6 +80,7 @@ import drill_sizes
 import tube_designer
 import tooling
 from tooling import ToolingError
+from bed_leveling import BedLevelingError, generate_bed_leveling, parse_spec
 
 # Local (offline, no-Onshape) mode. Reading the flag once at import keeps every gate
 # consistent for the life of the process.
@@ -553,6 +554,8 @@ def _app_template_context():
     default_tool_diameter_text = team_config_dict.get('default_tool_diameter_text') or '4mm'
     machine_x_max = team_config_dict.get('machine_x_max') or 48.0
     machine_y_max = team_config_dict.get('machine_y_max') or 96.0
+    machine_z_max = team_config_dict.get('machine_z_max') or 8.0
+    bed_leveling_defaults = team_config_dict.get('bed_leveling') or {}
 
     available_materials = team_config.get_available_materials(current_machine_id)
     available_materials['aluminum_tube'] = {
@@ -575,8 +578,10 @@ def _app_template_context():
             'name': md.get('machine_name') or mid,
             'x_max': md.get('machine_x_max'),
             'y_max': md.get('machine_y_max'),
+            'z_max': md.get('machine_z_max'),
             'tool': md.get('default_tool_diameter'),
             'tool_text': md.get('default_tool_diameter_text'),
+            'bed_leveling': md.get('bed_leveling') or {},
             'materials': [
                 {'id': matid, 'name': m.get('name') or matid}
                 for matid, m in mats.items() if matid != 'aluminum_tube'
@@ -591,6 +596,8 @@ def _app_template_context():
         'default_tool_diameter_text': default_tool_diameter_text,
         'machine_x_max': machine_x_max,
         'machine_y_max': machine_y_max,
+        'machine_z_max': machine_z_max,
+        'bed_leveling_defaults': bed_leveling_defaults,
         'using_default_config': session.get('using_default_config', False),
         'machines': machines,
         'machines_info': machines_info,
@@ -1148,6 +1155,56 @@ def wizard_app():
     """Alias for the root route: the standalone (DXF upload) wizard. Kept so existing
     links to /app keep working; both it and / render the same full-screen upload wizard."""
     return _serve_wizard_upload()
+
+
+@app.route('/bed-leveling')
+def bed_leveling_page():
+    """Dedicated spoilboard-surfacing utility; no part upload is required."""
+    gate = _require_onshape_auth()
+    if gate:
+        return gate
+    theme = 'light' if request.args.get('theme', '').lower() == 'light' else 'dark'
+    return render_template('bed_leveling.html', theme=theme, **_app_template_context())
+
+
+@app.route('/api/bed-leveling', methods=['POST'])
+@limiter.limit("30 per minute")
+def bed_leveling_api():
+    """Validate a surfacing setup and return G-code plus its 2D preview path."""
+    _ensure_local_team_config()
+    team_config = TeamConfig(session.get('team_config_data', {}))
+    data = request.get_json(silent=True) or {}
+    machine_id = data.get('machine_id') or session.get(
+        'machine_id', team_config.default_machine_id)
+    if machine_id not in team_config.get_available_machines():
+        return jsonify({'success': False,
+                        'error': f'Unknown machine: {machine_id}'}), 400
+    machine = team_config.to_dict(machine_id)
+    try:
+        spec = parse_spec(
+            data,
+            machine_width=machine.get('machine_x_max') or 48.0,
+            machine_height=machine.get('machine_y_max') or 96.0,
+            machine_z=machine.get('machine_z_max'),
+        )
+        result = generate_bed_leveling(spec)
+    except BedLevelingError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+    metrics.log_event('bed_leveling_generated',
+                      team_number=session.get('team_number'),
+                      user_email=session.get('user_email'),
+                      metadata={'width': spec.width, 'height': spec.height,
+                                'rows': result.rows})
+    return jsonify({
+        'success': True,
+        'gcode': result.gcode,
+        'filename': result.filename,
+        'path': [[round(x, 5), round(y, 5)] for x, y in result.path],
+        'area': {'width': spec.width, 'height': spec.height},
+        'tool_diameter': spec.tool_diameter,
+        'stats': result.stats(),
+    })
 
 
 def _clean_onshape_id(value):
@@ -2927,8 +2984,12 @@ def onshape_oauth_callback():
             return "Authorization failed: No code received", 400
 
         # Verify state (CSRF protection)
-        expected_state = session.get('onshape_oauth_state')
-        if state != expected_state:
+        expected_state = session.pop('onshape_oauth_state', None)
+        # Do not let an unsolicited callback through just because both missing values
+        # compare equal.  Consuming the expected state also makes each login attempt
+        # single-use, including failed callbacks.
+        if (not state or not expected_state
+                or not secrets.compare_digest(state, expected_state)):
             return "Authorization failed: Invalid state", 400
 
         # Exchange code for access token
@@ -2962,9 +3023,6 @@ def onshape_oauth_callback():
         _load_team_config_into_session(client)
 
         log("="*60 + "\n")
-
-        # Clean up OAuth state
-        session.pop('onshape_oauth_state', None)
 
         # Safeguard: browsers drop cookies over ~4KB, which would silently lose the
         # tokens we just wrote. Warn if the session is getting close.

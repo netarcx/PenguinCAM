@@ -859,6 +859,76 @@ def audit_refusal(name, job, expected):
         fail(name, f'refusal did not explain {expected!r}: {result.errors[:1]}')
 
 
+def audit_bed_leveling(name):
+    """Independently walk the standalone spoilboard raster.
+
+    It does not use FRCPostProcessor or the plate material frame, so feeding it through
+    audit() would make that function validate assumptions this program intentionally does
+    not have. This small simulator checks the physical promises unique to surfacing.
+    """
+    global checked
+    checked += 1
+    from bed_leveling import generate_bed_leveling, parse_spec
+
+    spec = parse_spec({
+        'width': 23.5, 'height': 17.25, 'tool_diameter': 1.0,
+        'stepover_percent': 63, 'depth': 0.012, 'feed_rate': 95,
+        'plunge_rate': 18, 'spindle_speed': 18000, 'safe_z': 0.3,
+    }, machine_width=24, machine_height=18, machine_z=8)
+    result = generate_bed_leveling(spec)
+    lines = result.gcode.splitlines()
+    check_text_rules(name, lines)
+    check_offset_reset_before_motion(name, lines)
+
+    pause = next((i for i, line in enumerate(lines) if line.startswith('M0')), None)
+    spindle = next((i for i, line in enumerate(lines)
+                    if re.match(r'^S\d+ M3\b', line)), None)
+    if pause is None or spindle is None or pause >= spindle:
+        fail(name, 'verification pause does not precede spindle start')
+    if any(re.match(r'^M[789]\b', line) for line in lines):
+        fail(name, 'emits a coolant code even though bed leveling has no coolant config')
+    if 'G20  ; Inches' not in lines:
+        fail(name, 'does not establish inch units')
+    if sum(1 for line in lines if line.startswith('M30')) != 1:
+        fail(name, 'does not contain exactly one program end')
+
+    radius = spec.tool_diameter / 2.0
+    x = y = z = 0.0
+    saw_cut = False
+    last_cut_line = -1
+    last_spindle_off = -1
+    for line_number, raw in enumerate(lines):
+        code = re.sub(r'\(.*?\)', '', raw).split(';')[0].strip()
+        if not code:
+            continue
+        if re.match(r'^M0?5\b', code):
+            last_spindle_off = line_number
+        head = code.split()[0]
+        if head not in ('G0', 'G1'):
+            continue
+        words = dict((word, float(value)) for word, value in NUM.findall(code))
+        nx, ny, nz = words.get('X', x), words.get('Y', y), words.get('Z', z)
+        lateral = abs(nx - x) > 1e-9 or abs(ny - y) > 1e-9
+        if head == 'G0' and lateral and min(z, nz) < -1e-9:
+            fail(name, f'rapid XY move below the spoilboard top: {raw}')
+        if head == 'G1' and lateral:
+            saw_cut = True
+            last_cut_line = line_number
+            if abs(z + spec.depth) > 1e-6 or abs(nz + spec.depth) > 1e-6:
+                fail(name, f'lateral feed is not at the declared cut depth: {raw}')
+            if abs(nx - x) > 1e-9 and abs(ny - y) > 1e-9:
+                fail(name, f'raster contains a diagonal cutting move: {raw}')
+            if not (radius - 1e-6 <= nx <= spec.width - radius + 1e-6 and
+                    radius - 1e-6 <= ny <= spec.height - radius + 1e-6):
+                fail(name, f'cutting center leaves the cutter-radius envelope: {raw}')
+        x, y, z = nx, ny, nz
+
+    if not saw_cut:
+        fail(name, 'contains no lateral surfacing cuts')
+    if last_spindle_off <= last_cut_line:
+        fail(name, 'does not stop the spindle after the final cut')
+
+
 def main():
     HOLES = [(1, 1, 0.196), (5, 1, 0.196), (1, 3, 0.196), (5, 3, 0.196)]
     BORE = [(3, 2, 0.75)]
@@ -869,6 +939,8 @@ def main():
     drill_set = [Tool(1, '#10 drill', 0.1935, 2, type='drill'),
                  Tool(2, '1/4 endmill', 0.25, 2),
                  Tool(3, '1/2 V-bit', 0.5, 2, type='vbit', included_angle=90)]
+
+    audit_bed_leveling('bed-leveling/raster')
 
     # Adversarial requests that used to produce executable bit-breaking programs.
     # Every public alloy spelling must take the aluminum path, never plywood.

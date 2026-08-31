@@ -1227,10 +1227,33 @@ class TestHostileInputIsRefusedNotCrashed(unittest.TestCase):
         self.assertIn('blank row', str(ctx.exception))
 
     def test_bad_scope_shapes_are_refused(self):
-        for scope in (5, {'indices': 'abc'}, {'indices': [None]}, {'indices': ['x']}):
+        for scope in (5, [], '', {'indices': 'abc'}, {'indices': [None]},
+                      {'indices': ['x']}):
             with self.subTest(scope=scope):
                 with self.assertRaises(ToolingError):
                     Operation.from_dict({'op_type': 'holes', 'tool_slot': 1, 'scope': scope})
+
+    def test_unknown_drill_purpose_is_refused(self):
+        """A misspelled tap operation must not silently become a clearance hole."""
+        with self.assertRaisesRegex(ToolingError, 'purpose'):
+            Operation.from_dict({'op_type': 'holes', 'tool_slot': 1,
+                                 'scope': {'purpose': 'tpa'}})
+
+    def test_fractional_integer_fields_are_not_silently_truncated(self):
+        for field, value in (('slot', 1.9), ('flutes', 2.5)):
+            with self.subTest(field=field):
+                tool = {'slot': 1, 'name': 'a', 'diameter': 0.125, 'flutes': 1}
+                tool[field] = value
+                with self.assertRaises(ToolingError):
+                    Tool.from_dict(tool)
+        with self.assertRaises(ToolingError):
+            Operation.from_dict({'op_type': 'holes', 'tool_slot': 1.9})
+        self._refuses(self._spec(parts=[dict(self.GOOD_PART, file_index=0.5)]))
+
+    def test_text_booleans_do_not_mirror_or_add_machining(self):
+        """Python considers the string ``false`` true, opposite to its JSON meaning."""
+        self._refuses(self._spec(parts=[dict(self.GOOD_PART, mirror='false')]))
+        self._refuses(self._spec(engrave='false'))
 
     def test_job_size_is_capped(self):
         dxf = make_bare_dxf()

@@ -1,0 +1,41 @@
+# PenguinCAM on UP2 - local (no-Onshape) deployment. See docs/UP2_DEPLOYMENT.md.
+#
+# This file is deployed verbatim to /mnt/user/appdata/penguincam/docker-compose.yml
+# on UP2. The application checkout is rsynced into the adjacent build/ directory.
+# Edit the tracked copy; do not hand-edit the server copy.
+#
+# Dockflare publishes this local-mode instance only through the existing authenticated
+# access group. Do not remove dockflare.access.group: local mode has no app-level login.
+services:
+  penguincam:
+    build:
+      context: ./build
+    image: penguincam:local
+    container_name: penguincam
+    restart: unless-stopped
+    labels:
+      dockflare.enable: "true"
+      dockflare.hostname: "cam.roemen.org"
+      dockflare.service: "http://penguincam:6238"
+      dockflare.access.group: "pocketid-apprise"
+    ports:
+      # LAN-reachable on the shop network. Local mode has no authentication, so
+      # anyone who can reach this host on 6238 can use it.
+      - "6238:6238"
+    environment:
+      PENGUINCAM_LOCAL: "1"
+      # Plain LAN HTTP needs Lax cookies; Secure cookies would discard the session.
+      EMBED_COOKIES: "0"
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:?set FLASK_SECRET_KEY in .env}"
+      PORT: "6238"
+      TZ: "America/Chicago"
+    volumes:
+      # Machine feeds and limits remain outside the image and survive deployments.
+      - ./config/PenguinCAM-config-2129.yaml:/app/PenguinCAM-config.yaml:ro
+    networks:
+      - default
+      - cloudflare-net
+
+networks:
+  cloudflare-net:
+    external: true

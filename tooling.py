@@ -209,6 +209,22 @@ def _positive_finite(value: Any, what: str) -> float:
     return number
 
 
+def _integer(value: Any, what: str) -> int:
+    """A finite whole number, without silently truncating fractions.
+
+    ``int(1.9)`` is ``1``.  That is particularly dangerous for tool slots: a typo in
+    an operations file can select a different physical cutter while still producing a
+    valid-looking program.  Numeric strings remain accepted because config and form
+    values legitimately arrive that way.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{what} must be a whole number, got {value!r}")
+    number = _finite(value, what)
+    if number != math.trunc(number):
+        raise ValueError(f"{what} must be a whole number, got {value!r}")
+    return int(number)
+
+
 # ------------------------------------------------------------------------------- models
 
 @dataclass
@@ -236,9 +252,9 @@ class Tool:
 
     def __post_init__(self):
         try:
-            self.slot = int(self.slot)
+            self.slot = _integer(self.slot, 'slot')
             self.diameter = _positive_finite(self.diameter, 'diameter')
-            self.flutes = int(self.flutes)
+            self.flutes = _integer(self.flutes, 'flutes')
             self.included_angle = _finite(self.included_angle, 'included angle')
         except (TypeError, ValueError) as exc:
             raise ToolingError(f"Tool {self.name!r} has a bad field: {exc}") from exc
@@ -369,7 +385,7 @@ class Operation:
             raise ToolingError(f"Unknown operation type {self.op_type!r}; "
                                f"expected one of {', '.join(OP_TYPES)}")
         try:
-            self.tool_slot = int(self.tool_slot)
+            self.tool_slot = _integer(self.tool_slot, 'tool slot')
         except (TypeError, ValueError) as exc:
             raise ToolingError(f"Operation {self.op_type!r} has a non-numeric tool slot") from exc
         if self.depth is not None:
@@ -386,6 +402,14 @@ class Operation:
                                    f"are measured down from the material top.") from exc
         if not isinstance(self.scope, dict):
             raise ToolingError(f"Operation {self.op_type!r} scope must be an object")
+        if self.scope.get('purpose') not in (None, ''):
+            purpose = str(self.scope['purpose']).strip().lower()
+            if purpose not in drill_sizes.PURPOSES:
+                raise ToolingError(
+                    f"Operation {self.label!r} has unknown drill purpose "
+                    f"{self.scope['purpose']!r}; expected one of "
+                    f"{', '.join(drill_sizes.PURPOSES)}")
+            self.scope['purpose'] = purpose
         if self.op_type == 'chamfer':
             # Reached here rather than in _chamfer_rings because a non-positive width
             # inverts the geometry silently: the cut lands above the stock (an air pass)
@@ -463,7 +487,8 @@ class Operation:
     def from_dict(cls, data: Dict[str, Any]) -> 'Operation':
         if not isinstance(data, dict):
             raise ToolingError(f"Expected an operation object, got {type(data).__name__}")
-        scope = data.get('scope') or {}
+        raw_scope = data.get('scope')
+        scope = {} if raw_scope is None else raw_scope
         if not isinstance(scope, dict):
             raise ToolingError(f"Operation scope must be an object, got "
                                f"{type(scope).__name__}")
@@ -2236,9 +2261,20 @@ def _expect_z_datum(value: Any) -> Optional[str]:
 
 def _expect_int(value: Any, what: str) -> int:
     try:
-        return int(_finite(value, what))
+        return _integer(value, what)
     except (TypeError, ValueError) as exc:
         raise ToolingError(f"{what} must be a whole number: {exc}") from exc
+
+
+def _expect_bool(value: Any, what: str) -> bool:
+    """Require a JSON boolean instead of applying Python's truthiness rules.
+
+    In particular, ``bool('false')`` is true.  Accepting that value for ``mirror``
+    silently flips a part and accepting it for ``engrave`` silently adds machining.
+    """
+    if not isinstance(value, bool):
+        raise ToolingError(f"{what} must be true or false, got {value!r}")
+    return value
 
 
 # Bad input here is ordinary - a blank row in the tool table, a field the UI left null,
@@ -2273,7 +2309,7 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
             place_x=_expect_number(raw.get('place_x', 0.0), f'part {i + 1} place_x'),
             place_y=_expect_number(raw.get('place_y', 0.0), f'part {i + 1} place_y'),
             rotation=_expect_number(raw.get('rotation', 0.0), f'part {i + 1} rotation'),
-            mirror=bool(raw.get('mirror')),
+            mirror=_expect_bool(raw.get('mirror', False), f'part {i + 1} mirror'),
             operations=[Operation.from_dict(o)
                         for o in _expect_list(raw.get('operations'),
                                               f'part {i + 1} operations')],
@@ -2295,7 +2331,7 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         z_datum=_expect_z_datum(spec.get('z_datum')),
         dry_run_lift=(_expect_positive(spec['dry_run_lift'], 'dry_run_lift')
                       if spec.get('dry_run_lift') else 0.0),
-        engrave=bool(spec.get('engrave')),
+        engrave=_expect_bool(spec.get('engrave', False), 'engrave'),
         max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
                         if spec.get('max_pass_depth') is not None else None),
         config=config,
