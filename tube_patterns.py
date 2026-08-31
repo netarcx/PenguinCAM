@@ -297,8 +297,15 @@ def generate(face_width, tube_length, tool_diameter, mode='holes',
         raise ValueError(f'Face width must be a positive finite number, got {face_width!r}')
     if not (tool_diameter > 0) or math.isinf(tool_diameter):
         raise ValueError(f'Tool diameter must be a positive finite number, got {tool_diameter!r}')
-    if not (spacing > 0):
-        raise ValueError(f'Hole spacing must be positive, got {spacing!r}')
+    if not (hole_diameter > 0) or math.isinf(hole_diameter):
+        raise ValueError(
+            f'Hole diameter must be a positive finite number, got {hole_diameter!r}')
+    if not (spacing > 0) or math.isinf(spacing):
+        raise ValueError(f'Hole spacing must be a positive finite number, got {spacing!r}')
+    if not (helix_radius_multiplier >= 0) or math.isinf(helix_radius_multiplier):
+        raise ValueError(
+            'Helix radius multiplier must be a non-negative finite number, got '
+            f'{helix_radius_multiplier!r}')
 
     warnings = []
     circles = []

@@ -104,7 +104,8 @@
     // but only ever needs one tool works without opening the tool table at all.
     var dia = parseFloat(ctx.cfg && ctx.cfg.defaultTool) || 0.157;
     var match = Object.keys(lib).filter(function (k) {
-      return Math.abs((lib[k].diameter || 0) - dia) < 0.0005 && lib[k].type !== 'vbit';
+      return Math.abs((lib[k].diameter || 0) - dia) < 0.0005
+             && (lib[k].type || 'endmill') === 'endmill';
     })[0];
     // Show the team's own text ("4mm"), not String(0.15748031496062992). CFG keeps
     // defaultToolText for exactly this and it was going unused.
@@ -255,8 +256,10 @@
         oninput: function (e) {
           tool.diameter_text = e.target.value;
           var parsed = ctx.parseLength(e.target.value);
-          if (parsed) tool.diameter = parsed;
-          e.target.classList.toggle('invalid', !parsed);
+          // Do not retain the previous valid diameter behind visibly invalid text. That
+          // let validation pass and submitted a size different from the one on screen.
+          tool.diameter = parsed;
+          e.target.classList.toggle('invalid', !(parsed > 0));
           touch();
         }
       })]),
@@ -337,14 +340,17 @@
     if (keep.length) ctx.state.tools = keep;
   }
 
-  function haveTool(diameter) {
-    return tools().some(function (t) { return Math.abs(t.diameter - diameter) < 5e-4; });
+  function haveTool(candidate) {
+    return tools().some(function (t) {
+      return Math.abs(t.diameter - candidate.diameter) < 5e-4
+             && (t.type || 'endmill') === (candidate.type || 'endmill');
+    });
   }
 
   /** Add a suggested twist drill to the tool table, already typed as a drill so it takes
    *  the drilling toolpath rather than an end mill's helical entry. */
   function addDrill(match) {
-    if (haveTool(match.drill.diameter)) return;
+    if (haveTool({ diameter: match.drill.diameter, type: 'drill' })) return;
     tools().push({
       slot: nextSlot(),
       name: match.drill.label + ' drill',
@@ -643,16 +649,16 @@
     // yet, and this is where you find out which ones those are.
     if (part.plan && part.plan.tools.length) {
       var wanted = part.plan.tools;
-      var missing = wanted.filter(function (t) { return !haveTool(t.diameter); });
+      var missing = wanted.filter(function (t) { return !haveTool(t); });
       var line = el('div', { class: 'mt-drills' }, [
         el('span', { class: 'mt-dim', text: 'This part needs:' }),
       ]);
       wanted.forEach(function (t, i) {
         if (i) line.appendChild(el('span', { class: 'mt-dim', text: ',' }));
         line.appendChild(el('span', {
-          class: haveTool(t.diameter) ? 'mt-have' : 'mt-need',
+          class: haveTool(t) ? 'mt-have' : 'mt-need',
           text: t.name,
-          title: haveTool(t.diameter) ? 'already in your tool table' : 'not loaded yet',
+          title: haveTool(t) ? 'already in your tool table' : 'not loaded yet',
         }));
       });
       line.appendChild(el('button', {

@@ -222,14 +222,19 @@
      properties strip. The token guards ordering: a slow answer for an old design must
      not overwrite a fast answer for the current one. */
   api.refresh = function () {
-    if (!enabled()) { geom = null; if (ctx.onGeometry) ctx.onGeometry(null); return; }
     if (timer) clearTimeout(timer);
-    timer = setTimeout(send, 300);
+    timer = null;
+    // Invalidate an in-flight request immediately, rather than when the debounce fires.
+    // Otherwise its old geometry can land while the user is editing the next design (or
+    // after they have left custom tubing mode entirely).
+    var mine = ++token;
+    if (!enabled()) { geom = null; if (ctx.onGeometry) ctx.onGeometry(null); return; }
+    timer = setTimeout(function () { send(mine); }, 300);
   };
 
-  function send() {
+  function send(mine) {
     var state = ctx.state;
-    var mine = ++token;
+    timer = null;
     var fd = new FormData();
     fd.append('size', state.tubeSize);
     fd.append('length', state.tubePatternLength || 0);

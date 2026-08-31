@@ -1,4 +1,4 @@
-# PenguinCAM on UP2 - local (no-Onshape) deployment. See docs/LOCAL_MODE.md.
+# UV-CAM on UP2 - local (no-Onshape) deployment. See docs/UP2_DEPLOYMENT.md.
 #
 # This file IS the production config: it is deployed verbatim to
 # /mnt/user/appdata/penguincam/docker-compose.yml on the UP2 (one level above the

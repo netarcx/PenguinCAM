@@ -489,6 +489,16 @@ class TestAuditFindings(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tube_patterns.generate(bad, 24.0, TOOL, mode='holes')
 
+    def test_non_finite_pattern_dimensions_are_refused(self):
+        for field, kwargs in (
+            ('hole diameter', {'hole_diameter': float('nan')}),
+            ('spacing', {'spacing': float('inf')}),
+            ('helix multiplier', {'helix_radius_multiplier': float('nan')}),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    tube_patterns.generate(2.0, 24.0, TOOL, mode='holes', **kwargs)
+
     def test_three_rows_only_where_the_web_survives(self):
         """1.5" was a round number, not a derived one: it put three rows on a 1.5" face
         with 0.049" of metal between them, a knife edge in 1/16" wall."""

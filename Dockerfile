@@ -12,6 +12,11 @@
 # Official Python image from Docker Hub (no GitHub downloads).
 FROM python:3.11-slim
 
+# Written by the UP2 deployment workflow and checked after the build so the job cannot
+# report success for a stale image from Docker's cache.
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision=$GIT_SHA
+
 # PYTHONUNBUFFERED so log() output reaches `docker logs` as it happens rather than
 # sitting in a pipe buffer until the process exits - the difference between watching
 # a job run and staring at nothing.

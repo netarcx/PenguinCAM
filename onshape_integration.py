@@ -230,6 +230,9 @@ class OnshapeClient:
             if response.status_code == 200:
                 token_data = response.json()
                 self.access_token = token_data.get('access_token')
+                # Onshape may rotate refresh tokens.  Keep the previous one when the
+                # response omits it, but never discard a replacement that it supplies.
+                self.refresh_token = token_data.get('refresh_token', self.refresh_token)
                 expires_in = token_data.get('expires_in', 3600)
                 self.token_expires = datetime.now() + timedelta(seconds=expires_in)
                 return True
@@ -632,7 +635,7 @@ class OnshapeClient:
                     log("Translation done but no result data ID found")
                     return None
                     
-            elif state in ['FAILED', 'ACTIVE']:
+            elif state == 'FAILED':
                 log(f"Translation failed with state: {state}")
                 failure_reason = status.get('failureReason', 'Unknown')
                 log(f"Failure reason: {failure_reason}")

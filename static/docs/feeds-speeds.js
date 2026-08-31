@@ -100,12 +100,14 @@ function syncMaterial() {
 }
 
 let recalcTimer = null;
+let recalcRequest = 0;
 function recalc() {
     clearTimeout(recalcTimer);
-    recalcTimer = setTimeout(doRecalc, 150);
+    const request = ++recalcRequest;
+    recalcTimer = setTimeout(() => doRecalc(request), 150);
 }
 
-async function doRecalc() {
+async function doRecalc(request) {
     const payload = {
         machine: state.machine,
         material: state.material,
@@ -127,6 +129,10 @@ async function doRecalc() {
     } catch (err) {
         result = { error: String(err) };
     }
+
+    // Inputs may change while the API is calculating. A slower response for the old
+    // values must not overwrite a newer result that has already reached the page.
+    if (request !== recalcRequest) return;
 
     if (result.error) {
         $('explanation').textContent = 'Error: ' + result.error;
@@ -168,11 +174,40 @@ function copyAs(btn) {
     else if (kind === 'json') text = JSON.stringify(r, null, 2);
     else if (kind === 'sheet') text = toSheet(r);
 
-    navigator.clipboard.writeText(text).then(() => {
-        const original = btn.textContent;
+    const original = btn.textContent;
+    copyText(text).then(() => {
         btn.textContent = 'Copied!';
         btn.classList.add('copied');
         setTimeout(() => { btn.textContent = original; btn.classList.remove('copied'); }, 1500);
+    }).catch(() => {
+        btn.textContent = 'Copy failed';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+    });
+}
+
+function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).catch(() => legacyCopy(text));
+    }
+    return legacyCopy(text);
+}
+
+// Clipboard.writeText is unavailable on the plain-HTTP LAN addresses commonly used to
+// reach a shop computer. Keep the copy buttons useful there as well as on localhost.
+function legacyCopy(text) {
+    return new Promise((resolve, reject) => {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        let copied = false;
+        try { copied = document.execCommand('copy'); } catch (err) { copied = false; }
+        document.body.removeChild(area);
+        if (copied) resolve();
+        else reject(new Error('copy command was refused'));
     });
 }
 

@@ -191,7 +191,13 @@ class PenguinCAMAuth:
                 return redirect('/')
             
             # Verify state for CSRF protection
-            if request.args.get('state') != session.get('oauth_state'):
+            supplied_state = request.args.get('state')
+            expected_state = session.pop('oauth_state', None)
+            # A missing state must never compare equal to another missing value.  That
+            # made a callback opened directly (without first visiting /auth/login) pass
+            # the CSRF check because ``None == None``.
+            if (not supplied_state or not expected_state
+                    or not secrets.compare_digest(supplied_state, expected_state)):
                 return 'Invalid state parameter', 400
             
             try:
@@ -226,9 +232,6 @@ class PenguinCAMAuth:
                 session['google_user_picture'] = user_info.get('picture')
                 session.permanent = True
                 
-                # Clear OAuth state
-                session.pop('oauth_state', None)
-
                 log(f"✅ User authenticated: {email}")
 
                 # Check if opened in popup (for Drive auth flow)
@@ -306,9 +309,13 @@ class PenguinCAMAuth:
                 'authenticated': self.is_authenticated(),
                 'drive_connected': session.get('google_credentials') is not None,
                 'user': {
-                    'email': session.get('user_email'),
-                    'name': session.get('user_name'),
-                    'picture': session.get('user_picture')
+                    # Google profile fields deliberately use their own prefix so a
+                    # Drive login cannot overwrite the Onshape identity in the same
+                    # session.  The callback writes these keys; reading the unprefixed
+                    # names here returned a blank profile after a successful login.
+                    'email': session.get('google_user_email'),
+                    'name': session.get('google_user_name'),
+                    'picture': session.get('google_user_picture')
                 } if self.is_authenticated() else None
             })
     
@@ -337,9 +344,9 @@ class PenguinCAMAuth:
             return None
         
         return {
-            'email': session.get('user_email'),
-            'name': session.get('user_name'),
-            'picture': session.get('user_picture')
+            'email': session.get('google_user_email'),
+            'name': session.get('google_user_name'),
+            'picture': session.get('google_user_picture')
         }
     
     def _render_error_page(self, title, message):

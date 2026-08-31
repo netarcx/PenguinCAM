@@ -2,6 +2,9 @@
 
 **Complete guide to deploying PenguinCAM on Railway**
 
+For the shop's local UP2 deployment and GitHub Actions rollout, see
+[Automatic deployment to UP2](UP2_DEPLOYMENT.md).
+
 ---
 
 ## Table of Contents
@@ -253,12 +256,12 @@ This works but is less memorable for students. Use `BASE_URL` with this URL if n
 
 ### Auto-Deploy from GitHub
 
-**Railway automatically redeploys when you push to main branch.**
+**Railway automatically redeploys when you push to the `uvcam` release branch.**
 
 ```bash
 git add .
 git commit -m "Update feature X"
-git push origin main
+git push origin uvcam
 ```
 
 Railway will:

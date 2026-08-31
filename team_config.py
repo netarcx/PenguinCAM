@@ -661,6 +661,65 @@ class TeamConfig:
         parsed = parse_length(self._raw_default_tool_diameter())
         return parsed if parsed and parsed > 0 else DEFAULT_TOOL_DIAMETER_IN
 
+    def bed_leveling_defaults(self, machine_id: Optional[str] = None) -> Dict[str, Any]:
+        """Defaults for the spoilboard-surfacing utility on one machine.
+
+        The leveling page used to carry its own unrelated set of numbers in the HTML.
+        That was particularly misleading in a multi-machine config: only the X/Y boxes
+        followed the selector while the tool, Z heights, feeds, and spindle did not.
+
+        A shop can override any value under ``machining.bed_leveling``. Missing values
+        are derived from settings the same machine already owns: its default cutter,
+        Z-reference settings, and default material preset. Length strings are accepted
+        here too, without adding generic names such as ``depth`` to ``LENGTH_KEYS`` and
+        accidentally converting unrelated configuration fields.
+        """
+        machine = self.get_machine_config(machine_id)
+        machining = machine.get('machining', {}) or {}
+        configured = machining.get('bed_leveling', {}) or {}
+        z_reference = machining.get('z_reference', {}) or {}
+
+        material_id = self.default_material_for(machine_id)
+        material = self.get_material_preset(material_id, machine_id)
+
+        def configured_length(key, fallback):
+            if key not in configured:
+                return parse_length(fallback)
+            parsed = parse_length(configured.get(key))
+            return parsed if parsed is not None else configured.get(key)
+
+        raw_stepover = configured.get('stepover_percent')
+        if raw_stepover is None:
+            # Material stepover is stored as a ratio (0.25 == 25 percent), whereas the
+            # leveling form deliberately speaks in whole percent to the operator.
+            material_stepover = material.get('stepover_percentage', 0.60)
+            try:
+                raw_stepover = float(material_stepover) * 100.0
+            except (TypeError, ValueError):
+                raw_stepover = material_stepover
+
+        default_safe_z = (z_reference.get('safe_height')
+                          if z_reference.get('safe_height') is not None
+                          else z_reference.get('clearance_height'))
+        if default_safe_z is None:
+            default_safe_z = TEAM_6238_DEFAULTS['machining']['z_reference']['clearance_height']
+
+        default_depth = z_reference.get('sacrifice_board_depth')
+        if default_depth is None:
+            default_depth = TEAM_6238_DEFAULTS['machining']['z_reference']['sacrifice_board_depth']
+
+        return {
+            'tool_diameter': configured_length(
+                'tool_diameter', self._raw_default_tool_diameter(machine_id)),
+            'stepover_percent': raw_stepover,
+            'depth': configured_length('depth', default_depth),
+            'safe_z': configured_length('safe_z', default_safe_z),
+            'feed_rate': configured.get('feed_rate', material.get('feed_rate', 100.0)),
+            'plunge_rate': configured.get('plunge_rate', material.get('plunge_rate', 20.0)),
+            'spindle_speed': configured.get(
+                'spindle_speed', material.get('spindle_speed', 18000)),
+        }
+
     # ========================================================================
     # Saved bits (the shop's cutters)
     # ========================================================================
@@ -1085,6 +1144,7 @@ class TeamConfig:
             'default_tool_diameter': tool_in if (tool_in and tool_in > 0) else DEFAULT_TOOL_DIAMETER_IN,
             'default_tool_diameter_text': raw_tool if isinstance(raw_tool, str) else f'{raw_tool}"',
             'default_material': self.default_material_for(machine_id),
+            'bed_leveling': self.bed_leveling_defaults(machine_id),
         }
 
     @classmethod
@@ -1206,6 +1266,19 @@ machining:
     # fixturing. Mid-part retracts always use material_thickness + clearance_height
     # regardless, since they stay over the stock.
     # safe_height: 2.0
+
+  # Spoilboard surfacing defaults. The Level bed utility always gets its X/Y size
+  # from machine.dimensions. If this block is omitted, it gets its cutter from
+  # default_tool, depth/clearance from z_reference, and feeds/speed/stepover from
+  # the machine's default material. Override values here for a dedicated fly cutter.
+  # bed_leveling:
+  #   tool_diameter: "1in"
+  #   stepover_percent: 60
+  #   depth: 0.01
+  #   safe_z: 0.5
+  #   feed_rate: 75
+  #   plunge_rate: 20
+  #   spindle_speed: 18000
 
   # Tab parameters (for perimeter operations)
   tabs:
