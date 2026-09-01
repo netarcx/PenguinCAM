@@ -311,6 +311,16 @@ not make the hole — so any tool is accepted for any hole. It cuts a shallow di
 drill-point allowance. Every spot operation warns that *the holes still have to be
 drilled*, because a program that spots and stops looks finished and is not.
 
+Because a spot accepts any hole, the survey **lists** holes smaller than every tool in
+the job (flagged `too_small`) instead of rejecting them: a 0.089" hole in a job whose
+smallest cutter is a 1/8" end mill is still legitimately centre-marked for the drill
+press. Whether such a hole is an error is decided by coverage validation, which knows the
+plan — covered by a spot only, it is the usual "spotted but never drilled" warning;
+covered by nothing, it is an error naming the two real fixes (a drill that size, or a
+spot operation); claimed by a cutting operation, that operation fails with the ordinary
+too-small message. `suggest_tooling` follows the same rule and proposes a spot operation
+for sizes nothing in the plan can make, rather than sweeping them into the bore range.
+
 ### Pecking is written out, not a canned cycle
 
 Drilling emits explicit `G0`/`G1` moves — cut a peck, retract to the R plane to clear

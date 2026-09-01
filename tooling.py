@@ -1122,8 +1122,12 @@ def survey_part(job: MultiToolJob, part: PartOps) -> Dict[str, Any]:
     """Report the features of one part so operations can be scoped to them.
 
     Surveyed with the *smallest* tool in the job loaded, so a hole that only the small
-    cutter can make still shows up. Anything smaller than even that tool is genuinely
-    unmachinable and comes back in `errors`.
+    cutter can make still shows up. A hole smaller than even that tool is still LISTED
+    (flagged `too_small`) rather than rejected here: a spot operation may legitimately
+    centre-mark it for hand drilling, and rejecting it in the survey both blocked that
+    workflow and hid the hole from the scope pickers that would set it up. Whether an
+    undersized hole is an error is decided by `_validate_feature_coverage`, which knows
+    the operation plan.
 
     A 2.5D (multi-layer) DXF is rejected here. `load_dxf` routes one to the multi-layer
     reader, which keeps only the shallowest layer's geometry and overwrites the operator's
@@ -1141,11 +1145,12 @@ def survey_part(job: MultiToolJob, part: PartOps) -> Dict[str, Any]:
                            f"Multi-tool jobs handle flat (2D) parts only - run this part "
                            f"through the single-tool 2.5D mode instead."]}
 
-    pp.classify_holes()
+    pp.classify_holes(reject_undersized=False)
 
     holes = [{'index': i,
               'x': _round(h['center'][0]), 'y': _round(h['center'][1]),
               'diameter': _round(h['diameter']),
+              'too_small': bool(h.get('too_small')),
               'key': circle_key(h)}
              for i, h in enumerate(pp.holes or [])]
 
@@ -2119,6 +2124,17 @@ def _validate_feature_coverage(part: PartOps, features: Dict[str, Any]
                 f"drill press is assumed.")
 
         missing = [f for f in unclaimed if f['key'] not in spotted]
+        # A hole smaller than every tool in the job (the survey lists it flagged rather
+        # than rejecting it) has two real fixes, and "widen a scope" is not one of them:
+        # widening a scope onto it just moves the failure into that operation.
+        undersized = [f for f in missing if f.get('too_small')]
+        missing = [f for f in missing if not f.get('too_small')]
+        if undersized:
+            what = ', '.join(sorted({describe(f) for f in undersized}))
+            errors.append(
+                f"{part.name}: {len(undersized)} {kind}(s) are smaller than every tool "
+                f"in this job ({what}). Add a drill that size, or centre-mark them for "
+                f"hand drilling with a spot operation covering them.")
         if missing:
             what = ', '.join(sorted({describe(f) for f in missing}))
             errors.append(
@@ -2550,22 +2566,46 @@ def suggest_tooling(features: Dict[str, Any], available: Sequence[Tool] = None,
             notes.append(f'{size:.4f} in holes will be drilled at {match.diameter:.4f} in '
                          f'({match.label}).')
 
-    needs_mill = bool(milled) or features.get('pockets') or features.get('has_perimeter')
+    # `milled` holds every size no drill matches - but an end mill can only BORE a hole
+    # it fits inside. A size smaller than the mill (the survey lists such holes rather
+    # than rejecting them) cannot be cut by anything here, so it gets a spot operation:
+    # a centre-mark for the drill press, which is the one thing the machine CAN do to it.
+    # Sweeping it into the bore range instead proposed a plan that failed at generation.
+    existing = sorted([t for t in available if t.type == 'endmill'],
+                      key=lambda t: t.diameter)
+    planned_mill_dia = existing[-1].diameter if existing else mill_diameter
+    bored = [s for s in milled if s >= planned_mill_dia - 1e-4]
+    tiny = [s for s in milled if s < planned_mill_dia - 1e-4]
+
+    needs_mill = bool(bored) or features.get('pockets') or features.get('has_perimeter')
     mill = None
     if needs_mill:
         # Prefer the biggest end mill already loaded: it is what the operator has, and a
         # bigger cutter clears a pocket faster. Only propose a new one if there is none.
-        existing = sorted([t for t in available if t.type == 'endmill'],
-                          key=lambda t: t.diameter)
         mill = (existing[-1] if existing
                 else adopt(f'{mill_diameter:.4f} in end mill', 'endmill', mill_diameter))
 
-    if milled:
+    if tiny:
+        # Any drill will do for a dimple - size is irrelevant to a spot - so reuse one
+        # already loaded or already proposed before asking for a centre drill.
+        spot_tool = (next((t for t in available if t.type == 'drill'), None)
+                     or next((t for t in tools if t.type == 'drill'), None)
+                     or adopt('1/8 in centre drill', 'drill', 0.125))
+        operations.append(Operation(
+            'holes', spot_tool.slot, 'Centre-mark undersized holes',
+            scope={'min_diameter': min(tiny) - 1e-4, 'max_diameter': max(tiny) + 1e-4,
+                   'purpose': drill_sizes.PURPOSE_SPOT}))
+        notes.append('No tool here can make these holes, so they are centre-marked for '
+                     'the drill press instead: '
+                     + ', '.join(f'{d:.4f} in' for d in tiny) + '. The dimples are not '
+                     'holes - they still have to be drilled by hand.')
+
+    if bored:
         operations.append(Operation(
             'holes', mill.slot, 'Bore large holes',
-            scope={'min_diameter': min(milled) - 1e-4, 'max_diameter': max(milled) + 1e-4}))
+            scope={'min_diameter': min(bored) - 1e-4, 'max_diameter': max(bored) + 1e-4}))
         notes.append('Holes too large to drill are bored with the end mill: '
-                     + ', '.join(f'{d:.4f} in' for d in milled) + '.')
+                     + ', '.join(f'{d:.4f} in' for d in bored) + '.')
     if features.get('pockets'):
         operations.append(Operation('pockets', mill.slot, 'Pockets'))
     if features.get('has_perimeter'):

@@ -1821,9 +1821,16 @@ class FRCPostProcessor:
         minx, miny, maxx, maxy = bbox
         return Polygon([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)])
 
-    def classify_holes(self):
-        """Classify holes by diameter"""
-        # Classify all circles as holes (apply size check)
+    def classify_holes(self, reject_undersized: bool = True):
+        """Classify holes by diameter.
+
+        `reject_undersized=False` keeps holes smaller than the tool in the list, flagged
+        `too_small`, instead of erroring. The multi-tool survey uses it: a hole no cutter
+        in the job can make may still be legitimately centre-marked by a spot operation
+        for hand drilling, so whether it is an error is a question about the operation
+        plan, not the geometry - `_validate_feature_coverage` answers it. Every actual
+        cutting path keeps the default and rejects.
+        """
         self.holes = []
 
         for circle in self.circles:
@@ -1835,8 +1842,12 @@ class FRCPostProcessor:
             # is drilled, not rejected). A hole at the tool size is made by plunging straight
             # down (peck drill), not milling.
             if diameter < self.tool_diameter - self.hole_size_tolerance:
-                error_msg = f"Hole at ({center[0]:.3f}, {center[1]:.3f}) has diameter {diameter:.3f}\" which is too small for {self.tool_diameter:.3f}\" tool"
-                self._add_error(error_msg)
+                if reject_undersized:
+                    error_msg = f"Hole at ({center[0]:.3f}, {center[1]:.3f}) has diameter {diameter:.3f}\" which is too small for {self.tool_diameter:.3f}\" tool"
+                    self._add_error(error_msg)
+                else:
+                    self.holes.append({'center': center, 'diameter': diameter,
+                                       'needs_peck_drill': True, 'too_small': True})
                 continue
 
             # Determine machining strategy based on hole size

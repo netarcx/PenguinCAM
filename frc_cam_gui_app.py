@@ -2611,9 +2611,10 @@ def part_features():
     """Survey one DXF so the operations editor knows what there is to cut.
 
     Body (multipart/form-data): file, plus form fields thickness, material, machine_id,
-    rotation, mirror, and a JSON `tools` array. The survey needs the tool list because a
-    hole only counts as machinable if some tool in the job can make it; the smallest one
-    is loaded, so nothing a later small-tool operation could drill is hidden here.
+    rotation, mirror, and a JSON `tools` array. The survey loads the smallest tool in the
+    list so nothing a small-tool operation could drill is hidden here; holes smaller than
+    even that tool are still listed (flagged `too_small`) so a spot operation can be
+    scoped to centre-mark them for hand drilling.
 
     Response: {success, features:{holes, hole_sizes, pockets, has_perimeter, errors},
                suggested_operations:[...]}.

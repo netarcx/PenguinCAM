@@ -286,6 +286,85 @@ class TestScopeSelection(unittest.TestCase):
         self.assertTrue(result.success, result.errors)
 
 
+class TestUndersizedHoleSpotting(unittest.TestCase):
+    """A hole smaller than every tool in the job can still be centre-marked by a spot
+    operation for hand drilling, so the survey must LIST it (flagged) rather than reject
+    it - the rejection blocked the spot-then-drill-press workflow outright and hid the
+    hole from the scope pickers that would have set it up."""
+
+    @staticmethod
+    def make_dxf():
+        """A 3x2 plate with a 0.089" hole (smaller than every tool below) and a 0.196"."""
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (3, 0), (3, 2), (0, 2)], close=True)
+        msp.add_circle((1, 1), 0.089 / 2)
+        msp.add_circle((2, 1), 0.098)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        return path
+
+    @staticmethod
+    def tools():
+        # The user's real setup: nothing here can make a 0.089" hole.
+        return [Tool(1, '1/8 in endmill', 0.125, 1),
+                Tool(2, '5/32 centre drill', 0.15625, 2, type='drill')]
+
+    def job(self, operations):
+        return MultiToolJob(material='plywood', thickness=0.25, tools=self.tools(),
+                            parts=[PartOps(dxf_path=self.make_dxf(), name='plate',
+                                           operations=operations)])
+
+    def test_survey_lists_the_undersized_hole_flagged(self):
+        job = self.job([Operation('perimeter', 1)])
+        with redirect_stdout(io.StringIO()):
+            features = tooling.survey_part(job, job.parts[0])
+        by_dia = {h['diameter']: h for h in features['holes']}
+        self.assertEqual(sorted(by_dia), [0.089, 0.196])
+        self.assertTrue(by_dia[0.089]['too_small'])
+        self.assertFalse(by_dia[0.196]['too_small'])
+        self.assertFalse(any('too small' in e for e in features['errors']),
+                         features['errors'])
+
+    def test_spot_operation_may_cover_it(self):
+        result = generate(self.job([
+            Operation('holes', 2, 'Spot tiny', scope={'max_diameter': 0.1,
+                                                      'purpose': 'spot'}),
+            Operation('holes', 1, 'Mill holes', scope={'min_diameter': 0.1}),
+            Operation('perimeter', 1)]))
+        self.assertTrue(result.success, result.errors)
+        self.assertIn('CENTRE DRILLING', result.gcode)
+        self.assertTrue(any('spotted but never drilled' in w for w in result.warnings),
+                        result.warnings)
+
+    def test_left_uncovered_it_is_an_error_naming_the_fixes(self):
+        result = generate(self.job([
+            Operation('holes', 1, 'Mill holes', scope={'min_diameter': 0.1}),
+            Operation('perimeter', 1)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('smaller than every tool' in e for e in result.errors),
+                        result.errors)
+
+    def test_claimed_by_an_end_mill_it_still_fails_as_too_small(self):
+        result = generate(self.job([Operation('holes', 1, 'All holes'),
+                                    Operation('perimeter', 1)]))
+        self.assertFalse(result.success)
+        self.assertTrue(any('too small' in e for e in result.errors), result.errors)
+
+    def test_suggester_spots_what_nothing_can_make(self):
+        """A size with no standard drill that is also smaller than the mill must come
+        back as a spot operation, not swept into the bore range - that proposed a plan
+        that failed the instant it ran."""
+        plan = tooling.suggest_tooling(
+            {'hole_sizes': [0.004], 'pockets': [], 'has_perimeter': True},
+            mill_diameter=0.25)
+        spots = [o for o in plan['operations']
+                 if o.scope.get('purpose') == drill_sizes.PURPOSE_SPOT]
+        self.assertEqual(len(spots), 1)
+        self.assertFalse([o for o in plan['operations'] if o.name == 'Bore large holes'])
+        self.assertTrue(any('centre-marked' in n for n in plan['notes']), plan['notes'])
+
+
 class TestFeeds(unittest.TestCase):
     def test_feeds_track_the_tool_not_the_material_preset(self):
         small, _ = tooling.compute_tool_feeds(Tool(1, 'small', 0.125, 1), 'plywood', None, 'pockets')

@@ -135,6 +135,30 @@
     return part.ops;
   }
 
+  /** Give a duplicate the plan its twin already has. duplicatePart copies operations at
+   *  the moment of duplication, but duplicating FIRST and setting up afterwards left the
+   *  copy empty - the same plan had to be entered twice. Duplicates share their `file`
+   *  object, which guarantees identical geometry, so when a part with no plan of its own
+   *  has a planned twin, the twin's plan is copied over. `_hadOps` stops a deliberately
+   *  cleared plan from being silently refilled; the auto-added deburr chamfer does not
+   *  count as a plan, and is kept (last, where ensureDeburr puts it) when one arrives. */
+  function adoptTwinOps() {
+    ctx.state.parts.forEach(function (p) {
+      var own = opsFor(p).filter(function (o) { return !o._deburr; });
+      if (own.length) { p._hadOps = true; return; }
+      if (p._hadOps) return;
+      var twin = ctx.state.parts.filter(function (q) {
+        return q !== p && q.file === p.file
+               && opsFor(q).some(function (o) { return !o._deburr; });
+      })[0];
+      if (!twin) return;
+      var adopted = JSON.parse(JSON.stringify(
+        opsFor(twin).filter(function (o) { return !o._deburr; })));
+      p.ops = adopted.concat(opsFor(p));
+      p._hadOps = true;
+    });
+  }
+
   /** Identity of the answer a survey would give: the inputs it actually depends on. */
   function surveyKey(part, payloadTools) {
     return [part.name, Math.round(part.rotation) % 360, !!part.flipped,
@@ -783,6 +807,7 @@
   api.render = function () {
     var host = $('#mt-tools-body');
     if (!host) return;
+    adoptTwinOps();
     var focused = focusKey(document.activeElement);
     var scroller = $('#mt-parts');
     var scrollTop = scroller ? scroller.scrollTop : 0;
@@ -858,6 +883,9 @@
   api.validate = function () { return api.enabled() ? collect().msgs : []; };
 
   function collect() {
+    // Validation can run from the step gate before this step has rendered, so a fresh
+    // duplicate must pick up its twin's plan here too or it fails as "no operations".
+    adoptTwinOps();
     var msgs = [];
     var notes = [];
     var slots = {};
@@ -910,9 +938,9 @@
       // Preview with "would be cut twice".
       if (part.features) {
         checkCoverage(part, 'hole', part.features.holes || [],
-                      ['holes', 'interior'], holeInScope, msgs);
+                      ['holes', 'interior'], holeInScope, msgs, notes);
         checkCoverage(part, 'pocket', part.features.pockets || [],
-                      ['pockets', 'interior'], pocketInScope, msgs);
+                      ['pockets', 'interior'], pocketInScope, msgs, notes);
         // ...and the outline. Coverage checked holes and pockets only, so a plan whose
         // ONLY operation was a chamfer passed every gate - a program that breaks an
         // edge and never cuts the part free, with Download enabled. A chamfer runs
@@ -947,18 +975,33 @@
         && (hi === null || feature.area <= hi + 1e-4);
   }
 
-  function checkCoverage(part, kind, features, opTypes, inScope, msgs) {
+  function checkCoverage(part, kind, features, opTypes, inScope, msgs, notes) {
     if (!features.length) return;
     var relevant = opsFor(part).filter(function (o) { return opTypes.indexOf(o.op_type) >= 0; });
-    var uncovered = 0, doubled = 0;
+    // A spot operation marks where a hole goes without making it, so it neither covers
+    // a feature nor double-claims one - the same rule the server applies. Counting it as
+    // a cut both passed a plan of nothing but dimples and rejected spot-then-drill, the
+    // documented workflow, as "cut twice".
+    var cutters = relevant.filter(function (o) { return (o.scope || {}).purpose !== 'spot'; });
+    var spotters = relevant.filter(function (o) { return (o.scope || {}).purpose === 'spot'; });
+    var uncovered = 0, doubled = 0, spotOnly = 0;
     features.forEach(function (f) {
-      var hits = relevant.filter(function (op) { return inScope(f, op); }).length;
-      if (hits === 0) uncovered++;
+      var hits = cutters.filter(function (op) { return inScope(f, op); }).length;
       if (hits > 1) doubled++;
+      if (hits === 0) {
+        if (spotters.some(function (op) { return inScope(f, op); })) spotOnly++;
+        else uncovered++;
+      }
     });
     if (uncovered) {
       msgs.push(part.name + ': ' + uncovered + ' of ' + features.length + ' ' + kind
                 + 's are not cut by any operation.');
+    }
+    if (spotOnly) {
+      notes.push(part.name + ': ' + spotOnly + ' ' + kind + (spotOnly === 1 ? ' is' : 's are')
+                 + ' spotted but never drilled in this job - '
+                 + (spotOnly === 1 ? 'it' : 'they') + ' will come off the machine as '
+                 + 'dimples for the drill press.');
     }
     if (doubled) {
       msgs.push(part.name + ': ' + doubled + ' ' + kind
