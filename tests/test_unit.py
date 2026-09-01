@@ -1058,6 +1058,21 @@ class TestGCodeFormatting(unittest.TestCase):
                 f"Line {line_num} has nested comments: {line.strip()}"
             )
 
+    def test_no_overlong_lines(self):
+        """Every line must fit a GRBL-class controller's 80-character line buffer.
+
+        A longer line is refused with "command too long" and the program stops
+        mid-run. enforce_line_length wraps comments and trims annotations at every
+        assembly point; this test proves the assembled program came through it.
+        """
+        from frc_cam_postprocessor import MAX_LINE_LENGTH
+        for line_num, line in enumerate(self.gcode_lines, 1):
+            self.assertLessEqual(
+                len(line), MAX_LINE_LENGTH,
+                f"Line {line_num} is {len(line)} chars, over the {MAX_LINE_LENGTH} "
+                f"controller line limit: {line.strip()}"
+            )
+
     def test_no_unicode_characters(self):
         """Test that all G-code uses ASCII only (no unicode characters)."""
         for line_num, line in enumerate(self.gcode_lines, 1):

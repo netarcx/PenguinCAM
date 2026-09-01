@@ -166,6 +166,67 @@ def sanitize_comment(text: str, fallback: str = '') -> str:
     return out if out else fallback
 
 
+#: Longest line the output may contain. GRBL-class controllers buffer 80 characters
+#: per line and refuse anything longer ("command too long" / line overflow), and a
+#: refused line means the program stops mid-cut with the spindle down. 78 leaves
+#: room for a sender to append its own terminator.
+MAX_LINE_LENGTH = 78
+
+
+def enforce_line_length(lines: List[str], limit: int = MAX_LINE_LENGTH) -> List[str]:
+    """Return the program with every line fitting in `limit` characters.
+
+    A comment-only line wraps onto continuation `(...)` lines at word boundaries; a
+    code line with a trailing `; annotation` keeps every code word and gives up as
+    much of the annotation as needed. Code itself is NEVER altered - the program must
+    cut identically after this pass. Applied at every point that assembles a final
+    program, because controllers enforce this with a refusal mid-run, not a warning.
+    """
+    out = []
+    for line in lines:
+        if len(line) <= limit:
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped.startswith('(') and stripped.endswith(')'):
+            words = stripped[1:-1].split()
+            # A single token longer than a comment line (a filename, a URL) is
+            # hard-split; everything else wraps at spaces.
+            split_words = []
+            for word in words:
+                while len(word) > limit - 2:
+                    split_words.append(word[:limit - 2])
+                    word = word[limit - 2:]
+                split_words.append(word)
+            current: List[str] = []
+            for word in split_words:
+                if current and len('(' + ' '.join(current + [word]) + ')') > limit:
+                    out.append('(' + ' '.join(current) + ')')
+                    current = [word]
+                else:
+                    current.append(word)
+            if current:
+                out.append('(' + ' '.join(current) + ')')
+            continue
+        semi = line.find(';')
+        if semi != -1 and len(line[:semi].rstrip()) <= limit:
+            code = line[:semi].rstrip()
+            room = limit - len(code) - 2          # for the '  ' before the ';'
+            comment = line[semi:].rstrip()
+            if room >= len('; x'):
+                kept = comment[:room]
+                if ' ' in kept and len(comment) > room:
+                    kept = kept.rsplit(' ', 1)[0]  # do not cut mid-word
+                out.append(code + '  ' + kept)
+            else:
+                out.append(code)
+            continue
+        # Nothing here can be shortened without changing the cut; leave it and let
+        # the length test name it rather than silently altering motion.
+        out.append(line)
+    return out
+
+
 def build_output_filename(suggested_filename: str, timestamp: str, fallback: str = "output",
                           dry_run: bool = False) -> str:
     """Build the '<name>_<timestamp>.nc' output filename, sanitizing BOTH halves so the
@@ -245,7 +306,7 @@ def build_resume_programs(gcode: str, main_filename: str) -> List[Dict[str, str]
             'checkpoint': checkpoint,
             'description': safe_description,
             'filename': filename,
-            'gcode': '\n'.join(preamble + lines[index:]) + '\n',
+            'gcode': '\n'.join(enforce_line_length(preamble + lines[index:])) + '\n',
         })
     return programs
 
@@ -1050,9 +1111,12 @@ class FRCPostProcessor:
             checkpoint = sanitize_comment(resume_checkpoint, 'TC')
             description = sanitize_comment(resume_description or title, 'tool change')
             gcode.append(f'( === RESUME CHECKPOINT {checkpoint} - {description} === )')
+            # Pre-wrapped in three short lines so BOTH z-datum phrasings fit the
+            # controller line limit with the same line count - the z_datum tests
+            # compare the two programs line for line.
             gcode.append('( Standalone resume: verify machine referenced, G54 X and Y unchanged, )')
-            gcode.append(
-                f'( correct tool installed, and G54 Z zeroed to {self.z_zero_surface()}, not G92 )')
+            gcode.append('( correct tool installed, and G54 Z zeroed )')
+            gcode.append(f'( to {self.z_zero_surface()}, not G92 )')
             gcode.extend(self._resume_state_gcode())
         else:
             gcode.append('( === RESTART AFTER PAUSE === )')
@@ -2664,7 +2728,7 @@ class FRCPostProcessor:
         # Return result
         return PostProcessorResult(
             success=True,
-            gcode='\n'.join(gcode),
+            gcode='\n'.join(enforce_line_length(gcode)),
             filename=filename,
             warnings=(warnings
                       + [w for w in self.geometry_warnings if w not in warnings]
@@ -4247,7 +4311,7 @@ class FRCPostProcessor:
 
         return PostProcessorResult(
             success=True,
-            gcode='\n'.join(gcode),
+            gcode='\n'.join(enforce_line_length(gcode)),
             filename=filename,
             warnings=warnings,
             stats={
@@ -7239,7 +7303,7 @@ class FRCPostProcessor:
         # Return result
         return PostProcessorResult(
             success=True,
-            gcode='\n'.join(gcode),
+            gcode='\n'.join(enforce_line_length(gcode)),
             filename=filename,
             warnings=[],
             stats={
@@ -7706,7 +7770,7 @@ class FRCPostProcessor:
         # Return result
         return PostProcessorResult(
             success=True,
-            gcode='\n'.join(gcode),
+            gcode='\n'.join(enforce_line_length(gcode)),
             filename=filename,
             warnings=tube_warnings,
             stats={
@@ -8337,7 +8401,7 @@ def assemble_job_gcode(part_jobs, header_pp, timestamp=None, suggested_filename=
 
     return PostProcessorResult(
         success=True,
-        gcode='\n'.join(gcode),
+        gcode='\n'.join(enforce_line_length(gcode)),
         filename=filename,
         stats={
             'num_parts': len(part_jobs),

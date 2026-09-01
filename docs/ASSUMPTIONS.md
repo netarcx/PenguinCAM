@@ -35,6 +35,14 @@ every controller supports:
   have pre-set that WCS in the controller; an unset WCS defaults to machine zero and cuts in
   the wrong place. Flat/2.5D work is always `G54`.
 
+**Every line is at most 78 characters.** GRBL-class controllers buffer 80 characters
+per line and refuse anything longer ("command too long" / line overflow) — mid-run,
+with the spindle down, which scraps the part. A real program was refused on 2026-09-01
+by a long header comment. `enforce_line_length` in `frc_cam_postprocessor.py` runs at
+every program assembly point: it wraps long `(...)` comments onto continuation lines
+and trims trailing `;` annotations, and never alters the code itself. Both the unit
+tests (`test_no_overlong_lines`) and the audit check the emitted result.
+
 Still assumed regardless: standard modal behavior and state persistence.
 
 Note: **Easel** (Inventables) is **not a supported target** — its importer rejects arcs

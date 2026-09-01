@@ -74,6 +74,15 @@ uv pip install -r requirements.txt
 - **Square brackets are also forbidden inside comments** (`test_no_square_brackets_in_comments`) - some controllers read them as expressions
 - For any text that came from a user, a tool name, or CAD (part names especially), run it through `sanitize_comment()` in `frc_cam_postprocessor.py` rather than hand-rolling a replacement - it handles all three rules at once
 
+### Lines Over 78 Characters - FORBIDDEN
+- GRBL-class controllers buffer 80 characters per line and refuse longer ones
+  ("command too long") mid-run with the spindle down
+- Every program assembly point must join through `enforce_line_length()` in
+  `frc_cam_postprocessor.py` - it wraps long comments and trims `;` annotations
+  without ever touching the code words
+- There is a unit test (`test_no_overlong_lines`) and an audit check, but new
+  assembly points must call `enforce_line_length()` themselves
+
 ### Unicode Characters - FORBIDDEN
 - **All G-code must be pure ASCII** - no unicode characters
 - ❌ Bad: `(Cut depth: 0.25″)` (curly quotes), `(Feedrate → 75 IPM)` (arrows)

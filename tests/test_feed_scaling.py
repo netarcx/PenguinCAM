@@ -288,7 +288,10 @@ class TestMaxPassDepthRoutes(unittest.TestCase):
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
         self.assertIn('6 passes', body['gcode'])
-        self.assertIn('limited to 0.050 in by operator', body['gcode'])
+        # Header comments wrap at the controller line limit; rejoin wrapped
+        # comment lines before matching the full phrase.
+        self.assertIn('limited to 0.050 in by operator',
+                      body['gcode'].replace(')\n(', ' '))
 
     def test_bad_ceiling_is_a_400(self):
         response = self._post_job({'max_pass_depth': -1})

@@ -53,6 +53,7 @@ from frc_cam_postprocessor import (
     FRCPostProcessor,
     PostProcessorResult,
     build_output_filename,
+    enforce_line_length,
     normalize_z_datum,
     sanitize_comment,
 )
@@ -2083,7 +2084,7 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
 
     return PostProcessorResult(
         success=True,
-        gcode='\n'.join(gcode),
+        gcode='\n'.join(enforce_line_length(gcode)),
         filename=build_output_filename(suggested_filename or job.name, timestamp, 'job',
                                        dry_run=bool(job.dry_run_lift)),
         # Deduped: a feeds warning about one tool repeats for every part and every

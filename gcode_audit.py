@@ -203,6 +203,14 @@ def check_text_rules(name, lines):
             elif inp and c in '[]':
                 fail(name, f'line {n} bracket in comment: {l[:60]}')
                 break
+        # GRBL-class controllers buffer 80 characters per line and refuse anything
+        # longer ("command too long") - mid-run, spindle down, part scrapped. A real
+        # program was refused on 2026-09-01 by exactly this. 78 is MAX_LINE_LENGTH
+        # in frc_cam_postprocessor; restated here on purpose - the audit checks the
+        # claim, not the constant that implements it.
+        if len(l) > 78:
+            fail(name, f'line {n} is {len(l)} chars, over the 78-char controller '
+                       f'line limit: {l[:60]}')
 
     # --- no ATC codes ---------------------------------------------------------------
     for n, l in enumerate(lines, 1):
