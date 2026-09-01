@@ -468,7 +468,13 @@ def calculate_feeds(machine, material, tool, operation='profile'):
             f"materials evacuate chips poorly with high flute counts - the tool may "
             f"rub or pack. A 1- or 2-flute cutter is usually better.")
 
-    ramp_feed = feed * mat['ramp_multiplier']
+    # The ramp/helix always derives from the FULL-SLOT feed, whatever the operation:
+    # an entry move is a full-width slot with axial engagement stacked on top, even
+    # when the operation it enters (a pocket) then runs at partial engagement.
+    # Multiplying the pocket's un-derated feed instead made a pocket's helical entry
+    # run hotter than the same tool's perimeter ramp - backwards for the worst cut.
+    slot_feed = feed if is_slot else feed * mat['slotting_multiplier']
+    ramp_feed = slot_feed * mat['ramp_multiplier']
     peck_feed = feed * mat['plunge_multiplier']
 
     stepover = mat['stepover_ratio'] * diameter
@@ -486,7 +492,7 @@ def calculate_feeds(machine, material, tool, operation='profile'):
         f"chipload_target = chipload_ref * (D / {d_ref:.3f})^{DIAMETER_EXPONENT}"
         + (" * slotting_multiplier" if is_slot else ""),
         "feed = RPM * min(flutes, feed_flutes_max) * chipload_target * rigidity_factor",
-        "ramp_feed = feed * ramp_multiplier",
+        "ramp_feed = slot_feed * ramp_multiplier",
         "peck_feed = feed * plunge_multiplier",
         "stepover = stepover_ratio * D",
         "slot_stepdown = slot_stepdown_ratio * D",
@@ -534,7 +540,8 @@ def _build_explanation(m, mat, diameter, flutes, rpm, chipload_target,
             f"After machine limits the achieved chipload is "
             f"{chipload_achieved:.4f} in/tooth.")
     parts.append(
-        f"Ramp feed is {mat['ramp_multiplier']:.2f} x the XY feed, or {ramp_feed:.1f} IPM.")
+        f"Ramp feed is {mat['ramp_multiplier']:.2f} x the full-slot feed, "
+        f"or {ramp_feed:.1f} IPM.")
     return " ".join(parts)
 
 
