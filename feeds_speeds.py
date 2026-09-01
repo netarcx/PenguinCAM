@@ -18,7 +18,7 @@ Model (all lengths in inches, feeds in IPM, RPM in rev/min)::
     feed            = min(feed_raw, machine.xy_feed_max)          # machine limit
     chipload_done   = feed / (rpm * flutes)                       # achieved chipload
     ramp_feed       = feed * ramp_multiplier
-    peck_feed       = feed * plunge_multiplier
+    peck_feed       = min(feed * plunge_multiplier, machine.z_feed_max)
     stepover        = stepover_ratio * D
     slot_stepdown   = slot_stepdown_ratio * D
 
@@ -482,7 +482,16 @@ def calculate_feeds(machine, material, tool, operation='profile'):
     # run hotter than the same tool's perimeter ramp - backwards for the worst cut.
     slot_feed = feed if is_slot else feed * mat['slotting_multiplier']
     ramp_feed = slot_feed * mat['ramp_multiplier']
-    peck_feed = feed * mat['plunge_multiplier']
+    # Clamped to the machine's Z limit like calculate_drill_feeds always has been.
+    # This is emitted on Z-only moves (pecks, tab lifts), and a 2-flute in plywood
+    # derived 66 ipm against the Omio's 60 ipm Z axis - the firmware clamps it, but
+    # the program should never command what the machine cannot do.
+    peck_raw = feed * mat['plunge_multiplier']
+    peck_feed = min(peck_raw, m['z_feed_max'])
+    if peck_raw > m['z_feed_max']:
+        warnings.append(
+            f"Plunge clamped by the machine's Z limit: wanted {peck_raw:.1f} IPM, "
+            f"max is {m['z_feed_max']:.0f} IPM.")
 
     stepover = mat['stepover_ratio'] * diameter
     slot_stepdown = mat['slot_stepdown_ratio'] * diameter
@@ -500,7 +509,7 @@ def calculate_feeds(machine, material, tool, operation='profile'):
         + (" * slotting_multiplier" if is_slot else ""),
         "feed = RPM * min(flutes, feed_flutes_max) * chipload_target * rigidity_factor",
         "ramp_feed = slot_feed * ramp_multiplier",
-        "peck_feed = feed * plunge_multiplier",
+        "peck_feed = min(feed * plunge_multiplier, machine z_feed_max)",
         "stepover = stepover_ratio * D",
         "slot_stepdown = slot_stepdown_ratio * D",
     ]

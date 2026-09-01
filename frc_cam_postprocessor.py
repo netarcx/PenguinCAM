@@ -779,6 +779,17 @@ class FRCPostProcessor:
                 notes.append(
                     f"corner feed floor raised from {old_scale:.2f} to "
                     f"{required_corner_scale:.2f} so corner moves do not rub")
+            # The ramp gets the same protection as the corners: a ramp/helix below the
+            # minimum chipload rubs, welds and shatters the tool (this mirrors the
+            # floor tooling.py applies on the multi-tool path). The stock preset's
+            # 19/30 ratio already clears the floor; this guards a team config whose
+            # tuned ramp_feed_rate drifts below it.
+            if self.ramp_feed_rate < min_feed_native - 1e-9:
+                old_ramp = self.ramp_feed_rate
+                self.ramp_feed_rate = round(min(min_feed_native, self.feed_rate), 1)
+                notes.append(
+                    f"ramp feed raised from {old_ramp:.1f} to "
+                    f"{self.ramp_feed_rate:.1f} so entry moves do not rub")
 
         depth_factor = min(1.0, diameter_in / d_ref)
         if depth_factor < 1.0 - 1e-9:
