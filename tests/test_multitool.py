@@ -921,32 +921,50 @@ class TestTwoAndAHalfDIsRefused(unittest.TestCase):
 
 
 class TestFixturingPause(unittest.TestCase):
-    PAUSE = TeamConfig({'machining': {'fixturing': {'pause_before_perimeter': True}}})
+    PAUSE = TeamConfig({'machining': {
+        'z_reference': {'tool_change_height': 2.0},
+        'fixturing': {'pause_after_holes': True, 'pause_before_perimeter': False},
+    }})
 
-    def setUp(self):
-        if not self.PAUSE.pause_before_perimeter:
-            self.skipTest('config shape for pause_before_perimeter not recognised')
+    def test_pause_after_holes_is_the_default(self):
+        self.assertTrue(TeamConfig().pause_after_holes)
 
-    def test_pause_fires_when_the_profile_is_the_very_first_body(self):
-        """`if first_perimeter` treated index 0 as absent, so a part whose only operation
-        is its outline got no fixturing stop at all."""
+    def test_a_profile_only_job_does_not_claim_there_are_fastening_holes(self):
         job = build_job(config=self.PAUSE, parts=[PartOps(
             dxf_path=make_bare_dxf(), name='P',
             operations=[Operation('perimeter', 2)])])
         result = generate(job)
         self.assertTrue(result.success, result.errors)
-        self.assertIn('Install screws', result.gcode)
+        self.assertNotIn('PAUSE FOR FIXTURING', result.gcode)
 
-    def test_pause_fires_in_the_normal_case(self):
+    def test_pause_fires_after_holes_and_before_pockets(self):
         result = generate(build_job(config=self.PAUSE, parts=[PartOps(
             dxf_path=make_plate_dxf(), name='P', operations=covering_ops())]))
         self.assertTrue(result.success, result.errors)
-        self.assertIn('Install screws', result.gcode)
+        self.assertIn('Install fasteners', result.gcode)
+        lines = result.gcode.splitlines()
+        last_hole = max(i for i, line in enumerate(lines)
+                        if line.startswith('(===== ') and 'HOLES -' in line)
+        pause = next(i for i, line in enumerate(lines) if 'PAUSE FOR FIXTURING' in line)
+        first_later_cut = min(i for i, line in enumerate(lines)
+                              if line.startswith('(===== ')
+                              and ('POCKETS -' in line or 'PERIMETER -' in line))
+        self.assertLess(last_hole, pause)
+        self.assertLess(pause, first_later_cut)
 
-    def test_every_interior_really_does_precede_every_profile(self):
-        """The pause claims 'internal features complete on every part'. Tool-grouping
-        interleaves parts freely, so without a phase split that claim was false and the
-        operator was told to screw through holes that did not exist yet."""
+    def test_pause_uses_the_roomy_manual_access_height(self):
+        result = generate(build_job(config=self.PAUSE))
+        pause = result.gcode.split('( === PAUSE FOR FIXTURING === )', 1)[1]
+        self.assertIn('G0 Z2.0000  ; Safe Z clearance', pause.split('M0', 1)[0])
+
+    def test_an_explicit_false_disables_the_default_pause(self):
+        cfg = TeamConfig({'machining': {'fixturing': {
+            'pause_after_holes': False, 'pause_before_perimeter': False,
+        }}})
+        result = generate(build_job(config=cfg))
+        self.assertNotIn('PAUSE FOR FIXTURING', result.gcode)
+
+    def test_every_parts_holes_precede_the_shared_pause(self):
         dxf = make_plate_dxf()
         result = generate(build_job(config=self.PAUSE, parts=[
             PartOps(dxf_path=dxf, name='A', place_x=0, operations=covering_ops()),
@@ -954,18 +972,20 @@ class TestFixturingPause(unittest.TestCase):
         ]))
         self.assertTrue(result.success, result.errors)
         lines = result.gcode.splitlines()
-        last_interior = max(i for i, l in enumerate(lines)
-                            if l.startswith('(===== ') and ('HOLES -' in l or 'POCKETS -' in l))
-        first_profile = min(i for i, l in enumerate(lines)
-                            if l.startswith('(===== ') and 'PERIMETER -' in l)
-        self.assertLess(last_interior, first_profile)
+        last_hole = max(i for i, line in enumerate(lines)
+                        if line.startswith('(===== ') and 'HOLES -' in line)
+        pause = next(i for i, line in enumerate(lines) if 'PAUSE FOR FIXTURING' in line)
+        first_pocket = min(i for i, line in enumerate(lines)
+                           if line.startswith('(===== ') and 'POCKETS -' in line)
+        self.assertLess(last_hole, pause)
+        self.assertLess(pause, first_pocket)
 
     def test_the_split_does_not_reorder_a_parts_own_operations(self):
         parts = [PartOps(dxf_path='x.dxf', name='p', operations=[
             Operation('holes', 1), Operation('pockets', 2),
             Operation('perimeter', 2), Operation('chamfer', 3,
                                                  scope={'targets': ['perimeter']})])]
-        order = tooling.order_operations(parts, split_before_perimeter=True)
+        order = tooling.order_operations(parts, split_after_holes=True)
         self.assertEqual([op for _, op in order], [0, 1, 2, 3])
 
 
@@ -1748,12 +1768,14 @@ class TestGeneratedProgram(unittest.TestCase):
         assert cls.result.success, cls.result.errors
         cls.lines = cls.result.gcode.splitlines()
 
-    def test_one_pause_per_tool_change_and_no_more(self):
+    def test_pauses_are_exactly_tool_changes_plus_the_fixturing_stop(self):
         # Match the block header, not the header comment that mentions tool changes.
         changes = [l for l in self.lines if '=== TOOL CHANGE' in l]
         pauses = [l for l in self.lines if l.startswith('M0')]
         self.assertEqual(len(changes), self.result.stats['tool_changes'])
-        self.assertEqual(len(pauses), len(changes))
+        fixtures = [l for l in self.lines if '=== PAUSE FOR FIXTURING' in l]
+        self.assertEqual(len(fixtures), 1)
+        self.assertEqual(len(pauses), len(changes) + len(fixtures))
 
     def test_tool_change_stops_the_spindle_and_restarts_it(self):
         text = self.result.gcode

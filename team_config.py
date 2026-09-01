@@ -150,6 +150,10 @@ TEAM_6238_DEFAULTS = {
             'remove_tabs': True
         },
         'fixturing': {
+            # Multi-tool jobs drill every fastening hole, move the cutter clear, and
+            # stop before pockets/profiles by default. Teams that fixture some other
+            # way can explicitly turn this off.
+            'pause_after_holes': True,
             'pause_before_perimeter': False
         },
         'holes': {
@@ -628,6 +632,11 @@ class TeamConfig:
     def pause_before_perimeter(self) -> bool:
         """Whether to pause before cutting perimeter (for screw fixturing)"""
         return self._get('machining', 'fixturing', 'pause_before_perimeter')
+
+    @property
+    def pause_after_holes(self) -> bool:
+        """Whether multi-tool jobs pause after holes so the stock can be fastened."""
+        return self._get('machining', 'fixturing', 'pause_after_holes')
 
     @property
     def hole_detection_tolerance(self) -> float:
@@ -1286,6 +1295,14 @@ machining:
     height: 0.1                     # How much material to leave in tab (inches)
     spacing: 6.0                    # Desired spacing between tabs (inches)
     # Note: Actual spacing may be closer to ensure minimum 3 tabs
+
+  fixturing:
+    # Multi-tool jobs pause after every part's fastening holes and before the
+    # remaining pockets/profiles. The tool uses tool_change_height above and a
+    # configured machine park_position. Set false if the stock is already secure.
+    pause_after_holes: true
+    # Legacy optional stop after all interior work, immediately before profiles.
+    pause_before_perimeter: false
 
   # Hole detection and processing
   holes:

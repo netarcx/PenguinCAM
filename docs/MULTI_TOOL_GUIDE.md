@@ -132,15 +132,18 @@ Write the operations in the order you'd run them yourself and you'll always get 
 program; group same-tool operations together and you'll also get a fast one. The UI warns
 when a part's own list would force more than one change on its own.
 
-**One exception.** When the team config enables the fixturing pause
-(`pause_before_perimeter`), ordering additionally guarantees that no part's profile is cut
-until every part's interior work is done — grouping by tool *within* two phases rather
-than across the whole job. That is what makes a single shared "screw everything down"
-stop honest. Without it, tool-grouping interleaves freely, so one part's profile can
-precede another part's holes, and an operator told to "install screws through holes into
-the sacrifice board" would be looking for holes that don't exist yet. It can cost an
-extra tool change; that's the price of the guarantee, and it's only requested when the
-team has turned the pause on.
+**One exception.** The default fixturing pause (`pause_after_holes: true`) groups the job
+into a hole phase and a remaining-work phase. Every part's fastening holes are completed,
+then the spindle stops and the tool moves to the roomy manual-access height before a
+single shared pause. The operator installs fasteners through those holes into the
+sacrifice board, then pockets and profiles begin. If that boundary is also a tool change,
+the fastening directions are folded into the tool-change stop instead of pausing twice.
+
+The pause uses `machining.z_reference.tool_change_height` for vertical clearance and also
+uses `machine.park_position` when that verified machine-coordinate park is configured.
+Set `pause_after_holes: false` for a shop whose stock is already secured another way. The
+older `pause_before_perimeter` option remains available as a separate, later boundary,
+but is off by default.
 
 ### Tabs are held back
 
@@ -190,8 +193,9 @@ post-processor built for the operation that follows it.
 
 When `machining.z_reference.tool_change_height` is configured, a tool change without a
 verified G53 park retracts to that roomier height instead of stopping just above the
-stock. UV-CAM also creates a standalone resume file at every `TCxx` checkpoint and a
-one-click ZIP containing the main program plus all of those recovery files. A
+stock. UV-CAM also creates a standalone resume file at every `TCxx` checkpoint. The
+default download is a ZIP containing the main program plus all of those recovery files;
+the preview offers a separate main-program-only download when needed. A
 resume file begins stopped, asks the operator to reference or home the machine if needed,
 verify the unchanged G54 X/Y zero, load the named tool, and re-zero G54 Z. Only then does it
 reset all modal state, retract, start the incoming tool, and run the remaining operations.

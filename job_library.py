@@ -29,10 +29,11 @@ JOBS_DIRNAME = 'penguincam-jobs'
 #: Anything larger is not a plate job. A DXF this big is usually a whole assembly
 #: exported by mistake, and 25 of them would fill a shop laptop.
 MAX_DXF_BYTES = 4 * 1024 * 1024
+MAX_FONT_BYTES = 10 * 1024 * 1024
 MAX_PARTS = 60
 
 #: Bumped when the on-disk shape changes in a way older readers cannot handle.
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
 class JobLibraryError(ValueError):
@@ -119,7 +120,7 @@ def list_jobs(config_path: str):
     return jobs
 
 
-def save_job(config_path: str, name: str, setup: dict, parts: list):
+def save_job(config_path: str, name: str, setup: dict, parts: list, font: dict = None):
     """Write one job: its setup, and a DXF per part.
 
     `parts` is a list of {name, dxf_bytes, place_x, place_y, rotation, mirror, ops}.
@@ -174,12 +175,31 @@ def save_job(config_path: str, name: str, setup: dict, parts: list):
                             if part.get('label_x') is not None else None),
                 'label_y': (_finite(part.get('label_y'), 'label placement')
                             if part.get('label_y') is not None else None),
+                'engrave_text': (str(part.get('engrave_text'))[:200]
+                                 if part.get('engrave_text') is not None else None),
+                'engrave_height': (_finite(part.get('engrave_height'), 'engraving height')
+                                    if part.get('engrave_height') is not None else None),
+                'engrave_height_text': (str(part.get('engrave_height_text'))[:30]
+                                         if part.get('engrave_height_text') is not None
+                                         else None),
                 'rotation': _finite(part.get('rotation'), 'rotation'),
                 'mirror': bool(part.get('mirror')),
                 'ops': part.get('ops') or None,
             })
 
         meta = dict(setup or {})
+        if font:
+            blob = font.get('bytes') or b''
+            suffix = str(font.get('suffix') or '').lower()
+            if suffix not in ('.ttf', '.otf'):
+                raise JobLibraryError('A saved engraving font must be TTF or OTF.')
+            if not blob or len(blob) > MAX_FONT_BYTES:
+                raise JobLibraryError('The engraving font is empty or larger than 10 MB.')
+            font_file = 'engraving-font' + suffix
+            with open(os.path.join(staging, font_file), 'wb') as fh:
+                fh.write(blob)
+            meta['engrave_font_file'] = font_file
+            meta['engrave_font_name'] = str(font.get('name') or font_file)[:200]
         meta.update({
             'format': FORMAT_VERSION,
             'name': str(name).strip(),
@@ -238,6 +258,13 @@ def load_job(config_path: str, job_id: str) -> dict:
             blob = fh.read()
         parts.append(dict(part, dxf_base64=base64.b64encode(blob).decode('ascii')))
     meta['parts'] = parts
+    font_file = os.path.basename(str(meta.get('engrave_font_file') or ''))
+    if font_file:
+        font_path = os.path.join(path, font_file)
+        if not os.path.isfile(font_path):
+            raise JobLibraryError('The saved engraving font is missing; the job is incomplete.')
+        with open(font_path, 'rb') as fh:
+            meta['engrave_font_base64'] = base64.b64encode(fh.read()).decode('ascii')
     meta['id'] = os.path.basename(path)
     return meta
 

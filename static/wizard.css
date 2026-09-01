@@ -740,6 +740,16 @@ fieldset.field { border: 1px solid var(--line); border-radius: var(--r); padding
 .part-identity { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(64px, 0.35fr); gap: 6px; }
 .part-identity label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .part-identity input { display: block; width: 100%; margin-top: 2px; padding: 4px 6px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.part-engraving {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(78px, 0.3fr);
+  gap: 6px;
+  margin-top: 6px;
+}
+.part-engraving label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.part-engraving input { display: block; width: 100%; margin-top: 2px; padding: 4px 6px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.blank-part-maker { margin-top: 10px; }
+.blank-part-maker .btn { margin-top: 8px; }
 .part-item .dims {
   font: 500 11.5px/1.3 var(--font-mono);
   font-variant-numeric: tabular-nums;

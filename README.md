@@ -14,6 +14,7 @@ A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout �
 - **Multi-tool operations:** an ordered operation list per part, each operation with its own tool and its own scope (small holes on the 1/8", pockets and profile on the 1/4", edge break on a V-bit). The job groups the work by tool and pauses for a manual tool change at each switch. See [docs/MULTI_TOOL_GUIDE.md](docs/MULTI_TOOL_GUIDE.md).
 - **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF/STEP files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
 - **Bed leveling:** generate and preview a guarded spoilboard-surfacing raster from the **Level bed** utility, with machine-travel validation and a downloadable `.nc` program.
+- **Text engraving:** put independent text at an exact size and draggable position on every part, using the fast built-in single-line font or any uploaded TTF/OTF. A rectangular blank part can be created directly in the wizard for plaques and labels.
 - **Save:** split "Download Program / Send to Google Drive" button (Drive gated by config, remembers last choice).
 - The wizard is the whole app: `/` (and `/app`) serve it full-screen in DXF-upload mode; the Onshape panel serves the same wizard with face-selection as the source.
 
@@ -151,6 +152,12 @@ Tick **Use several tools** on the Setup step to plan an operation list per part 
 the small holes with a small cutter, clear pockets and profile with a big one, break the
 edges with a V-bit. The program stops and tells you what to swap at each change.
 
+After all fastening holes are made, the default multi-tool program raises the cutter to
+the configured tool-change height, parks the gantry when a verified park is configured,
+and pauses before pockets or profiles. Install fasteners through the completed holes into
+the sacrifice board, then press Cycle Start. Set `machining.fixturing.pause_after_holes`
+to `false` only when the stock is already secured another way.
+
 **At every tool change: swap the tool, re-zero G54 Z to the job's zero surface, and leave X
 and Y alone.** That is the sacrifice board unless the job was generated with *Zero Z on:
 Stock top* - each pause names the surface, as does the program header. See
@@ -158,10 +165,11 @@ Stock top* - each pause names the surface, as does the program header. See
 [the Z coordinate system](docs/Z_COORDINATE_SYSTEM.md).
 
 The configured `tool_change_height` lifts the Omio collet to a roomy work-coordinate Z
-before the pause. Multi-tool downloads also offer one standalone **Resume TCxx** program
-per tool boundary, plus a recovery ZIP containing the main program and every checkpoint;
-use the matching file after verifying the machine reference, G54 X/Y, the installed tool,
-and the new G54 Z zero. Do not use a temporary G92 zero; restart blocks cancel G92 offsets.
+before the pause. By default, a multi-tool download is a recovery ZIP containing the main
+program and one standalone **Resume TCxx** program per tool boundary (the preview still
+offers the main program separately). Use the matching file after verifying the machine
+reference, G54 X/Y, the installed tool, and the new G54 Z zero. Do not use a temporary G92
+zero; restart blocks cancel G92 offsets.
 
 ### Running on the CNC
 

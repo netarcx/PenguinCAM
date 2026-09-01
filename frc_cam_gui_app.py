@@ -30,6 +30,7 @@ from shapely.ops import unary_union
 import logging
 import metrics
 import feeds_speeds
+import outline_font
 from logging_config import log  # shared log() + base logging setup (was duplicated per module)
 from step_geometry import StepGeometryError, convert_step_to_multilayer_dxf
 
@@ -1088,11 +1089,34 @@ def save_saved_job():
                       'place_x': part.get('place_x'), 'place_y': part.get('place_y'),
                       'center_x': part.get('center_x'), 'center_y': part.get('center_y'),
                       'label_x': part.get('label_x'), 'label_y': part.get('label_y'),
+                      'engrave_text': part.get('engrave_text'),
+                      'engrave_height': part.get('engrave_height'),
+                      'engrave_height_text': part.get('engrave_height_text'),
                       'rotation': part.get('rotation'), 'mirror': part.get('mirror'),
                       'ops': part.get('ops')})
+    saved_font = None
+    font_in = spec.get('font')
+    if font_in is not None:
+        if not isinstance(font_in, dict):
+            return _jobs_response('The saved engraving font is invalid.', status=400)
+        try:
+            font_blob = base64.b64decode(str(font_in.get('base64') or ''), validate=True)
+        except (ValueError, TypeError):
+            return _jobs_response('The engraving font did not arrive intact.', status=400)
+        if len(font_blob) > MAX_ENGRAVING_FONT_BYTES:
+            return _jobs_response('The engraving font is larger than 10 MB.', status=400)
+        suffix = Path(str(font_in.get('name') or '')).suffix.lower()
+        if suffix not in ('.ttf', '.otf'):
+            return _jobs_response('The engraving font must be a TTF or OTF file.', status=400)
+        try:
+            outline_font.validate_font_bytes(font_blob)
+        except outline_font.OutlineFontError as exc:
+            return _jobs_response(str(exc), status=400)
+        saved_font = {'bytes': font_blob, 'suffix': suffix,
+                      'name': str(font_in.get('name') or '')}
     try:
         job_id, _ = job_library.save_job(local_mode.find_local_config_path(), name,
-                                         spec.get('setup') or {}, parts)
+                                         spec.get('setup') or {}, parts, font=saved_font)
     except job_library.JobLibraryError as exc:
         return _jobs_response(str(exc), status=400)
     except OSError as exc:
@@ -1967,6 +1991,11 @@ def process_job():
             f.save(p)
             saved_paths[idx] = p
 
+        try:
+            engraving_font_path, engraving_font_name = _save_engraving_font(job_dir, job)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
         # Local mode keeps the team config in a file, and the session is seeded from it
         # when a page renders. A request that arrives without that having happened -
         # a fresh session, an expired cookie, a script posting directly - fell back to
@@ -2027,11 +2056,25 @@ def process_job():
             if dry_run:
                 pp.set_dry_run(DRY_RUN_LIFT_IN)
             if engrave:
-                # Its OWN name: the whole point is telling one part from another once
-                # they are off the machine and in a pile.
-                engrave_text = str(part.get('engrave_text') or name)[:100]
-                pp.engrave = {'text': engrave_text, 'height': ENGRAVE_HEIGHT_IN,
-                              'depth': ENGRAVE_DEPTH_IN, 'anchor': engrave_anchor}
+                engrave_text = str(part.get('engrave_text') or name)[:200]
+                try:
+                    engrave_height = float(part.get('engrave_height', ENGRAVE_HEIGHT_IN))
+                    engrave_depth = float(part.get('engrave_depth', ENGRAVE_DEPTH_IN))
+                except (TypeError, ValueError):
+                    gen_errors.append({'part_index': i, 'name': name,
+                                       'error': 'Engraving height and depth must be numbers.'})
+                    continue
+                if not (math.isfinite(engrave_height) and math.isfinite(engrave_depth)) \
+                        or engrave_height <= 0 or engrave_depth <= 0:
+                    gen_errors.append({'part_index': i, 'name': name,
+                                       'error': 'Engraving height and depth must be positive numbers.'})
+                    continue
+                pp.engrave = {
+                    'text': engrave_text, 'height': engrave_height,
+                    'depth': engrave_depth, 'anchor': engrave_anchor,
+                    'font_path': engraving_font_path, 'font_name': engraving_font_name,
+                    'strict_size': ('engrave_height' in part),
+                }
             pp.apply_material_preset(material, machine_id)
             pp.scale_feeds_to_tool()   # preset is 4mm-referenced; derate for smaller tools
             if max_pass_depth is not None:
@@ -2325,7 +2368,8 @@ def tooling_presets():
     })
 
 
-def _multitool_job_from_request(spec, saved_paths):
+def _multitool_job_from_request(spec, saved_paths, engraving_font_path=None,
+                                engraving_font_name=None):
     """Build a MultiToolJob from a posted job spec plus the DXFs already saved to disk."""
     # Checked here, not only in job_from_dict: the dict() copy below runs first, and on a
     # posted JSON array it raises TypeError before job_from_dict's own guard is reached -
@@ -2340,6 +2384,8 @@ def _multitool_job_from_request(spec, saved_paths):
         spec, saved_paths,
         config=TeamConfig.from_dict(session.get('team_config_data', {})),
         user_name=session.get('user_name'),
+        engraving_font_path=engraving_font_path,
+        engraving_font_name=engraving_font_name,
     )
 
 
@@ -2361,6 +2407,32 @@ def _save_job_dxfs(job_dir):
         f.save(path)
         saved_paths[idx] = path
     return saved_paths
+
+
+MAX_ENGRAVING_FONT_BYTES = 10 * 1024 * 1024
+
+
+def _save_engraving_font(job_dir, spec):
+    """Save and validate the optional job-scoped TTF/OTF without trusting its name."""
+    mode = str(spec.get('engrave_font') or 'single_line')
+    upload = request.files.get('engrave_font_file')
+    if mode not in ('single_line', 'uploaded'):
+        raise ValueError('Engraving font must be single_line or uploaded.')
+    if mode == 'single_line':
+        return None, 'CNC single-line'
+    if upload is None or not upload.filename:
+        raise ValueError('Choose a TTF or OTF font file for this engraving job.')
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in ('.ttf', '.otf'):
+        raise ValueError('The engraving font must be a .ttf or .otf file.')
+    path = os.path.join(job_dir, 'engraving-font' + suffix)
+    upload.save(path)
+    if os.path.getsize(path) > MAX_ENGRAVING_FONT_BYTES:
+        raise ValueError('The engraving font is larger than 10 MB.')
+    try:
+        return path, outline_font.validate_font(path)
+    except outline_font.OutlineFontError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 @app.route('/part-features', methods=['POST'])
@@ -2498,7 +2570,9 @@ def process_multitool():
 
         job_dir = tempfile.mkdtemp(prefix='mtjob_', dir=UPLOAD_FOLDER)
         saved_paths = _save_job_dxfs(job_dir)
-        job = _multitool_job_from_request(spec, saved_paths)
+        engraving_font_path, engraving_font_name = _save_engraving_font(job_dir, spec)
+        job = _multitool_job_from_request(spec, saved_paths, engraving_font_path,
+                                          engraving_font_name)
 
         log(f"[MULTITOOL] {len(job.parts)} part(s), {len(job.used_tools)} tool(s), "
             f"material {job.material}, thickness {job.thickness}")

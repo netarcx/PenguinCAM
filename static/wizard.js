@@ -96,6 +96,10 @@
     // Cut each part's name into its own face. Off by default: it costs cycle time and
     // needs a fine cutter, so it should be a decision rather than a surprise.
     engrave: false,
+    engraveFontMode: 'single_line',
+    engraveFontFile: null,
+    engraveFontName: '',
+    engravePreviewFamily: '',
     // Optional ceiling on the depth of one contour pass (inches; null = automatic).
     // More, shallower passes to baby fragile or multi-flute cutters - clamp-only.
     max_pass_depth: null,
@@ -316,6 +320,31 @@
   function partLabelText(part) {
     var number = String(part.number || '').trim();
     return String(part.name || 'part').trim() + (number ? ' #' + number : '');
+  }
+
+  function engravingText(part) {
+    return part.engrave_text == null ? partLabelText(part) : String(part.engrave_text);
+  }
+
+  function defaultEngraveHeight() {
+    return Math.max(0.18, state.tool_diameter * 2.1);
+  }
+
+  function defaultEngraveHeightText() {
+    return (Math.round(defaultEngraveHeight() * 1000) / 1000) + '"';
+  }
+
+  function previewUploadedFont(file) {
+    state.engravePreviewFamily = '';
+    if (!file || !window.FontFace) return;
+    var url = URL.createObjectURL(file);
+    var family = 'PenguinCAMUploadedFont';
+    new FontFace(family, 'url(' + url + ')').load().then(function (face) {
+      document.fonts.add(face);
+      state.engravePreviewFamily = family;
+      drawLayout();
+      URL.revokeObjectURL(url);
+    }).catch(function () { URL.revokeObjectURL(url); });
   }
 
   function placedLabelAnchor(part) {
@@ -567,7 +596,7 @@
     // Always shown, both ways round: this is the number the operator has to match on
     // the machine, so it should never be something you have to remember choosing.
     if (state.dryRun) chips.push('DRY RUN - cuts air');
-    if (state.engrave && state.mode === '2d') chips.push('names engraved');
+    if (state.engrave && state.mode === '2d') chips.push('custom text engraved');
     chips.push(state.mode === 'tubing' ? 'Z0 = tube origin'
                : (state.zDatum === 'stock_top' ? 'Z0 = stock top' : 'Z0 = spoilboard'));
     if (state.mode === 'tubing') {
@@ -699,6 +728,11 @@
   }
 
   function canLeave(name) {
+    if (name === 'setup' && engraveOn() && state.engraveFontMode === 'uploaded'
+        && !state.engraveFontFile) {
+      alert('Choose the TTF or OTF font file to engrave.');
+      return false;
+    }
     if (name === 'parts' && state.parts.length === 0 && !tubePatternOn()) {
       alert('Add at least one part before continuing.');
       return false;
@@ -710,6 +744,11 @@
           + 'Remove ' + partsOverCap() + ' before continuing, or switch to 2D.'
         : 'Tubing machines at most two faces, and ' + state.parts.length + ' are loaded. '
           + 'Remove ' + partsOverCap() + ' before continuing.');
+      return false;
+    }
+    if (name === 'parts' && engraveOn()
+        && state.parts.some(function (p) { return !engravingText(p).trim(); })) {
+      alert('Enter engraving text for every part, or turn engraving off.');
       return false;
     }
     if (name === 'tools' && multiToolOn()) {
@@ -795,7 +834,27 @@
       engraveBox.addEventListener('change', function () {
         state.engrave = this.checked;
         updateConditionalSettings();
+        renderParts();
         updateSummary();
+        invalidatePreview();
+      });
+    }
+
+    var fontSelect = $('#f-engrave-font');
+    if (fontSelect) {
+      fontSelect.addEventListener('change', function () {
+        state.engraveFontMode = this.value;
+        updateConditionalSettings();
+        drawLayout();
+        invalidatePreview();
+      });
+    }
+    var fontFile = $('#f-engrave-font-file');
+    if (fontFile) {
+      fontFile.addEventListener('change', function () {
+        state.engraveFontFile = this.files && this.files[0] ? this.files[0] : null;
+        state.engraveFontName = state.engraveFontFile ? state.engraveFontFile.name : '';
+        previewUploadedFont(state.engraveFontFile);
         invalidatePreview();
       });
     }
@@ -1157,7 +1216,10 @@
     el = $('#btn-fill'); if (el) el.hidden = !is2d;
 
     el = $('#engrave-toggle'); if (el) el.hidden = !is2d;
-    el = $('#engrave-note'); if (el) el.hidden = !engraveOn();
+    el = $('#engrave-options'); if (el) el.hidden = !engraveOn();
+    el = $('#engrave-font-file-row');
+    if (el) el.hidden = !engraveOn() || state.engraveFontMode !== 'uploaded';
+    el = $('#blank-part-maker'); if (el) el.hidden = !is2d;
     el = $('#multitool-toggle'); if (el) el.hidden = !is2d;
     el = $('#multitool-note'); if (el) el.hidden = !on;
 
@@ -1302,6 +1364,7 @@
     }
     applyTubePatternUI();
     applyMultiToolUI();
+    renderParts();
     updatePartsModeNote();
     // In full-page grid mode the Layout canvas and the operations editor are on screen
     // whatever step is current, and gotoStep refreshes only the step you are standing
@@ -1786,7 +1849,10 @@
         '<div class="meta"><div class="part-identity">' +
         '<label>Name <input class="part-name" type="text" maxlength="80"></label>' +
         '<label>Number <input class="part-number" type="text" maxlength="20"></label>' +
-        '</div><div class="dims">' + p.width.toFixed(2) + '" x ' + p.height.toFixed(2) +
+        '</div>' + (engraveOn() ? '<div class="part-engraving">' +
+        '<label>Engraving text <input class="engrave-text" type="text" maxlength="200"></label>' +
+        '<label>Text height <input class="engrave-height" type="text"></label></div>' : '') +
+        '<div class="dims">' + p.width.toFixed(2) + '" x ' + p.height.toFixed(2) +
         '" &middot; drag the purple label in Layout</div></div>' +
         '<button class="duplicate" title="Duplicate" aria-label="Duplicate">&#10064;</button>' +
         '<button class="remove" title="Remove" aria-label="Remove">&times;</button>';
@@ -1816,6 +1882,31 @@
         this.value = p.number;
         partListChanged();
       });
+      var engraveTextInput = li.querySelector('.engrave-text');
+      var engraveHeightInput = li.querySelector('.engrave-height');
+      if (engraveTextInput) {
+        engraveTextInput.value = engravingText(p);
+        engraveTextInput.addEventListener('input', function () {
+          p.engrave_text = this.value;
+          drawLayout(); invalidatePreview();
+        });
+        engraveTextInput.addEventListener('change', function () {
+          p.engrave_text = this.value.trim();
+          this.value = p.engrave_text;
+          partListChanged();
+        });
+      }
+      if (engraveHeightInput) {
+        if (!p.engrave_height) p.engrave_height = defaultEngraveHeight();
+        if (!p.engrave_height_text) p.engrave_height_text = defaultEngraveHeightText();
+        engraveHeightInput.value = p.engrave_height_text;
+        bindLengthField(engraveHeightInput,
+          function () { return p.engrave_height_text; },
+          function (inches, raw) {
+            p.engrave_height = inches; p.engrave_height_text = raw;
+            drawLayout(); invalidatePreview();
+          });
+      }
       li.querySelector('.duplicate').addEventListener('click', function () { duplicatePart(p.id); });
       li.querySelector('.remove').addEventListener('click', function () { removePart(p.id); });
       ul.appendChild(li);
@@ -1864,6 +1955,8 @@
       id: ++partSeq,
       name: data.name || ('part ' + (partSeq)),
       number: String(partSeq), label_x: data.width / 2, label_y: data.height / 2,
+      engrave_text: null, engrave_height: defaultEngraveHeight(),
+      engrave_height_text: defaultEngraveHeightText(),
       width: data.width, height: data.height,
       outline: data.outline, holes: data.holes || [], inner: data.inner || [],
       file: file,
@@ -1930,6 +2023,9 @@
       id: ++partSeq,
       name: name,
       number: String(partSeq), label_x: src.label_x, label_y: src.label_y,
+      engrave_text: src.engrave_text,
+      engrave_height: src.engrave_height || defaultEngraveHeight(),
+      engrave_height_text: src.engrave_height_text || defaultEngraveHeightText(),
       width: src.width, height: src.height,
       outline: src.outline, holes: src.holes, inner: src.inner,
       file: src.file,
@@ -2037,7 +2133,48 @@
       ['dragleave', 'drop'].forEach(function (ev) { dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('drag'); }); });
       dz.addEventListener('drop', function (e) { if (e.dataTransfer.files[0]) uploadDxf(e.dataTransfer.files[0]); });
     }
+    var blankButton = $('#btn-create-blank');
+    if (blankButton) blankButton.addEventListener('click', createBlankPart);
     updatePartsModeNote();
+  }
+
+  function rectangleDxf(width, height) {
+    var pts = [[0, 0], [width, 0], [width, height], [0, height]];
+    var entities = pts.map(function (pt) {
+      return '0\nVERTEX\n8\n0\n10\n' + pt[0].toFixed(6) +
+        '\n20\n' + pt[1].toFixed(6) + '\n30\n0\n';
+    }).join('');
+    return '0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n' +
+      '9\n$INSUNITS\n70\n1\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n' +
+      '0\nPOLYLINE\n8\n0\n66\n1\n70\n1\n' + entities +
+      '0\nSEQEND\n8\n0\n0\nENDSEC\n0\nEOF\n';
+  }
+
+  function createBlankPart() {
+    if (state.mode !== '2d') {
+      alert('Blank engraving parts are available in 2D mode.');
+      return;
+    }
+    var width = parseLength($('#f-blank-width').value);
+    var height = parseLength($('#f-blank-height').value);
+    if (!width || !height) {
+      alert('Enter a positive width and height, such as 4" and 2".');
+      return;
+    }
+    var name = ($('#f-blank-name').value || '').trim() || 'Engraving plate';
+    var filename = name.replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || 'plate';
+    var file = new File([rectangleDxf(width, height)], filename + '.dxf',
+                        { type: 'application/dxf' });
+    uploadDxf(file, function (part) {
+      if (!part) return;
+      part.name = name;
+      part.engrave_text = name;
+      state.engrave = true;
+      var checkbox = $('#f-engrave'); if (checkbox) checkbox.checked = true;
+      updateConditionalSettings();
+      renderParts();
+      partListChanged();
+    });
   }
 
   /* -------------------------------------------------------------- layout */
@@ -2352,9 +2489,12 @@
         var labelCanvas = worldToCanvas(label.x, label.y);
         ctx.save();
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.font = '600 ' + Math.max(11, Math.min(20, 0.18 * canvasState.scale)) + 'px ' + CANVAS_FONT;
+        var previewHeight = (p.engrave_height || 0.18) * canvasState.scale;
+        var previewFont = state.engraveFontMode === 'uploaded' && state.engravePreviewFamily
+          ? state.engravePreviewFamily : CANVAS_FONT;
+        ctx.font = '600 ' + Math.max(8, Math.min(72, previewHeight)) + 'px ' + previewFont;
         ctx.fillStyle = col.accent;
-        ctx.fillText(partLabelText(p), labelCanvas[0], labelCanvas[1]);
+        ctx.fillText(engravingText(p), labelCanvas[0], labelCanvas[1]);
         ctx.beginPath(); ctx.arc(labelCanvas[0], labelCanvas[1], 4, 0, Math.PI * 2);
         ctx.strokeStyle = col.accent; ctx.lineWidth = 1; ctx.stroke();
         ctx.restore();
@@ -2815,6 +2955,10 @@
      on files still being in someone's Downloads folder would not be saved at all. */
   function saveCurrentJob() {
     if (!state.parts.length) { alert('Add a part before saving a job.'); return; }
+    if (engraveOn() && state.engraveFontMode === 'uploaded' && !state.engraveFontFile) {
+      alert('Choose the TTF or OTF engraving font before saving this job.');
+      return;
+    }
     var name = prompt('Name this job (you will pick it from a list next time):',
                       jobFilename().replace(/_/g, ' '));
     if (!name) return;
@@ -2834,10 +2978,13 @@
           place_x: pl.x, place_y: pl.y,
           center_x: p.cx, center_y: p.cy,
           label_x: p.label_x, label_y: p.label_y,
+          engrave_text: p.engrave_text,
+          engrave_height: p.engrave_height,
+          engrave_height_text: p.engrave_height_text,
           rotation: p.rotation, mirror: !!p.flipped,
           ops: p.ops || null,
         };
-        if (--pending === 0) postJob(name, parts);
+        if (--pending === 0) finishSaveJob(name, parts);
       };
       reader.onerror = function () {
         pending = -1;
@@ -2845,6 +2992,23 @@
       };
       reader.readAsArrayBuffer(p.file);
     });
+  }
+
+  function finishSaveJob(name, parts) {
+    if (!engraveOn() || state.engraveFontMode !== 'uploaded' || !state.engraveFontFile) {
+      postJob(name, parts, null);
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var dataUrl = String(reader.result || '');
+      postJob(name, parts, { name: state.engraveFontFile.name,
+                             base64: dataUrl.split(',', 2)[1] || '' });
+    };
+    reader.onerror = function () {
+      alert('Could not read the engraving font, so the job was not saved.');
+    };
+    reader.readAsDataURL(state.engraveFontFile);
   }
 
   function currentJobSetup() {
@@ -2857,6 +3021,7 @@
       tab_spacing: state.tab_spacing,
       max_pass_depth: state.max_pass_depth,
       engrave: engraveOn(),
+      engrave_font: state.engraveFontMode,
       chamfer: state.chamfer.on ? state.chamfer : null,
       multitool: multiToolOn(),
       tools: multiToolOn() ? (state.tools || null) : null,
@@ -2866,10 +3031,11 @@
     };
   }
 
-  function postJob(name, parts) {
+  function postJob(name, parts, font) {
     fetch('/jobs/save', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, setup: currentJobSetup(), parts: parts }),
+      body: JSON.stringify({ name: name, setup: currentJobSetup(), parts: parts,
+                             font: font || undefined }),
     }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
         if (res.j && res.j.jobs) setSavedJobs(res.j.jobs);
@@ -2929,6 +3095,17 @@
     }
     state.engrave = !!setup.engrave;
     var eb = $('#f-engrave'); if (eb) eb.checked = state.engrave;
+    state.engraveFontMode = setup.engrave_font === 'uploaded' ? 'uploaded' : 'single_line';
+    state.engraveFontFile = null;
+    state.engraveFontName = '';
+    var efs = $('#f-engrave-font'); if (efs) efs.value = state.engraveFontMode;
+    if (setup.engrave_font_base64) {
+      state.engraveFontFile = fileFromBase64(
+        setup.engrave_font_base64, setup.engrave_font_name || 'engraving-font.ttf',
+        'font/' + (/\.otf$/i.test(setup.engrave_font_name || '') ? 'otf' : 'ttf'));
+      state.engraveFontName = state.engraveFontFile ? state.engraveFontFile.name : '';
+      previewUploadedFont(state.engraveFontFile);
+    }
     if (setup.max_pass_depth) state.max_pass_depth = setup.max_pass_depth;
     if (setup.tab_spacing) state.tab_spacing = setup.tab_spacing;
 
@@ -3034,6 +3211,11 @@
           if (saved.ops) part.ops = saved.ops;
           if (typeof saved.label_x === 'number') part.label_x = saved.label_x;
           if (typeof saved.label_y === 'number') part.label_y = saved.label_y;
+          if (saved.engrave_text != null) part.engrave_text = String(saved.engrave_text);
+          if (typeof saved.engrave_height === 'number') {
+            part.engrave_height = saved.engrave_height;
+            part.engrave_height_text = saved.engrave_height_text || (saved.engrave_height + '"');
+          }
         }
         settle(saved.name || 'a part', !!part);
       });
@@ -3041,10 +3223,14 @@
   }
 
   function dxfFileFromBase64(b64, filename) {
+    return fileFromBase64(b64, filename, 'application/dxf');
+  }
+
+  function fileFromBase64(b64, filename, mimeType) {
     try {
       var binary = atob(b64 || ''), bytes = new Uint8Array(binary.length);
       for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return new File([bytes], filename, { type: 'application/dxf' });
+      return new File([bytes], filename, { type: mimeType || 'application/octet-stream' });
     } catch (e) {
       return null;
     }
@@ -3355,7 +3541,13 @@
     if (state.max_pass_depth) job.max_pass_depth = state.max_pass_depth;
     job.z_datum = state.zDatum;
     if (state.dryRun) job.dry_run = '1';
-    if (engraveOn()) job.engrave = '1';
+    if (engraveOn()) {
+      job.engrave = '1';
+      job.engrave_font = state.engraveFontMode;
+      if (state.engraveFontMode === 'uploaded' && state.engraveFontFile) {
+        fd.append('engrave_font_file', state.engraveFontFile, state.engraveFontFile.name);
+      }
+    }
     var sheet = state.stock;
     if (sheet) {
       // The sheet is the stock, so placements are absolute on it and the origin is
@@ -3368,7 +3560,9 @@
       var label = placedLabelAnchor(p);
       job.parts.push({
         file_index: i, name: p.name,
-        engrave_text: partLabelText(p),
+        engrave_text: engravingText(p),
+        engrave_height: p.engrave_height || defaultEngraveHeight(),
+        engrave_depth: 0.01,
         engrave_anchor_x: sheet ? label.x : label.x - bb.minX,
         engrave_anchor_y: sheet ? label.y : label.y - bb.minY,
         place_x: sheet ? pl.x : pl.x - bb.minX,
@@ -3507,7 +3701,11 @@
       if (resp.excludes_tool_change_time) bits.push('excludes tool-change time');
     }
     $('#preview-stats').textContent = bits.filter(Boolean).join(' · ');
-    showResumePrograms(resp.restart_files || [], resp.restart_bundle || null);
+    showResumePrograms(resp.restart_files || [], resp.restart_bundle || null, resp.filename);
+    // A tool-change job is safest when the ordinary final action keeps its recovery
+    // programs with the main file. Refresh the label now that generation has told us
+    // whether a bundle exists (setupFinalAction runs before that response arrives).
+    $('#btn-do').textContent = actionLabel(state.saveAction, resp);
     // Feeds warnings (a clamped feed, an odd flute count for the material) are advice,
     // not failures: show them without blocking the download.
     $('#preview-errors').textContent = (resp.warnings || []).map(function (w) {
@@ -3522,7 +3720,7 @@
     updateSummary();  // refresh the stock chip with the server-authoritative size
   }
 
-  function showResumePrograms(files, bundle) {
+  function showResumePrograms(files, bundle, mainToken) {
     var box = $('#resume-programs');
     while (box.firstChild) box.removeChild(box.firstChild);
     box.hidden = !files.length;
@@ -3538,13 +3736,13 @@
     box.appendChild(note);
     var actions = document.createElement('div');
     actions.className = 'resume-actions';
-    if (bundle) {
-      var all = document.createElement('button');
-      all.type = 'button';
-      all.className = 'btn small primary';
-      all.textContent = 'Download main + all recovery files';
-      all.addEventListener('click', function () { doDownload(bundle.filename); });
-      actions.appendChild(all);
+    if (bundle && mainToken) {
+      var main = document.createElement('button');
+      main.type = 'button';
+      main.className = 'btn small';
+      main.textContent = 'Download main program only';
+      main.addEventListener('click', function () { doDownload(mainToken); });
+      actions.appendChild(main);
     }
     files.forEach(function (file) {
       var button = document.createElement('button');
@@ -3605,7 +3803,11 @@
   var SAVE_PREF_KEY = 'penguincam_save_action';
   function readSavePref() { try { return localStorage.getItem(SAVE_PREF_KEY); } catch (e) { return null; } }
   function writeSavePref(a) { try { localStorage.setItem(SAVE_PREF_KEY, a); } catch (e) {} }
-  function actionLabel(a) { return a === 'drive' ? 'Send to Google Drive' : 'Download Program'; }
+  function actionLabel(a, resp) {
+    var hasRecovery = !!(resp && resp.restart_bundle && resp.restart_bundle.filename);
+    if (a === 'drive') return hasRecovery ? 'Send Programs to Google Drive' : 'Send to Google Drive';
+    return hasRecovery ? 'Download Programs (.zip)' : 'Download Program';
+  }
 
   // Choose the default action: remembered preference, but only 'drive' if Drive is
   // configured now (falls back to download if a saved 'drive' pref is no longer valid).
@@ -3628,7 +3830,7 @@
   function chooseAction(a) {
     state.saveAction = a;
     writeSavePref(a);
-    $('#btn-do').textContent = actionLabel(a);
+    $('#btn-do').textContent = actionLabel(a, state.lastResponse);
     $('#do-menu').hidden = true;
     performAction(a);
   }
@@ -3636,8 +3838,12 @@
   function performAction(a) {
     var resp = state.lastResponse;
     if (!resp || !resp.filename) return;  // not generated yet
-    if (a === 'drive') driveSave(resp.filename);
-    else doDownload(resp.filename);
+    // Recovery ZIPs contain the normal program too, so make that the default artifact
+    // for both destinations. Single-tool jobs have no bundle and remain a plain .nc.
+    var token = (resp.restart_bundle && resp.restart_bundle.filename)
+                || resp.filename;
+    if (a === 'drive') driveSave(token);
+    else doDownload(token);
   }
 
   function doDownload(token) {

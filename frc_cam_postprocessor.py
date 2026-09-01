@@ -20,6 +20,7 @@ from typing import List, Tuple, Optional, Dict, Any
 # Third-party
 import ezdxf
 
+import outline_font
 import stroke_font
 import yaml
 from shapely import affinity
@@ -2921,7 +2922,8 @@ class FRCPostProcessor:
                 continue        # a pocket shapely cannot read is not a placement hazard
         return area
 
-    def _engrave_placement(self, area, text, height, preferred=None):
+    def _engrave_placement(self, area, text, height, preferred=None,
+                           stroke_factory=None, strict_size=False):
         """Find somewhere the whole label actually fits inside `area`.
 
         Returns (origin_x, origin_y, height, strokes) or None. The old version took the
@@ -2936,17 +2938,23 @@ class FRCPostProcessor:
         # Sized to the space rather than stepped down a fixed ladder: the text's width
         # is linear in cap height, so the height that exactly spans the available width
         # is arithmetic, and a coarse ladder just refuses names that would have fitted.
-        unit = stroke_font.text_width(text, 1.0)
-        span = maxx - minx
-        by_width = (span / unit) if unit > 0 else height
+        if strict_size:
+            candidate_heights = (height,)
+        else:
+            unit = stroke_font.text_width(text, 1.0)
+            span = maxx - minx
+            by_width = (span / unit) if unit > 0 else height
+            candidate_heights = (height, by_width * 0.98, by_width * 0.85,
+                                 by_width * 0.7, floor)
         heights = []
-        for h in (height, by_width * 0.98, by_width * 0.85, by_width * 0.7, floor):
+        for h in candidate_heights:
             h = min(h, height)
             if h >= floor - 1e-9 and not any(abs(h - k) < 1e-6 for k in heights):
                 heights.append(h)
         heights.sort(reverse=True)
         for h in heights:
-            strokes, _ = stroke_font.text_strokes(text, h)
+            strokes = (stroke_factory(h) if stroke_factory is not None
+                       else stroke_font.text_strokes(text, h)[0])
             pts = [p for stroke in strokes for p in stroke]
             if not pts:
                 return None
@@ -2988,27 +2996,42 @@ class FRCPostProcessor:
         warning, never silently: an operator who ticked the box is expecting a label.
         """
         spec = self.engrave or {}
-        raw_text = str(spec.get('text') or '')
-        text = sanitize_comment(raw_text, fallback='')
-        if not text:
+        raw_text = str(spec.get('text') or '')[:200]
+        font_path = spec.get('font_path')
+        comment_text = sanitize_comment(raw_text, fallback='')
+        if not raw_text.strip() or (not font_path and not comment_text):
             self.warnings.append(
                 f'{raw_text!r} has no characters that can be engraved; no name was cut.')
             return []
-        # Characters with no glyph become a visible dash rather than a mark that reads
-        # as some other character - a label that silently changes is worse than one
-        # that is visibly incomplete.
-        engraved, dropped = [], []
-        for ch in text.upper():
-            if ch in stroke_font.GLYPHS:
-                engraved.append(ch)
-            else:
-                engraved.append('-')
-                dropped.append(ch)
-        text = ''.join(engraved)
-        if dropped:
-            self.warnings.append(
-                f'{text}: {"".join(sorted(set(dropped)))} cannot be engraved and became '
-                f'dashes.')
+        stroke_factory = None
+        font_name = 'CNC single-line'
+        if font_path:
+            text = raw_text
+            try:
+                font_name = str(spec.get('font_name') or outline_font.validate_font(font_path))
+                # The height varies only for legacy auto-fit. Uploaded/custom engraving
+                # is strict-size, but keeping this callable makes placement share one
+                # geometry/safety path with the built-in font.
+                stroke_factory = lambda h: outline_font.text_strokes(text, h, font_path)[0]
+            except outline_font.OutlineFontError as exc:
+                self.warnings.append(f'The text was not engraved: {exc}')
+                return []
+        else:
+            text = comment_text
+            # Characters with no glyph become a visible dash rather than a mark that
+            # reads as some other character.
+            engraved, dropped = [], []
+            for ch in text.upper():
+                if ch in stroke_font.GLYPHS:
+                    engraved.append(ch)
+                else:
+                    engraved.append('-')
+                    dropped.append(ch)
+            text = ''.join(engraved)
+            if dropped:
+                self.warnings.append(
+                    f'{text}: {"".join(sorted(set(dropped)))} cannot be engraved and became '
+                    f'dashes.')
         if self.perimeter is None:
             self.warnings.append('Nothing to engrave on: this part has no outline.')
             return []
@@ -3039,7 +3062,15 @@ class FRCPostProcessor:
             except (TypeError, ValueError, IndexError):
                 self.warnings.append('The engraving position is invalid; skipped.')
                 return []
-        placed = self._engrave_placement(area, text, max(height, min_height), preferred)
+        strict_size = bool(spec.get('strict_size')) or bool(font_path)
+        requested_height = height if strict_size else max(height, min_height)
+        try:
+            placed = self._engrave_placement(
+                area, text, requested_height, preferred,
+                stroke_factory=stroke_factory, strict_size=strict_size)
+        except outline_font.OutlineFontError as exc:
+            self.warnings.append(f'The text was not engraved: {exc}')
+            return []
         if placed is None:
             # Name the real obstacle. Blaming the geometry when the cutter is the
             # problem sends someone looking for space they already have.
@@ -3051,9 +3082,10 @@ class FRCPostProcessor:
             else:
                 self.warnings.append(
                     f'{text}: ' + ('the selected label position does not keep the whole '
-                                   'name on this part; move it in Preview or use a finer bit; skipped.'
+                                   'text on this part; move it in Layout, reduce its size, '
+                                   'or use a finer bit; skipped.'
                                    if preferred is not None else
-                                   'no clear space on this part for a legible name; skipped.'))
+                                   'no clear space on this part for legible text; skipped.'))
             return []
         ox, oy, height, strokes = placed
 
@@ -3063,7 +3095,8 @@ class FRCPostProcessor:
         # for hold-down hardware gets that clearance here too.
         clear_z = self.retract_height
         gcode = ['', '(===== ENGRAVE PART NAME =====)',
-                 f'(Text: {text})',
+                 f'(Text: {sanitize_comment(text, fallback="custom text")})',
+                 f'(Font: {sanitize_comment(font_name, fallback="uploaded font")})',
                  f'(Cap height {height:.3f} in, {depth:.3f} in deep, '
                  f'{self.tool_diameter:.4f} in tool)',
                  f'G0 Z{self._safe_z():.4f}  ; Safe Z clearance']

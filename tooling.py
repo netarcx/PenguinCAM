@@ -563,6 +563,9 @@ class PartOps:
     mirror: bool = False
     engrave_text: Optional[str] = None
     engrave_anchor: Optional[Tuple[float, float]] = None
+    engrave_height: float = ENGRAVE_HEIGHT_IN
+    engrave_depth: float = ENGRAVE_DEPTH_IN
+    engrave_strict_size: bool = False
     operations: List[Operation] = field(default_factory=list)
 
 
@@ -587,6 +590,10 @@ class MultiToolJob:
     #: Cut each part's name into its own face, before anything frees it. Job-wide, like
     #: the Z datum: it is a property of the nest, not of one operation.
     engrave: bool = False
+    #: A validated, request-scoped font upload. None selects the built-in CNC
+    #: single-line font. Paths never come from job JSON.
+    engraving_font_path: Optional[str] = None
+    engraving_font_name: Optional[str] = None
     #: Operator ceiling on the depth of one contour pass, inches. Applied to every
     #: milling tool AFTER the model/preset/power clamps, and only ever downward - it
     #: buys more, shallower passes for fragile or multi-flute cutters.
@@ -1694,6 +1701,7 @@ def _group_queues_by_tool(parts: Sequence[PartOps],
 
 
 def order_operations(parts: Sequence[PartOps],
+                     split_after_holes: bool = False,
                      split_before_perimeter: bool = False) -> List[Tuple[int, int]]:
     """Flatten every part's operation list into one job sequence, grouped by tool.
 
@@ -1704,30 +1712,54 @@ def order_operations(parts: Sequence[PartOps],
     the common case of several parts sharing one operation list, that turns N parts x M
     tools worth of swaps into M swaps total.
 
-    `split_before_perimeter` additionally guarantees that NO part's profile is cut until
-    EVERY part's interior work is done, by grouping by tool within two phases rather than
-    across the whole job. That is what makes a single shared "pause and screw everything
-    down" stop honest: without it the tool-grouping freely interleaves, so one part's
-    profile can precede another part's holes, and an operator told to "install screws
-    through holes into the sacrifice board" would be looking for holes that do not exist
-    yet. It can cost an extra tool change, which is the price of the guarantee - it is
-    only requested when the team has turned the fixturing pause on.
+    `split_after_holes` keeps every operation through each part's last hole operation in
+    a first phase. That guarantees the shared fastening stop occurs only after all holes
+    exist and before the usual pockets/profile phase. An unusual plan that deliberately
+    puts another operation before its last hole keeps that relative order; this function
+    never rewrites a part's stated process.
+
+    `split_before_perimeter` is the older, independent option that keeps every part's
+    interior work ahead of every profile.
 
     Returns [(part_index, op_index), ...].
     """
-    if not split_before_perimeter:
+    if not split_after_holes and not split_before_perimeter:
         return _group_queues_by_tool(parts, [list(range(len(p.operations))) for p in parts])
 
+    phases = []
+    if split_after_holes:
+        through_holes, after_holes = [], []
+        for part in parts:
+            hole_indices = [i for i, op in enumerate(part.operations)
+                            if op.op_type == 'holes']
+            cut = (max(hole_indices) + 1) if hole_indices else 0
+            through_holes.append(list(range(cut)))
+            after_holes.append(list(range(cut, len(part.operations))))
+        phases.append(through_holes)
+        remaining = after_holes
+    else:
+        remaining = [list(range(len(p.operations))) for p in parts]
+
+    # The legacy perimeter split can compose with the hole split. It only divides the
+    # operations that remain, so no operation is duplicated or moved within its part.
+    if not split_before_perimeter:
+        phases.append(remaining)
+        ordered = []
+        for phase in phases:
+            ordered.extend(_group_queues_by_tool(parts, phase))
+        return ordered
+
     interior, profile = [], []
-    for part in parts:
-        cut = next((i for i, op in enumerate(part.operations)
-                    if op.op_type == 'perimeter'), len(part.operations))
-        interior.append(list(range(cut)))
-        profile.append(list(range(cut, len(part.operations))))
-    # Each part's ops keep their relative order: everything before its profile lands in
-    # the first phase, the profile and everything after it in the second.
-    return (_group_queues_by_tool(parts, interior)
-            + _group_queues_by_tool(parts, profile))
+    for part, queue in zip(parts, remaining):
+        cut = next((i for i, op_index in enumerate(queue)
+                    if part.operations[op_index].op_type == 'perimeter'), len(queue))
+        interior.append(queue[:cut])
+        profile.append(queue[cut:])
+    phases.extend([interior, profile])
+    ordered = []
+    for phase in phases:
+        ordered.extend(_group_queues_by_tool(parts, phase))
+    return ordered
 
 
 def build_tool_table(bodies: Sequence[Dict[str, Any]]) -> List[str]:
@@ -1848,12 +1880,24 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
         for note in reach_notes:
             gcode.append(f'({sanitize_comment(note)})')
 
-    # The fixturing pause belongs immediately before the first cut that frees a part from
-    # the stock. When that boundary is also a tool change, fold the instructions into the
-    # change rather than stopping the operator twice in a row.
-    # `is not None`, not truthiness: when the very first body IS the profile - a part
-    # whose only operation is its outline - index 0 is falsy and the pause silently
-    # vanished, leaving the stock held by whatever tape was there for the interior work.
+    # Default multi-tool fixturing boundary: once every emitted hole operation is done,
+    # stop before the next operation so the operator can use those holes to fasten the
+    # stock. The ordering phase above normally makes this the holes -> pockets/profile
+    # boundary across the whole sheet. Empty scoped operations have already been dropped,
+    # so a plan that did not actually make a hole does not advertise nonexistent holes.
+    last_holes = max((i for i, b in enumerate(bodies) if b['op'].op_type == 'holes'),
+                     default=None)
+    after_holes = (last_holes + 1
+                   if last_holes is not None and last_holes + 1 < len(bodies) else None)
+    hole_fixturing_instructions = [
+        'All fastening hole operations complete',
+        'Install fasteners through the completed holes into the sacrifice board',
+        'Fixture every part securely before pockets and profiles',
+    ] if (header_pp.config.pause_after_holes and after_holes is not None) else []
+
+    # Retain the older optional stop immediately before the first profile. When the
+    # after-holes stop already occurred, do not ask the operator to fasten the same sheet
+    # twice.
     first_perimeter = next((i for i, b in enumerate(bodies)
                             if b['op'].op_type == 'perimeter'), None)
     # Truthful because order_operations was asked to put every part's interior work ahead
@@ -1862,7 +1906,8 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
         'Internal features complete on every part',
         'Install screws through holes into the sacrifice board',
         'Fixture every part securely before the profile cut',
-    ] if (header_pp.pause_before_perimeter and first_perimeter is not None) else []
+    ] if (header_pp.pause_before_perimeter and first_perimeter is not None
+          and not hole_fixturing_instructions) else []
 
     current_tool: Optional[Tool] = None
     current_rpm: Optional[int] = None   # what the spindle was last actually commanded
@@ -1870,7 +1915,12 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     for i, body in enumerate(bodies):
         pp, tool, op, part = body['pp'], body['tool'], body['op'], body['part']
         needs_change = current_tool is None or current_tool.slot != tool.slot
-        fixturing_here = fixturing_instructions if i == first_perimeter else []
+        if i == after_holes:
+            fixturing_here = hole_fixturing_instructions
+        elif i == first_perimeter:
+            fixturing_here = fixturing_instructions
+        else:
+            fixturing_here = []
 
         if needs_change and current_tool is not None:
             change_number += 1
@@ -1881,7 +1931,8 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
         else:
             if fixturing_here:
                 gcode.extend(pp._generate_pause_and_park_gcode(
-                    'PAUSE FOR FIXTURING', fixturing_here))
+                    'PAUSE FOR FIXTURING', fixturing_here,
+                    safe_z=pp._tool_change_safe_z()))
             if needs_change:   # very first tool: nothing to swap out, just say what to load
                 gcode.append(f"(Load {tool.label}, {tool.kind}, before starting "
                              f"this program)")
@@ -2108,8 +2159,15 @@ def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
     """
     pp = build_part_postprocessor(job, part, tool_diameter)
     pp.classify_holes()
-    pp.engrave = {'text': part.engrave_text or part.name, 'height': ENGRAVE_HEIGHT_IN,
-                  'depth': ENGRAVE_DEPTH_IN, 'anchor': part.engrave_anchor}
+    pp.engrave = {
+        'text': part.engrave_text or part.name,
+        'height': part.engrave_height,
+        'depth': part.engrave_depth,
+        'anchor': part.engrave_anchor,
+        'font_path': job.engraving_font_path,
+        'font_name': job.engraving_font_name,
+        'strict_size': part.engrave_strict_size or bool(job.engraving_font_path),
+    }
     try:
         lines = pp._engrave_body()
     except Exception as exc:            # a label is never worth failing a job over
@@ -2172,8 +2230,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     bodies = []
     deferred = []
     engraved = set()
-    sequence = order_operations(job.parts,
-                                split_before_perimeter=job.config.pause_before_perimeter)
+    sequence = order_operations(
+        job.parts,
+        split_after_holes=job.config.pause_after_holes,
+        split_before_perimeter=job.config.pause_before_perimeter,
+    )
     for part_index, op_index in sequence:
         part = job.parts[part_index]
         defer_tabs = multi_part or op_index < len(part.operations) - 1
@@ -2286,7 +2347,9 @@ def _expect_bool(value: Any, what: str) -> bool:
 # render as a 400 the user can act on.
 def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
                   config: Optional[TeamConfig] = None,
-                  user_name: Optional[str] = None) -> MultiToolJob:
+                  user_name: Optional[str] = None,
+                  engraving_font_path: Optional[str] = None,
+                  engraving_font_name: Optional[str] = None) -> MultiToolJob:
     """Build a `MultiToolJob` from the JSON the web UI and the CLI both speak.
 
     `dxf_paths` maps each part's `file_index` to a DXF already on disk, so the web route
@@ -2318,9 +2381,14 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
             place_y=_expect_number(raw.get('place_y', 0.0), f'part {i + 1} place_y'),
             rotation=_expect_number(raw.get('rotation', 0.0), f'part {i + 1} rotation'),
             mirror=_expect_bool(raw.get('mirror', False), f'part {i + 1} mirror'),
-            engrave_text=(str(raw.get('engrave_text'))[:100]
+            engrave_text=(str(raw.get('engrave_text'))[:200]
                           if raw.get('engrave_text') is not None else None),
             engrave_anchor=anchor,
+            engrave_height=_expect_positive(raw.get('engrave_height', ENGRAVE_HEIGHT_IN),
+                                             f'part {i + 1} engrave_height'),
+            engrave_depth=_expect_positive(raw.get('engrave_depth', ENGRAVE_DEPTH_IN),
+                                            f'part {i + 1} engrave_depth'),
+            engrave_strict_size=('engrave_height' in raw),
             operations=[Operation.from_dict(o)
                         for o in _expect_list(raw.get('operations'),
                                               f'part {i + 1} operations')],
@@ -2343,6 +2411,8 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         dry_run_lift=(_expect_positive(spec['dry_run_lift'], 'dry_run_lift')
                       if spec.get('dry_run_lift') else 0.0),
         engrave=_expect_bool(spec.get('engrave', False), 'engrave'),
+        engraving_font_path=engraving_font_path,
+        engraving_font_name=engraving_font_name,
         max_pass_depth=(_expect_positive(spec['max_pass_depth'], 'max_pass_depth')
                         if spec.get('max_pass_depth') is not None else None),
         config=config,

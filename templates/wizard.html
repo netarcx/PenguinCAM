@@ -183,15 +183,26 @@
 
                 <label class="field inline" id="engrave-toggle">
                     <input type="checkbox" id="f-engrave" autocomplete="off">
-                    <span>Engrave each part&rsquo;s name and number into it</span>
+                    <span>Engrave text on the parts</span>
                 </label>
-                <p class="hint" id="engrave-note" hidden>
-                    Cut shallow into the face while the sheet is still whole, so a nest of
-                    similar parts is not a puzzle once it is off the machine. Needs a fine
-                    cutter &mdash; edit each name and number in Parts, then drag its purple
-                    label inside the part in Layout. A label that cannot fit is skipped
-                    with a warning rather than cut into the surrounding stock.
-                </p>
+                <div id="engrave-options" class="subpanel" hidden>
+                    <label class="field">
+                        <span>Font</span>
+                        <select id="f-engrave-font" autocomplete="off">
+                            <option value="single_line">CNC single-line (fastest)</option>
+                            <option value="uploaded">Upload any TTF or OTF font</option>
+                        </select>
+                    </label>
+                    <label class="field" id="engrave-font-file-row" hidden>
+                        <span>Font file</span>
+                        <input type="file" id="f-engrave-font-file" accept=".ttf,.otf,font/ttf,font/otf">
+                    </label>
+                    <p class="hint" id="engrave-note">
+                        Set each part&rsquo;s text and exact height in Parts, then drag its
+                        purple anchor anywhere safe inside the part in Layout. Uploaded
+                        fonts trace their glyph outlines; the single-line font cuts faster.
+                    </p>
+                </div>
 
                 <!-- Deburr / chamfer pass (2D standard mode only). -->
                 <div id="chamfer-fields">
@@ -322,6 +333,23 @@
                 <div id="onshape-source" hidden>
                     <div id="select-status" class="select-status" aria-live="polite">Select a face in Onshape&hellip;</div>
                     <p class="hint">Pick a planar face in the model &mdash; it imports automatically, then you can pick another.</p>
+                </div>
+                <div id="blank-part-maker" class="subpanel blank-part-maker">
+                    <div class="fieldgrid">
+                        <label class="field"><span>Blank width</span>
+                            <input id="f-blank-width" value="4&quot;" autocomplete="off">
+                        </label>
+                        <label class="field"><span>Blank height</span>
+                            <input id="f-blank-height" value="2&quot;" autocomplete="off">
+                        </label>
+                    </div>
+                    <label class="field"><span>Blank name / initial text</span>
+                        <input id="f-blank-name" value="Engraving plate" maxlength="80"
+                               autocomplete="off">
+                    </label>
+                    <button type="button" class="btn small" id="btn-create-blank">
+                        Create blank engraving part
+                    </button>
                 </div>
                 <p class="hint" id="parts-mode-note"></p>
 

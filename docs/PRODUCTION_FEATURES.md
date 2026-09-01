@@ -108,12 +108,17 @@ that was not one until the operator tried to leave the step.
 
 ---
 
-## Engraved part names
+## Text engraving
 
-`stroke_font.py` is a **single-stroke** (centreline) font, not an outline one: an outline
-font describes the outside of a letter, so engraving one means pocketing the space
-between two curves — slow, and illegible at part-label sizes. Here the toolpath *is* the
-letter.
+Every part has independent engraving text, an exact cap height, and an anchor the user
+drags in Layout. The Parts panel can also create a rectangular blank DXF, making a plaque
+or label a complete workflow without separate CAD.
+
+The default `stroke_font.py` is a fast **single-stroke** (centreline) CNC font. For any
+other face, the job uploads a TTF or OTF; `outline_font.py` reads its real glyph vectors,
+flattens Bézier curves to bounded-error polylines, preserves case and supported Unicode,
+and traces those outlines. The font travels in the request rather than depending on what
+is installed on the server, and saved local jobs store it alongside their DXFs.
 
 Engraving runs **before the profile**, while the sheet is still whole: afterwards the
 part hangs on tabs, and a light chattery label cut is exactly what breaks one. It lives
@@ -140,10 +145,10 @@ below the baseline and a `$` above the cap.
 **The size floor is `2.1 x tool diameter`** (`ENGRAVE_MIN_HEIGHT_PER_TOOL`), from the
 font's tightest feature — the E/F/H crossbar gap at 0.48 of cap height. The original
 1.2x gate passed every common nesting cutter straight through to cut a solid blob. The
-floor also means the **default 1/4" end mill could never engrave at 0.18"**, so a part
-with room gets *taller* letters rather than a refusal, and sizing is arithmetic (the
-height that spans the available width) rather than a fixed ladder that refuses names
-that would have fitted.
+floor also means the **default 1/4" end mill could never engrave at 0.18"**. Legacy name
+labels with room get *taller* letters rather than a refusal. A size entered in the new
+editor is strict: it is either emitted at that height or skipped with a warning; CAM does
+not silently change a dimension the user explicitly chose.
 
 It refuses out loud — a warning reaches the operator, who ticked the box and is expecting
 a label — and it names the real obstacle: blaming the geometry when the cutter is what
@@ -210,7 +215,7 @@ of that had a test before.
 | Dry run | `frc_cam_postprocessor.py` (`set_dry_run`, `_spindle_start_gcode`), `tests/test_dry_run.py` |
 | Stock library | `team_config.py` (`saved_stock`), `local_mode.py` (managed blocks), `/stock/*`, `tests/test_stock.py` |
 | Nesting | `static/wizard.js` (`autoArrange`, `fillSheet`, `updateUsage`) |
-| Engraving | `stroke_font.py`, `frc_cam_postprocessor.py` (`_engrave_body`), `tests/test_engrave.py` |
+| Engraving | `stroke_font.py`, `outline_font.py`, `frc_cam_postprocessor.py` (`_engrave_body`), `tests/test_engrave.py`, `tests/test_text_engraving.py` |
 | Setup sheet | `static/wizard.js` (`openSetupSheet`, `setupSheetHTML`) |
 | Saved jobs | `job_library.py`, `/jobs/*`, `tests/test_job_library.py` |
 

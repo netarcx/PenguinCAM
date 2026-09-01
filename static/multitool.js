@@ -1072,7 +1072,14 @@
     if (ctx.state.dryRun) job.dry_run_lift = 2.0;
     // Job-wide like the Z datum. Without this the summary said "names engraved" and
     // the multi-tool program carried no engraving at all.
-    if (ctx.state.engrave) job.engrave = true;
+    if (ctx.state.engrave) {
+      job.engrave = true;
+      job.engrave_font = ctx.state.engraveFontMode || 'single_line';
+      if (job.engrave_font === 'uploaded' && ctx.state.engraveFontFile) {
+        fd.append('engrave_font_file', ctx.state.engraveFontFile,
+                  ctx.state.engraveFontFile.name);
+      }
+    }
     // The sheet the placements are absolute on, so the server checks the parts against
     // the real stock rather than against their own bounding box.
     if (stock) job.stock = stock;
@@ -1081,8 +1088,12 @@
       job.parts.push({
         file_index: i,
         name: part.name,
-        engrave_text: String(part.name || 'part').trim()
-          + (String(part.number || '').trim() ? ' #' + String(part.number).trim() : ''),
+        engrave_text: part.engrave_text == null
+          ? String(part.name || 'part').trim()
+            + (String(part.number || '').trim() ? ' #' + String(part.number).trim() : '')
+          : String(part.engrave_text),
+        engrave_height: part.engrave_height || 0.18,
+        engrave_depth: 0.01,
         engrave_anchor_x: place.label_x,
         engrave_anchor_y: place.label_y,
         place_x: place.x,

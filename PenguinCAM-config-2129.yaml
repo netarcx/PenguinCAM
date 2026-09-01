@@ -118,8 +118,13 @@ machines:
         # that part or on another part beside it. See docs/MULTI_TOOL_GUIDE.md.
 
       fixturing:
-        # true = pause after all interior work so you can screw the sheet down
-        # before any profile is cut. Costs a stop; worth it for thin stock.
+        # Multi-tool default: finish all fastening holes, raise to the roomy
+        # tool-change height (and use park_position when configured), then pause
+        # before pockets/profiles so the sheet can be fastened to the spoilboard.
+        pause_after_holes: true
+
+        # Older optional second boundary after all interior work. Normally leave
+        # false because pause_after_holes has already secured the sheet.
         pause_before_perimeter: false
 
       holes:
