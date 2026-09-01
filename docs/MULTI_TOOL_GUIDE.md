@@ -252,17 +252,13 @@ Testing only for empty is not enough, and this is worth remembering: a part with
 generous lobes joined by a thin waist erodes to two healthy islands, so a whole-part
 "did it vanish" test passes happily while the waist is machined away.
 
-### The standard-mode deburr pass
+### Compatibility deburr paths
 
-The same machinery is reachable without a multi-tool plan: standard 2D mode (the
-wizard's Setup step, `/process`, `/process-job`, or the CLI's `--chamfer-width` /
-`--chamfer-bit-diameter` / `--chamfer-bit-angle` / `--chamfer-targets` flags) can append
-one V-bit pass to a single-tool program. It runs after the profile with the tabs still
-holding every part, behind a manual tool change, and - when the machine removes tabs -
-changes back to the end mill for the deferred tab-removal pass. A tabless part with a
-perimeter refuses the pass for the same reason `order_operations` refuses cutting after
-a part is freed. The erosion fit test above (`FRCPostProcessor.chamfer_fits`, which
-`_chamfer_fits` here delegates to) guards it identically.
+The browser now routes every flat 2D job through an operation plan. The older `/process`,
+`/process-job`, and CLI `--chamfer-width` / `--chamfer-bit-diameter` /
+`--chamfer-bit-angle` / `--chamfer-targets` interfaces remain compatible for scripts and
+saved integrations. They append one V-bit pass behind a manual tool change, using the
+same fit and loose-part safety checks as the operations engine.
 
 ---
 
@@ -596,9 +592,9 @@ profile cutter does.
 
 ### In the browser
 
-Tick **Use several tools** on the Setup step (2D mode). A **Tools & Ops** step appears
-between Parts and Layout: fill in the tool table, then per part either press **Suggest**
-for a starting plan derived from the part's own features, or build the list by hand.
+Every flat 2D job includes **Tools & Ops** between Parts and Layout. Fill in the tool
+table, then per part either use the suggested setup derived from the part's own features,
+or build the list by hand. A one-cutter job uses the same workflow with one tool row.
 
 `static/multitool.js` owns that step. It calls `/part-features` to survey each part so
 scopes can be offered against real hole sizes, and posts to `/process-multitool`.

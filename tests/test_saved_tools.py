@@ -86,6 +86,17 @@ class SavedToolsConfigTest(unittest.TestCase):
         self.assertEqual(library['250_2f']['name'], 'Ours')
         self.assertEqual(library['250_2f']['source'], 'team')
 
+    def test_default_shelf_has_the_shop_starter_bits(self):
+        library = tooling.merge_tool_library([])
+        self.assertEqual(library['125_1f']['flutes'], 1)
+        self.assertEqual(library['250_1f']['flutes'], 1)
+        self.assertEqual(library['156_drill']['type'], 'drill')
+        self.assertAlmostEqual(library['156_drill']['diameter'], 5 / 32)
+        engraving_angles = sorted(
+            tool['included_angle'] for tool in library.values()
+            if tool['type'] == 'vbit')
+        self.assertTrue({30.0, 60.0, 90.0}.issubset(set(engraving_angles)))
+
 
 class SavedToolsWriteTest(unittest.TestCase):
     """Writing bits back into a config file without harming it."""

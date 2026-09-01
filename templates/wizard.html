@@ -172,13 +172,10 @@
                     passes for a fragile cutter.
                 </p>
 
-                <label class="field inline" id="multitool-toggle">
-                    <input type="checkbox" id="f-multitool" autocomplete="off">
-                    <span>Use several tools per part</span>
-                </label>
-                <p class="hint" id="multitool-note" hidden>
-                    The Tools &amp; Ops panel replaces the single tool above. The program
-                    pauses for a manual tool change, and you re-zero Z, at every switch.
+                <p class="hint" id="multitool-note">
+                    Every flat-part job uses the Tools &amp; Ops panel. A one-bit job is
+                    simply a one-tool plan; when tools change, the program parks, pauses,
+                    and asks you to re-zero Z.
                 </p>
 
                 <label class="field inline" id="engrave-toggle">
@@ -190,8 +187,25 @@
                         <span>Font</span>
                         <select id="f-engrave-font" autocomplete="off">
                             <option value="single_line">CNC single-line (fastest)</option>
+                            <option value="google">Google Font</option>
                             <option value="uploaded">Upload any TTF or OTF font</option>
                         </select>
+                    </label>
+                    <label class="field" id="engrave-google-font-row" hidden>
+                        <span>Google Font family</span>
+                        <input type="text" id="f-engrave-google-font" list="google-font-suggestions"
+                               autocomplete="off" spellcheck="false" value="Roboto"
+                               placeholder="Roboto, Oswald, Montserrat&hellip;">
+                        <datalist id="google-font-suggestions">
+                            <option value="Roboto">
+                            <option value="Roboto Mono">
+                            <option value="Oswald">
+                            <option value="Montserrat">
+                            <option value="Bebas Neue">
+                            <option value="Playfair Display">
+                            <option value="Pacifico">
+                            <option value="Lobster">
+                        </datalist>
                     </label>
                     <label class="field" id="engrave-font-file-row" hidden>
                         <span>Font file</span>
@@ -199,8 +213,8 @@
                     </label>
                     <p class="hint" id="engrave-note">
                         Set each part&rsquo;s text and exact height in Parts, then drag its
-                        purple anchor anywhere safe inside the part in Layout. Uploaded
-                        fonts trace their glyph outlines; the single-line font cuts faster.
+                        purple anchor anywhere safe inside the part in Layout. Google and
+                        uploaded fonts trace their glyph outlines; the single-line font cuts faster.
                     </p>
                 </div>
 
@@ -385,8 +399,8 @@
             </div><!-- /.rail -->
 
             <!-- ===== TOOLS & OPERATIONS ===== -->
-            <!-- Only in the flow when "Use several tools" is checked (2D mode); see
-                 static/multitool.js, which owns everything inside this section. -->
+            <!-- Every flat 2D job uses this panel; tubing and 2.5D keep their specialized
+                 generators. static/multitool.js owns everything inside this section. -->
             <section class="step" data-step="tools" hidden>
                 <div class="panel-head"><h2>Tools &amp; Ops</h2></div>
                 <p class="hint">

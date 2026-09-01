@@ -6,7 +6,7 @@ A web-based tool for FRC robotics teams to automatically generate CNC G-code fro
 
 ## 2.0 (in progress)
 
-A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout → Preview) that runs both standalone (`/app`, DXF upload) and **embedded in the Onshape right-side panel** (`/onshape/element-panel`, live face-selection), sharing one codebase. Highlights:
+A ground-up rework, delivered as a **step wizard** (Setup → Parts → Tools & Ops → Layout → Preview for flat 2D work) that runs both standalone (`/app`, DXF upload) and **embedded in the Onshape right-side panel** (`/onshape/element-panel`, live face-selection), sharing one codebase. Highlights:
 
 - **Multi-part job layout:** arrange several parts on one sheet → one G-code program. The parts' combined bounding box *is* the stock (machine size is a constraint; G54 origin = bbox lower-left). Drag to move, drag-handle rotate (45° snap), multi-select group move/rotate, flip (mirror), zoom.
 - **2.5D STEP import:** local uploads of one solid preserve flat depth levels for pockets, through-holes, steps, and counterbores; stock thickness comes from CAD and unsafe non-2.5D geometry is refused.
@@ -14,7 +14,7 @@ A ground-up rework, delivered as a **step wizard** (Setup → Parts → Layout �
 - **Multi-tool operations:** an ordered operation list per part, each operation with its own tool and its own scope (small holes on the 1/8", pockets and profile on the 1/4", edge break on a V-bit). The job groups the work by tool and pauses for a manual tool change at each switch. See [docs/MULTI_TOOL_GUIDE.md](docs/MULTI_TOOL_GUIDE.md).
 - **Local mode:** `make local` runs the whole app on a laptop with no Onshape sign-in, no cloud, and no network — DXF/STEP files from disk, G-code back to disk. See [docs/LOCAL_MODE.md](docs/LOCAL_MODE.md).
 - **Bed leveling:** generate and preview a guarded spoilboard-surfacing raster from the **Level bed** utility, with machine-travel validation and a downloadable `.nc` program.
-- **Text engraving:** put independent text at an exact size and draggable position on every part, using the fast built-in single-line font or any uploaded TTF/OTF. A rectangular blank part can be created directly in the wizard for plaques and labels.
+- **Text engraving:** put independent text at an exact size and draggable position on every part, using the fast built-in single-line font, any Google Font family, or an uploaded TTF/OTF. A rectangular blank part can be created directly in the wizard for plaques and labels.
 - **Save:** split "Download Program / Send to Google Drive" button (Drive gated by config, remembers last choice).
 - The wizard is the whole app: `/` (and `/app`) serve it full-screen in DXF-upload mode; the Onshape panel serves the same wizard with face-selection as the source.
 
@@ -146,11 +146,13 @@ Designed to feel like 3D printer slicers or laser cutter software. Get the desig
 
 Same wizard, same G-code. See [Local Mode](docs/LOCAL_MODE.md).
 
-### Using more than one tool
+### Tools and operations
 
-Tick **Use several tools** on the Setup step to plan an operation list per part — drill
-the small holes with a small cutter, clear pockets and profile with a big one, break the
-edges with a V-bit. The program stops and tells you what to swap at each change.
+Every flat 2D job uses an operation list per part. A one-cutter job is simply a one-tool
+plan; larger plans can drill small holes with a drill, clear pockets and profile with an
+end mill, and break edges with a V-bit. The program stops and tells you what to swap at
+each change. The built-in shelf includes 1/8" and 1/4" single-flute end mills, a 5/32"
+twist drill, and 30°, 60°, and 90° V-bit choices; team-saved tools still appear first.
 
 After all fastening holes are made, the default multi-tool program raises the cutter to
 the configured tool-change height, parks the gantry when a verified park is configured,

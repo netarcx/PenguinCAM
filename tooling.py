@@ -153,6 +153,7 @@ TOOL_LIBRARY = {
     '3mm_1f':  {'name': '3mm 1-flute endmill',   'diameter': 0.118, 'flutes': 1, 'type': 'endmill'},
     '4mm_1f':  {'name': '4mm 1-flute endmill',   'diameter': 0.157, 'flutes': 1, 'type': 'endmill'},
     '125_1f':  {'name': '1/8 in 1-flute endmill', 'diameter': 0.125, 'flutes': 1, 'type': 'endmill'},
+    '156_drill': {'name': '5/32 in twist drill',  'diameter': 0.15625, 'flutes': 2, 'type': 'drill'},
     '250_1f':  {'name': '1/4 in 1-flute endmill', 'diameter': 0.250, 'flutes': 1, 'type': 'endmill'},
     '250_2f':  {'name': '1/4 in 2-flute endmill', 'diameter': 0.250, 'flutes': 2, 'type': 'endmill'},
     '375_2f':  {'name': '3/8 in 2-flute endmill', 'diameter': 0.375, 'flutes': 2, 'type': 'endmill'},
@@ -160,6 +161,10 @@ TOOL_LIBRARY = {
                 'included_angle': 90.0},
     'vbit_60': {'name': '1/2 in 60 deg V-bit',    'diameter': 0.500, 'flutes': 2, 'type': 'vbit',
                 'included_angle': 60.0},
+    'engrave_vbit_30': {'name': '1/4 in 30 deg engraving V-bit', 'diameter': 0.250,
+                        'flutes': 2, 'type': 'vbit', 'included_angle': 30.0},
+    'engrave_vbit_60': {'name': '1/4 in 60 deg engraving V-bit', 'diameter': 0.250,
+                        'flutes': 2, 'type': 'vbit', 'included_angle': 60.0},
 }
 
 

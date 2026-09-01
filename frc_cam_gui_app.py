@@ -24,6 +24,8 @@ import zipfile
 import atexit
 import time
 import threading
+import requests
+from urllib.parse import urlparse
 from datetime import datetime
 import ezdxf
 from shapely.ops import unary_union
@@ -1881,7 +1883,7 @@ def process_file():
 
 
 @app.route('/process-job', methods=['POST'])
-@limiter.limit("10 per minute")  # CPU intensive
+@limiter.limit("30 per minute")  # Debounced live preview; the client serializes builds
 def process_job():
     """Process a multi-part job: several DXF parts placed on one stock sheet, emitted
     as a single G-code program. 2D standard mode only (2.5D is single-part via /process).
@@ -2410,16 +2412,92 @@ def _save_job_dxfs(job_dir):
 
 
 MAX_ENGRAVING_FONT_BYTES = 10 * 1024 * 1024
+GOOGLE_FONT_CSS_URL = 'https://fonts.googleapis.com/css2'
+GOOGLE_FONT_FAMILY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .&'_\-]{0,99}$")
+_GOOGLE_FONT_CACHE = {}
+_GOOGLE_FONT_CACHE_LOCK = threading.Lock()
+_GOOGLE_FONT_CACHE_SECONDS = 24 * 60 * 60
+_GOOGLE_FONT_CACHE_MAX = 32
+
+
+def _google_font_bytes(family):
+    """Download one regular Google Font as TrueType, with a bounded local cache.
+
+    The public CSS API needs no Developer API key.  Its response varies by user agent;
+    the generic Mozilla agent asks for TrueType, which ``fontTools`` can consume without
+    adding a WOFF2 decompressor to the production image.  Only a URL on Google's font
+    asset host is followed, so CSS returned by an upstream error can never become SSRF.
+    """
+    family = str(family or '').strip()
+    if not GOOGLE_FONT_FAMILY_RE.fullmatch(family):
+        raise ValueError('Enter a Google Fonts family name such as Roboto or Oswald.')
+
+    now = time.time()
+    with _GOOGLE_FONT_CACHE_LOCK:
+        cached = _GOOGLE_FONT_CACHE.get(family.casefold())
+        if cached and now - cached[0] < _GOOGLE_FONT_CACHE_SECONDS:
+            return cached[1]
+
+    try:
+        css_response = requests.get(
+            GOOGLE_FONT_CSS_URL,
+            params={'family': family},
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=(5, 15),
+        )
+        css_response.raise_for_status()
+        if len(css_response.content) > 256 * 1024:
+            raise ValueError('Google Fonts returned an unexpectedly large stylesheet.')
+        css = css_response.text
+        urls = re.findall(
+            r"url\((https://fonts\.gstatic\.com/[^)\s]+)\)\s*format\(['\"]truetype['\"]\)",
+            css,
+        )
+        if not urls:
+            raise ValueError(f'Google Fonts did not provide a regular TrueType file for {family}.')
+        font_url = urls[-1]
+        parsed = urlparse(font_url)
+        if parsed.scheme != 'https' or parsed.hostname != 'fonts.gstatic.com':
+            raise ValueError('Google Fonts returned an untrusted font URL.')
+
+        font_response = requests.get(font_url, timeout=(5, 30))
+        font_response.raise_for_status()
+        blob = font_response.content
+    except requests.RequestException as exc:
+        raise ValueError(f'Could not download {family} from Google Fonts. Try again, or upload the font file.') from exc
+
+    if not blob or len(blob) > MAX_ENGRAVING_FONT_BYTES:
+        raise ValueError('The Google Font is empty or larger than 10 MB.')
+    try:
+        outline_font.validate_font_bytes(blob)
+    except outline_font.OutlineFontError as exc:
+        raise ValueError(f'Google Fonts returned an unusable font: {exc}') from exc
+    with _GOOGLE_FONT_CACHE_LOCK:
+        if len(_GOOGLE_FONT_CACHE) >= _GOOGLE_FONT_CACHE_MAX:
+            oldest = min(_GOOGLE_FONT_CACHE, key=lambda key: _GOOGLE_FONT_CACHE[key][0])
+            _GOOGLE_FONT_CACHE.pop(oldest, None)
+        _GOOGLE_FONT_CACHE[family.casefold()] = (now, blob)
+    return blob
 
 
 def _save_engraving_font(job_dir, spec):
     """Save and validate the optional job-scoped TTF/OTF without trusting its name."""
     mode = str(spec.get('engrave_font') or 'single_line')
     upload = request.files.get('engrave_font_file')
-    if mode not in ('single_line', 'uploaded'):
-        raise ValueError('Engraving font must be single_line or uploaded.')
+    if mode not in ('single_line', 'uploaded', 'google'):
+        raise ValueError('Engraving font must be single_line, google, or uploaded.')
     if mode == 'single_line':
         return None, 'CNC single-line'
+    if mode == 'google':
+        family = str(spec.get('engrave_google_family') or '').strip()
+        blob = _google_font_bytes(family)
+        path = os.path.join(job_dir, 'engraving-google-font.ttf')
+        with open(path, 'wb') as handle:
+            handle.write(blob)
+        try:
+            return path, outline_font.validate_font(path)
+        except outline_font.OutlineFontError as exc:
+            raise ValueError(str(exc)) from exc
     if upload is None or not upload.filename:
         raise ValueError('Choose a TTF or OTF font file for this engraving job.')
     suffix = Path(upload.filename).suffix.lower()
@@ -2543,7 +2621,7 @@ def part_features():
 
 
 @app.route('/process-multitool', methods=['POST'])
-@limiter.limit("10 per minute")  # CPU intensive
+@limiter.limit("30 per minute")  # Debounced live preview; the client serializes builds
 def process_multitool():
     """Generate one program covering every part's ordered, multi-tool operation list.
 

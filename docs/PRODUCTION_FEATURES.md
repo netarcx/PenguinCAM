@@ -115,10 +115,11 @@ drags in Layout. The Parts panel can also create a rectangular blank DXF, making
 or label a complete workflow without separate CAD.
 
 The default `stroke_font.py` is a fast **single-stroke** (centreline) CNC font. For any
-other face, the job uploads a TTF or OTF; `outline_font.py` reads its real glyph vectors,
-flattens Bézier curves to bounded-error polylines, preserves case and supported Unicode,
-and traces those outlines. The font travels in the request rather than depending on what
-is installed on the server, and saved local jobs store it alongside their DXFs.
+other face, the job can name a Google Font family or upload a TTF/OTF. Google Fonts are
+downloaded through the public CSS API, restricted to Google's font asset host, validated,
+and cached for a day; uploaded fonts travel with the request and saved local job. In both
+cases `outline_font.py` reads the real glyph vectors, flattens Bézier curves to
+bounded-error polylines, preserves case and supported Unicode, and traces the outlines.
 
 Engraving runs **before the profile**, while the sheet is still whole: afterwards the
 part hangs on tabs, and a light chattery label cut is exactly what breaks one. It lives

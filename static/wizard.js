@@ -15,9 +15,9 @@
   // Every mode uses the Layout step. In 2D it nests parts on a sheet; in tubing it's
   // used only to orient the face(s) to the tube-jig axis (see the tube handling in the
   // rotate + validate paths below). 2.5D is a single part positioned at the origin.
-  // "tools" is the multi-tool operations editor (static/multitool.js) and is only in the
-  // flow when the job actually uses several tools, so the ordinary single-tool flow is
-  // the same four steps it has always been.
+  // "tools" is the operations editor (static/multitool.js). Every flat 2D job uses it;
+  // a job with one cutter is simply a one-tool plan. Tubing and 2.5D keep their
+  // specialized generators because their geometry is not represented by 2D operations.
   function steps() {
     if (multiToolOn()) return ALL_STEPS;
     return ALL_STEPS.filter(function (s) { return s !== 'tools'; });
@@ -97,6 +97,7 @@
     // needs a fine cutter, so it should be a decision rather than a surprise.
     engrave: false,
     engraveFontMode: 'single_line',
+    engraveGoogleFamily: 'Roboto',
     engraveFontFile: null,
     engraveFontName: '',
     engravePreviewFamily: '',
@@ -121,7 +122,7 @@
     // The machine envelope is a read-only constraint; the parts' combined bounding box
     // is the stock (G54 origin = its lower-left).
     machine: { width: CFG.bed.width || 24, height: CFG.bed.height || 24, name: CFG.machineName || 'Machine' },
-    multitool: false,     // when true, the Tools & Ops step plans several tools per part
+    multitool: true,      // legacy saved-job field; every flat 2D job now uses operations
     tools: null,          // [{slot,name,diameter,flutes,type,included_angle}] - see multitool.js
     parts: [],            // {id,name,width,height,outline,holes,inner,file,cx,cy,rotation,flipped,ops}
     selectedIds: [],
@@ -345,6 +346,55 @@
       drawLayout();
       URL.revokeObjectURL(url);
     }).catch(function () { URL.revokeObjectURL(url); });
+  }
+
+  var googleFontPreviewToken = 0;
+  var googleFontPreviewTimer = null;
+  function validGoogleFontFamily(family) {
+    return /^[A-Za-z0-9][A-Za-z0-9 .&'_\-]{0,99}$/.test(String(family || '').trim());
+  }
+
+  function previewGoogleFont(family) {
+    if (googleFontPreviewTimer) {
+      clearTimeout(googleFontPreviewTimer);
+      googleFontPreviewTimer = null;
+    }
+    family = String(family || '').trim();
+    var token = ++googleFontPreviewToken;
+    state.engravePreviewFamily = '';
+    if (!validGoogleFontFamily(family)) { drawLayout(); return; }
+    var link = document.getElementById('penguincam-google-font');
+    if (!link) {
+      link = document.createElement('link');
+      link.id = 'penguincam-google-font';
+      link.rel = 'stylesheet';
+      document.head.appendChild(link);
+    }
+    var cssFamily = '"' + family.replace(/"/g, '') + '"';
+    link.onload = function () {
+      if (token !== googleFontPreviewToken) return;
+      if (!document.fonts || !document.fonts.load) {
+        state.engravePreviewFamily = cssFamily;
+        drawLayout();
+        return;
+      }
+      document.fonts.load('16px ' + cssFamily).then(function () {
+        if (token !== googleFontPreviewToken) return;
+        state.engravePreviewFamily = cssFamily;
+        drawLayout();
+      }).catch(function () { if (token === googleFontPreviewToken) drawLayout(); });
+    };
+    link.onerror = function () { if (token === googleFontPreviewToken) drawLayout(); };
+    link.href = 'https://fonts.googleapis.com/css2?family='
+      + encodeURIComponent(family).replace(/%20/g, '+') + '&display=swap';
+  }
+
+  function scheduleGoogleFontPreview(family) {
+    if (googleFontPreviewTimer) clearTimeout(googleFontPreviewTimer);
+    googleFontPreviewTimer = setTimeout(function () {
+      googleFontPreviewTimer = null;
+      previewGoogleFont(family);
+    }, 300);
   }
 
   function placedLabelAnchor(part) {
@@ -733,6 +783,11 @@
       alert('Choose the TTF or OTF font file to engrave.');
       return false;
     }
+    if (name === 'setup' && engraveOn() && state.engraveFontMode === 'google'
+        && !validGoogleFontFamily(state.engraveGoogleFamily)) {
+      alert('Enter a Google Fonts family name such as Roboto or Oswald.');
+      return false;
+    }
     if (name === 'parts' && state.parts.length === 0 && !tubePatternOn()) {
       alert('Add at least one part before continuing.');
       return false;
@@ -792,10 +847,8 @@
     var order = steps();
     var target = order.indexOf(name), cur = order.indexOf(state.step);
     if (target < 0) return;
-    // Re-clicking the step you are on is normally a no-op - except Preview, where
-    // re-entering IS the regenerate action. Changing any setting while standing there
-    // retires the program and told you to "press Next", a button that is hidden on
-    // that very step; the only way back was Back and then forward again.
+    // Re-clicking the step you are on is normally a no-op. Keep Preview re-entry as an
+    // explicit refresh option even though ordinary edits now regenerate automatically.
     if (target === cur && name !== 'preview') return;
     if (target > cur) {
       for (var i = cur; i < target; i++) { if (!canLeave(order[i])) return; }
@@ -845,7 +898,22 @@
       fontSelect.addEventListener('change', function () {
         state.engraveFontMode = this.value;
         updateConditionalSettings();
+        if (state.engraveFontMode === 'google') previewGoogleFont(state.engraveGoogleFamily);
         drawLayout();
+        invalidatePreview();
+      });
+    }
+    var googleFont = $('#f-engrave-google-font');
+    if (googleFont) {
+      googleFont.addEventListener('input', function () {
+        state.engraveGoogleFamily = this.value.trim();
+        scheduleGoogleFontPreview(state.engraveGoogleFamily);
+        invalidatePreview();
+      });
+      googleFont.addEventListener('change', function () {
+        state.engraveGoogleFamily = this.value.trim() || 'Roboto';
+        this.value = state.engraveGoogleFamily;
+        previewGoogleFont(state.engraveGoogleFamily);
         invalidatePreview();
       });
     }
@@ -865,7 +933,6 @@
         state.dryRun = this.checked;
         updateSummary();
         invalidatePreview();
-        if (state.step === 'preview') gotoStep('preview');   // regenerate immediately
       });
     }
 
@@ -1078,6 +1145,7 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ machine_id: mid }),
     }).catch(function () {});
+    invalidatePreview();
     dbg('machine', mid);
   }
 
@@ -1128,13 +1196,63 @@
      plywood 4mm program. Anything that changes what would be generated must retire what
      already was. Wired to every such input, not just the tube ones: material, thickness,
      tool, tab spacing, the mode-specific tube fields, and adding or removing a part. */
+  var previewRegenerateTimer = null;
+  var previewGenerationToken = 0;
+  var previewGenerationInFlight = false;
+  var previewRegenerationPending = false;
+  var PREVIEW_REGENERATE_DELAY_MS = 500;
+
+  function previewValidationProblems() {
+    var problems = [];
+    if (engraveOn() && state.engraveFontMode === 'uploaded' && !state.engraveFontFile) {
+      problems.push('Choose the TTF or OTF font file to engrave.');
+    }
+    if (engraveOn() && state.engraveFontMode === 'google'
+        && !validGoogleFontFamily(state.engraveGoogleFamily)) {
+      problems.push('Enter a Google Fonts family name such as Roboto or Oswald.');
+    }
+    if (state.parts.length === 0 && !tubePatternOn()) problems.push('Add at least one part.');
+    if (partsOverCap()) problems.push('Remove ' + partsOverCap() + ' extra part(s).');
+    if (engraveOn() && state.parts.some(function (p) { return !engravingText(p).trim(); })) {
+      problems.push('Enter engraving text for every part, or turn engraving off.');
+    }
+    if (multiToolOn()) {
+      problems = problems.concat(window.PCMultiTool.validate());
+    }
+    if (state.parts.length || tubePatternOn()) {
+      problems = problems.concat(validateLayout().msgs || []);
+    }
+    return problems;
+  }
+
+  function schedulePreviewRegeneration() {
+    if (previewRegenerateTimer) clearTimeout(previewRegenerateTimer);
+    $('#preview-errors').textContent = '';
+    $('#gen-status').textContent = 'Updating toolpath…';
+    previewRegenerateTimer = setTimeout(function () {
+      previewRegenerateTimer = null;
+      if (state.step !== 'preview') return;
+      var problems = previewValidationProblems();
+      if (problems.length) {
+        $('#gen-status').textContent = '';
+        $('#preview-errors').textContent = 'Toolpath will update when these are fixed:\n'
+          + problems.map(function (m) { return '• ' + m; }).join('\n');
+        return;
+      }
+      generate();
+    }, PREVIEW_REGENERATE_DELAY_MS);
+  }
+
   function invalidatePreview() {
     if (state.step !== 'preview' && $('#preview-result').hidden) return;
     resetPreview();
     $('#btn-do').disabled = true;
-    $('#gen-status').textContent = '';
-    $('#preview-errors').textContent =
-      'Settings changed. Click the Preview step above to generate the program again.';
+    if (state.step === 'preview') {
+      schedulePreviewRegeneration();
+    } else {
+      $('#gen-status').textContent = '';
+      $('#preview-errors').textContent = 'Settings changed. Preview will regenerate when you return.';
+    }
   }
 
   /* The pattern the server would generate, fetched so Layout can draw the tube before
@@ -1219,6 +1337,8 @@
     el = $('#engrave-options'); if (el) el.hidden = !engraveOn();
     el = $('#engrave-font-file-row');
     if (el) el.hidden = !engraveOn() || state.engraveFontMode !== 'uploaded';
+    el = $('#engrave-google-font-row');
+    if (el) el.hidden = !engraveOn() || state.engraveFontMode !== 'google';
     el = $('#blank-part-maker'); if (el) el.hidden = !is2d;
     el = $('#multitool-toggle'); if (el) el.hidden = !is2d;
     el = $('#multitool-note'); if (el) el.hidden = !on;
@@ -2490,9 +2610,12 @@
         ctx.save();
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         var previewHeight = (p.engrave_height || 0.18) * canvasState.scale;
-        var previewFont = state.engraveFontMode === 'uploaded' && state.engravePreviewFamily
-          ? state.engravePreviewFamily : CANVAS_FONT;
-        ctx.font = '600 ' + Math.max(8, Math.min(72, previewHeight)) + 'px ' + previewFont;
+        var outlinePreview = (state.engraveFontMode === 'uploaded'
+                              || state.engraveFontMode === 'google')
+                             && state.engravePreviewFamily;
+        var previewFont = outlinePreview ? state.engravePreviewFamily : CANVAS_FONT;
+        ctx.font = (outlinePreview ? '400 ' : '600 ')
+          + Math.max(8, Math.min(72, previewHeight)) + 'px ' + previewFont;
         ctx.fillStyle = col.accent;
         ctx.fillText(engravingText(p), labelCanvas[0], labelCanvas[1]);
         ctx.beginPath(); ctx.arc(labelCanvas[0], labelCanvas[1], 4, 0, Math.PI * 2);
@@ -2757,7 +2880,7 @@
     $('#btn-flip').addEventListener('click', function () {
       if (state.mode === '2.5d' || state.mode === 'tubing') return;  // flip not allowed in 2.5D/tubing
       selectedParts().forEach(function (p) { p.flipped = !p.flipped; });
-      drawLayout();
+      drawLayout(); invalidatePreview();
     });
     var stockSel = $('#f-stock');
     if (stockSel) {
@@ -3022,6 +3145,8 @@
       max_pass_depth: state.max_pass_depth,
       engrave: engraveOn(),
       engrave_font: state.engraveFontMode,
+      engrave_google_family: state.engraveFontMode === 'google'
+        ? state.engraveGoogleFamily : null,
       chamfer: state.chamfer.on ? state.chamfer : null,
       multitool: multiToolOn(),
       tools: multiToolOn() ? (state.tools || null) : null,
@@ -3095,10 +3220,14 @@
     }
     state.engrave = !!setup.engrave;
     var eb = $('#f-engrave'); if (eb) eb.checked = state.engrave;
-    state.engraveFontMode = setup.engrave_font === 'uploaded' ? 'uploaded' : 'single_line';
+    state.engraveFontMode = setup.engrave_font === 'uploaded' ? 'uploaded'
+      : (setup.engrave_font === 'google' ? 'google' : 'single_line');
+    state.engraveGoogleFamily = String(setup.engrave_google_family || 'Roboto');
     state.engraveFontFile = null;
     state.engraveFontName = '';
     var efs = $('#f-engrave-font'); if (efs) efs.value = state.engraveFontMode;
+    var egf = $('#f-engrave-google-font'); if (egf) egf.value = state.engraveGoogleFamily;
+    if (state.engraveFontMode === 'google') previewGoogleFont(state.engraveGoogleFamily);
     if (setup.engrave_font_base64) {
       state.engraveFontFile = fileFromBase64(
         setup.engrave_font_base64, setup.engrave_font_name || 'engraving-font.ttf',
@@ -3120,9 +3249,17 @@
           holes: !!setup.chamfer.holes, pockets: !!setup.chamfer.pockets }
       : { on: false, width: state.chamfer.width, bit: state.chamfer.bit,
           angle: state.chamfer.angle, perimeter: true, holes: false, pockets: false };
-    var wantMulti = !!setup.multitool && window.PCMultiTool;
+    // Flat jobs now always use an operation plan. Older saved jobs have only the former
+    // single-tool fields, so turn those into a one-row tool table and two equivalent
+    // operations below instead of reopening them in a retired workflow.
+    var wantMulti = state.mode === '2d' && !!window.PCMultiTool;
     state.multitool = wantMulti;
-    state.tools = wantMulti && setup.tools && setup.tools.length ? setup.tools : null;
+    state.tools = wantMulti && setup.tools && setup.tools.length ? setup.tools
+      : (wantMulti ? [{ slot: 1, name: 'Saved-job end mill',
+                        diameter: setup.tool_diameter || state.tool_diameter,
+                        diameter_text: setup.tool_diameter_text || state.tool_diameter_text,
+                        flutes: setup.tool_flutes || state.tool_flutes,
+                        type: 'endmill', included_angle: 90 }] : null);
     var mtBox = $('#f-multitool');
     if (mtBox && !mtBox.disabled) mtBox.checked = wantMulti;
     state.stock = null;
@@ -3209,6 +3346,14 @@
             part.cy = (saved.place_y || 0) + s0.h / 2;
           }
           if (saved.ops) part.ops = saved.ops;
+          else if (wantMulti) {
+            part.ops = [
+              { op_type: 'interior', tool_slot: state.tools[0].slot,
+                name: 'Holes + pockets', depth: null, scope: {} },
+              { op_type: 'perimeter', tool_slot: state.tools[0].slot,
+                name: 'Profile', depth: null, scope: {} },
+            ];
+          }
           if (typeof saved.label_x === 'number') part.label_x = saved.label_x;
           if (typeof saved.label_y === 'number') part.label_y = saved.label_y;
           if (saved.engrave_text != null) part.engrave_text = String(saved.engrave_text);
@@ -3421,6 +3566,12 @@
 
   /* ------------------------------------------------------------- preview */
   function resetPreview() {
+    if (previewRegenerateTimer) {
+      clearTimeout(previewRegenerateTimer);
+      previewRegenerateTimer = null;
+    }
+    previewGenerationToken++;       // any older network response is now obsolete
+    state.lastResponse = null;
     $('#preview-result').hidden = true;
     $('#preview-errors').textContent = '';
     $('#gen-status').textContent = '';
@@ -3428,30 +3579,73 @@
   }
 
   function generate() {
+    if (previewRegenerateTimer) {
+      clearTimeout(previewRegenerateTimer);
+      previewRegenerateTimer = null;
+    }
+    if (previewGenerationInFlight) {
+      previewRegenerationPending = true;
+      $('#gen-status').textContent = 'Finishing current toolpath, then updating…';
+      return Promise.resolve();
+    }
+    previewGenerationInFlight = true;
+    previewRegenerationPending = false;
+    var token = ++previewGenerationToken;
     $('#preview-errors').textContent = '';
     $('#gen-status').textContent = 'Generating…';
 
-    if (state.mode === 'tubing') { generateTube(); }
-    else if (state.mode === '2.5d') { generateSingle(); }
-    else if (multiToolOn()) { generateMultiTool(); }
-    else { generateJob(); }
+    function finished() {
+      previewGenerationInFlight = false;
+      if (previewRegenerationPending && state.step === 'preview') {
+        previewRegenerationPending = false;
+        schedulePreviewRegeneration();
+      }
+    }
+    var work;
+    try {
+      if (state.mode === 'tubing') work = generateTube(token);
+      else if (state.mode === '2.5d') work = generateSingle(token);
+      else if (multiToolOn()) work = generateMultiTool(token);
+      else work = generateJob(token);  // defensive fallback if the editor script failed
+    } catch (error) {
+      finished();
+      if (token === previewGenerationToken) {
+        $('#preview-errors').textContent = 'Could not build the toolpath request: ' + error;
+        $('#gen-status').textContent = '';
+      }
+      return Promise.resolve();
+    }
+    return Promise.resolve(work).then(function (result) {
+      finished();
+      return result;
+    }, function (error) {
+      finished();
+      if (token === previewGenerationToken) {
+        $('#preview-errors').textContent = 'Request failed: ' + error;
+        $('#gen-status').textContent = '';
+      }
+    });
   }
 
   // Shared POST /process handler for the single-file paths (2.5D and tubing).
-  function submitToProcess(fd, label) {
+  function submitToProcess(fd, label, token) {
     dbg(label + ':req');
     return fetch('/process', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
+        if (token !== previewGenerationToken) return;
         if (!res.ok || res.j.error) { $('#preview-errors').textContent = res.j.details || res.j.error || 'Generation failed'; $('#gen-status').textContent = ''; return; }
         dbg(label + ':ok', { time: res.j.cycle_time });
         state.lastResponse = res.j;
         showResult(res.j);
       })
-      .catch(function (e) { $('#preview-errors').textContent = 'Request failed: ' + e; $('#gen-status').textContent = ''; });
+      .catch(function (e) {
+        if (token !== previewGenerationToken) return;
+        $('#preview-errors').textContent = 'Request failed: ' + e; $('#gen-status').textContent = '';
+      });
   }
 
-  function generateTube() {
+  function generateTube(token) {
     var generated = tubePatternOn();
     var p = state.parts[0];
     if (!p && !generated) {
@@ -3495,7 +3689,7 @@
     if (state.dryRun) fd.append('dry_run', '1');
     fd.append('timestamp', timestamp());
     if (p) fd.append('suggested_filename', p.name);
-    return submitToProcess(fd, 'tube');
+    return submitToProcess(fd, 'tube', token);
   }
 
   // Filename base for a multi-part job: the distinct part names joined with "_", capped
@@ -3516,7 +3710,7 @@
     return kept.join('_') + (remaining > 0 ? '+' + remaining : '');
   }
 
-  function generateJob() {
+  function generateJob(token) {
     var fd = new FormData();
     // The parts' combined bounding box is the stock; its lower-left is the G54 origin,
     // so placements are normalized relative to it.
@@ -3544,6 +3738,9 @@
     if (engraveOn()) {
       job.engrave = '1';
       job.engrave_font = state.engraveFontMode;
+      if (state.engraveFontMode === 'google') {
+        job.engrave_google_family = state.engraveGoogleFamily;
+      }
       if (state.engraveFontMode === 'uploaded' && state.engraveFontFile) {
         fd.append('engrave_font_file', state.engraveFontFile, state.engraveFontFile.name);
       }
@@ -3577,17 +3774,21 @@
     return fetch('/process-job', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
+        if (token !== previewGenerationToken) return;
         if (!res.ok || !res.j.success) { showGenErrors(res.j); return; }
         dbg('process-job:ok', { parts: (res.j.parts || []).length, time: res.j.cycle_time });
         state.lastResponse = res.j;
         showResult(res.j);
       })
-      .catch(function (e) { dbg('process-job:fail', String(e)); $('#preview-errors').textContent = 'Request failed: ' + e; $('#gen-status').textContent = ''; });
+      .catch(function (e) {
+        if (token !== previewGenerationToken) return;
+        dbg('process-job:fail', String(e)); $('#preview-errors').textContent = 'Request failed: ' + e; $('#gen-status').textContent = '';
+      });
   }
 
   // Multi-tool jobs post the same placements as generateJob, plus the tool table and each
   // part's operation list; the server orders the operations and inserts the tool changes.
-  function generateMultiTool() {
+  function generateMultiTool(token) {
     var bb = combinedBBox() || { minX: 0, minY: 0, w: 0, h: 0 };
     var sheet = state.stock;
     // Same rule as generateJob: on a sheet the placements are absolute and the origin
@@ -3604,7 +3805,7 @@
     });
     // A part added after the deburr box was ticked has no chamfer op yet; the sync is
     // idempotent, so re-running it here catches up before the payload is built.
-    if (state.chamfer.on) window.PCMultiTool.applyDeburr(state.chamfer);
+    if (state.chamfer.on) window.PCMultiTool.applyDeburr(state.chamfer, true);
     var fd = window.PCMultiTool.buildFormData(placements, jobFilename(), timestamp(),
       sheet ? { width: sheet.width, height: sheet.height, from_library: true,
                 name: sheet.name } : null);
@@ -3612,19 +3813,21 @@
     return fetch('/process-multitool', { method: 'POST', body: fd })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
+        if (token !== previewGenerationToken) return;
         if (!res.ok || !res.j.success) { showGenErrors(res.j); return; }
         dbg('process-multitool:ok', { tools: res.j.tool_changes, time: res.j.cycle_time });
         state.lastResponse = res.j;
         showResult(res.j);
       })
       .catch(function (e) {
+        if (token !== previewGenerationToken) return;
         dbg('process-multitool:fail', String(e));
         $('#preview-errors').textContent = 'Request failed: ' + e;
         $('#gen-status').textContent = '';
       });
   }
 
-  function generateSingle() {
+  function generateSingle(token) {
     var p = state.parts[0];
     if (!p) { $('#preview-errors').textContent = 'Add a part first.'; $('#gen-status').textContent = ''; return Promise.resolve(); }
     var fd = new FormData();
@@ -3644,7 +3847,7 @@
     if (engraveOn()) fd.append('engrave', '1');
     fd.append('timestamp', timestamp());
     fd.append('suggested_filename', p.name);
-    return submitToProcess(fd, 'process');
+    return submitToProcess(fd, 'process', token);
   }
 
   function showGenErrors(j) {
@@ -4038,7 +4241,7 @@
                toolsWritable: !!CFG.toolsWritable },
         setToolLibrary: setToolLibrary,
         bitId: bitId,
-        onChange: updateSummary,
+        onChange: function () { invalidatePreview(); updateSummary(); drawLayout(); },
       });
     }
     // Started before bindSetup for the same reason the multi-tool editor is: the setup

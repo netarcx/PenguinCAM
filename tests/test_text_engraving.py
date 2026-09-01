@@ -5,7 +5,9 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 import ezdxf
 from fontTools.fontBuilder import FontBuilder
@@ -13,6 +15,7 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 import outline_font
 import job_library
+import frc_cam_gui_app
 from frc_cam_gui_app import app, limiter
 
 
@@ -74,6 +77,36 @@ def _square_dxf_bytes(size=4.0):
         os.remove(path)
 
 
+class WizardWorkflowContractTest(unittest.TestCase):
+    def test_preview_regenerates_and_flat_jobs_always_use_operations(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'static', 'wizard.js'), encoding='utf-8') as handle:
+            wizard = handle.read()
+        with open(os.path.join(root, 'static', 'multitool.js'), encoding='utf-8') as handle:
+            operations = handle.read()
+        with open(os.path.join(root, 'templates', 'wizard.html'), encoding='utf-8') as handle:
+            template = handle.read()
+
+        self.assertIn('function schedulePreviewRegeneration()', wizard)
+        self.assertIn('previewGenerationToken', wizard)
+        self.assertIn("if (state.step === 'preview')", wizard)
+        self.assertIn("return !!ctx && ctx.state.mode === '2d';", operations)
+        self.assertNotIn('id="f-multitool"', template)
+
+    def test_google_font_controls_reach_both_2d_job_builders(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'static', 'wizard.js'), encoding='utf-8') as handle:
+            wizard = handle.read()
+        with open(os.path.join(root, 'static', 'multitool.js'), encoding='utf-8') as handle:
+            operations = handle.read()
+        with open(os.path.join(root, 'templates', 'wizard.html'), encoding='utf-8') as handle:
+            template = handle.read()
+
+        self.assertIn('value="google"', template)
+        self.assertIn('engrave_google_family', wizard)
+        self.assertIn('engrave_google_family', operations)
+
+
 class OutlineFontTest(unittest.TestCase):
     def setUp(self):
         with tempfile.NamedTemporaryFile(suffix='.ttf', delete=False) as handle:
@@ -109,12 +142,13 @@ class UploadedFontRouteTest(unittest.TestCase):
         self.dxf = _square_dxf_bytes()
         self.font = _test_font_bytes()
 
-    def _post(self, font_bytes=None, include_font=True):
+    def _post(self, font_bytes=None, include_font=True, font_mode='uploaded',
+              google_family=None):
         job = {
             'material': 'plywood', 'tool_diameter': 0.0625, 'tool_flutes': 1,
             'thickness': 0.25, 'tab_spacing': 6.0,
             'stock': {'width': 4, 'height': 4}, 'name': 'custom-text',
-            'engrave': '1', 'engrave_font': 'uploaded',
+            'engrave': '1', 'engrave_font': font_mode,
             'parts': [{
                 'file_index': 0, 'name': 'plate', 'place_x': 0, 'place_y': 0,
                 'rotation': 0, 'mirror': False, 'engrave_text': 'Hi',
@@ -124,7 +158,10 @@ class UploadedFontRouteTest(unittest.TestCase):
         }
         data = {'job': json.dumps(job), 'timestamp': '2026-09-01 12:00:00',
                 'file_0': (io.BytesIO(self.dxf), 'plate.dxf')}
-        if include_font:
+        if google_family is not None:
+            job['engrave_google_family'] = google_family
+            data['job'] = json.dumps(job)
+        if include_font and font_mode == 'uploaded':
             data['engrave_font_file'] = (
                 io.BytesIO(self.font if font_bytes is None else font_bytes), 'chosen.ttf')
         return self.client.post('/process-job', data=data,
@@ -148,6 +185,44 @@ class UploadedFontRouteTest(unittest.TestCase):
         response = self._post(font_bytes=b'not a font')
         self.assertEqual(response.status_code, 400)
         self.assertIn('could not be read', response.get_json()['error'])
+
+    def test_google_font_is_downloaded_validated_and_used_for_outlines(self):
+        class Response:
+            def __init__(self, body, text=None):
+                self.content = body
+                self.text = text if text is not None else ''
+
+            def raise_for_status(self):
+                return None
+
+        css = ("@font-face { font-family: 'Roboto'; "
+               "src: url(https://fonts.gstatic.com/s/roboto/test.ttf) "
+               "format('truetype'); }")
+
+        def get(url, **_kwargs):
+            if url == frc_cam_gui_app.GOOGLE_FONT_CSS_URL:
+                return Response(css.encode('utf-8'), css)
+            self.assertEqual(url, 'https://fonts.gstatic.com/s/roboto/test.ttf')
+            return Response(self.font)
+
+        frc_cam_gui_app._GOOGLE_FONT_CACHE.clear()
+        with mock.patch.object(frc_cam_gui_app.requests, 'get', side_effect=get) as request_get:
+            response = self._post(include_font=False, font_mode='google',
+                                  google_family='Roboto')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(request_get.call_count, 2)
+        gcode = response.get_json()['gcode']
+        self.assertIn('(Font: Penguin Test Block)', gcode)
+        self.assertGreater(gcode.count('Down to engraving depth'), 3)
+
+    def test_google_font_family_is_validated_before_network_access(self):
+        frc_cam_gui_app._GOOGLE_FONT_CACHE.clear()
+        with mock.patch.object(frc_cam_gui_app.requests, 'get') as request_get:
+            response = self._post(include_font=False, font_mode='google',
+                                  google_family='https://example.com/font')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('family name', response.get_json()['error'])
+        request_get.assert_not_called()
 
     def test_uploaded_font_also_reaches_a_multi_tool_program(self):
         job = {
@@ -176,6 +251,30 @@ class UploadedFontRouteTest(unittest.TestCase):
         self.assertLess(gcode.index('ENGRAVE PART NAME'),
                         gcode.index('PERIMETER WITH TABS'))
 
+    def test_google_font_also_reaches_a_multi_tool_program(self):
+        frc_cam_gui_app._GOOGLE_FONT_CACHE.clear()
+        frc_cam_gui_app._GOOGLE_FONT_CACHE['roboto'] = (time.time(), self.font)
+        job = {
+            'material': 'plywood', 'thickness': 0.25, 'tab_spacing': 6.0,
+            'name': 'google-multitool', 'engrave': True,
+            'engrave_font': 'google', 'engrave_google_family': 'Roboto',
+            'tools': [{'slot': 1, 'name': 'engraver', 'diameter': 0.0625,
+                       'flutes': 1, 'type': 'endmill'}],
+            'parts': [{
+                'file_index': 0, 'name': 'plate', 'place_x': 0, 'place_y': 0,
+                'rotation': 0, 'mirror': False, 'engrave_text': 'Hi',
+                'engrave_height': 0.5, 'engrave_depth': 0.01,
+                'engrave_anchor_x': 2, 'engrave_anchor_y': 2,
+                'operations': [{'op_type': 'perimeter', 'tool_slot': 1}],
+            }],
+        }
+        response = self.client.post('/process-multitool', data={
+            'job': json.dumps(job), 'timestamp': '2026-09-01 12:00:00',
+            'file_0': (io.BytesIO(self.dxf), 'plate.dxf'),
+        }, content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertIn('(Font: Penguin Test Block)', response.get_json()['gcode'])
+
 
 class SavedTextEngravingTest(unittest.TestCase):
     def test_text_size_and_font_round_trip_with_the_part(self):
@@ -198,6 +297,25 @@ class SavedTextEngravingTest(unittest.TestCase):
             self.assertEqual(loaded['parts'][0]['engrave_height_text'], '1/2"')
             self.assertEqual(loaded['engrave_font_name'], 'chosen.ttf')
             self.assertEqual(font, base64.b64decode(loaded['engrave_font_base64']))
+
+    def test_google_font_family_round_trips_without_bundling_a_font_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = os.path.join(root, 'PenguinCAM-config.yaml')
+            part = {
+                'name': 'plaque', 'number': '', 'dxf_bytes': _square_dxf_bytes(),
+                'place_x': 0, 'place_y': 0, 'center_x': 2, 'center_y': 2,
+                'label_x': 2, 'label_y': 2, 'rotation': 0, 'mirror': False,
+                'engrave_text': 'Hi', 'engrave_height': 0.5,
+                'engrave_height_text': '1/2"', 'ops': None,
+            }
+            job_id, _path = job_library.save_job(
+                config, 'Google plaque',
+                {'engrave': True, 'engrave_font': 'google',
+                 'engrave_google_family': 'Oswald'}, [part])
+            loaded = job_library.load_job(config, job_id)
+            self.assertEqual(loaded['engrave_font'], 'google')
+            self.assertEqual(loaded['engrave_google_family'], 'Oswald')
+            self.assertNotIn('engrave_font_base64', loaded)
 
 
 if __name__ == '__main__':

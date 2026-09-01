@@ -150,8 +150,9 @@
 
   api.enabled = function () {
     // 2.5D drives depth from the CAD layers and tubing runs its own fixed program, so
-    // the operations editor only applies to flat 2D work for now.
-    return !!ctx && !!ctx.state.multitool && ctx.state.mode === '2d';
+    // the operations editor only applies to flat 2D work for now. Flat work always uses
+    // this path; one cutter is represented by a one-tool operation plan.
+    return !!ctx && ctx.state.mode === '2d';
   };
 
   /* -------------------------------------------------------------- surveying */
@@ -996,7 +997,7 @@
    * tool table because the diameter no longer matched.
    *
    * Anything the user authored by hand (no _deburr flag) is left alone. */
-  api.applyDeburr = function (chamfer) {
+  api.applyDeburr = function (chamfer, silent) {
     if (!api.enabled()) return;
     var vbit = tools().filter(function (t) { return t._deburr; })[0]
       || tools().filter(function (t) {
@@ -1032,8 +1033,10 @@
                  depth: null, scope: { targets: targets.slice(), width: chamfer.width },
                  _deburr: true });
     });
-    api.render();
-    touch();
+    if (!silent) {
+      api.render();
+      touch();
+    }
   };
 
   /** Undo of applyDeburr: removes only what it added (flagged _deburr), so chamfer
@@ -1075,6 +1078,9 @@
     if (ctx.state.engrave) {
       job.engrave = true;
       job.engrave_font = ctx.state.engraveFontMode || 'single_line';
+      if (job.engrave_font === 'google') {
+        job.engrave_google_family = ctx.state.engraveGoogleFamily || 'Roboto';
+      }
       if (job.engrave_font === 'uploaded' && ctx.state.engraveFontFile) {
         fd.append('engrave_font_file', ctx.state.engraveFontFile,
                   ctx.state.engraveFontFile.name);
