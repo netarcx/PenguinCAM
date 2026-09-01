@@ -809,7 +809,8 @@ class FRCPostProcessor:
         machine_key = getattr(self, 'machine_preset_id', None)
         if material_key and machine_key in feeds_speeds.MACHINES:
             limit_in = feeds_speeds.max_depth_for_power(
-                machine_key, material_key, diameter_in, self.feed_rate * to_inch)
+                machine_key, material_key, diameter_in, self.feed_rate * to_inch,
+                rpm=self.spindle_speed)
             if limit_in is not None:
                 limit = limit_in / to_inch   # back to native units
                 if limit < self.max_slotting_depth - 1e-9:

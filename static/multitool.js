@@ -100,19 +100,26 @@
 
   function defaultTools() {
     var lib = library();
-    // Seed with the team's configured default cutter, so a job that turns multi-tool on
-    // but only ever needs one tool works without opening the tool table at all.
-    var dia = parseFloat(ctx.cfg && ctx.cfg.defaultTool) || 0.157;
+    // Seed with the cutter the operator already entered on the setup step, so the tool
+    // table starts as exactly what the GUI has been showing. Falling back to the team's
+    // configured default silently replaced a typed 2-flute with a 1-flute preset, and
+    // the program that came out was computed for a cutter that was not in the collet.
+    var stateDia = parseFloat(ctx.state.tool_diameter);
+    var dia = stateDia || parseFloat(ctx.cfg && ctx.cfg.defaultTool) || 0.157;
     var match = Object.keys(lib).filter(function (k) {
       return Math.abs((lib[k].diameter || 0) - dia) < 0.0005
              && (lib[k].type || 'endmill') === 'endmill';
     })[0];
     // Show the team's own text ("4mm"), not String(0.15748031496062992). CFG keeps
     // defaultToolText for exactly this and it was going unused.
-    var text = (ctx.cfg && ctx.cfg.defaultToolText) || (Math.round(dia * 10000) / 10000) + '"';
+    var text = stateDia
+      ? (ctx.state.tool_diameter_text || (Math.round(dia * 10000) / 10000) + '"')
+      : ((ctx.cfg && ctx.cfg.defaultToolText) || (Math.round(dia * 10000) / 10000) + '"');
+    var flutes = stateDia ? (ctx.state.tool_flutes || 1)
+                          : (match ? (lib[match].flutes || 1) : 1);
     return [{ slot: 1, name: match ? lib[match].name : 'End mill',
               diameter: dia, diameter_text: text,
-              flutes: match ? (lib[match].flutes || 1) : 1,
+              flutes: flutes,
               type: 'endmill', included_angle: 90 }];
   }
 
@@ -202,9 +209,23 @@
     },
   };
 
-  /** A preset tool, taking the team's saved bit of that size/type when there is one
-   *  (its name and flute count are what the operator actually has in the crib). */
+  /** A preset tool. The operator's own entry of that size/type in the CURRENT tool
+   *  table outranks everything - a standard setup must never swap the cutter the GUI
+   *  shows for one with a different flute count, because the program would then be
+   *  computed for a tool that is not in the collet (a physical 2-flute run on a
+   *  1-flute program rubs, welds, and snaps on the perimeter entry ramp). After the
+   *  table, the team's saved bit of that size; the generic fallback comes last. */
   function presetTool(slot, kind, diameter, fallbackName, fallbackFlutes) {
+    var own = (ctx.state.tools || []).filter(function (t) {
+      return Math.abs((t.diameter || 0) - diameter) < 5e-4
+             && (t.type || 'endmill') === kind;
+    })[0];
+    if (own) {
+      return { slot: slot, name: own.name || fallbackName, diameter: diameter,
+               diameter_text: own.diameter_text || diameter.toFixed(4),
+               flutes: own.flutes || fallbackFlutes,
+               type: kind, included_angle: own.included_angle || 90 };
+    }
     var lib = library();
     var key = Object.keys(lib).filter(function (k) {
       return Math.abs((lib[k].diameter || 0) - diameter) < 5e-4

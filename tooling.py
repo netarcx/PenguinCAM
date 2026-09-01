@@ -804,7 +804,8 @@ def _power_limited_depth(tool: Tool, feeds: Dict[str, Any]) -> Optional[float]:
     if not machine or not material or tool.type == 'drill':
         return None
     return feeds_speeds.max_depth_for_power(machine, material, tool.diameter,
-                                            float(feeds['feed_xy']))
+                                            float(feeds['feed_xy']),
+                                            rpm=feeds.get('rpm'))
 
 
 def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
@@ -990,7 +991,7 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
     # Use the feed the program will ACTUALLY command. An explicit tool override is
     # applied to pp.feed_rate just above; calculating power from feeds['feed_xy'] here
     # let a 100 IPM override keep the depth limit computed for 30 IPM.
-    power_inputs = dict(feeds, feed_xy=pp.feed_rate)
+    power_inputs = dict(feeds, feed_xy=pp.feed_rate, rpm=pp.spindle_speed)
     power_limit = _power_limited_depth(tool, power_inputs)
     if power_limit and power_limit < stepdown:
         pp.max_slotting_depth = power_limit
@@ -1093,14 +1094,21 @@ def pocket_key(points: Sequence[Tuple[float, float]]) -> Tuple[float, float, flo
 
 # ------------------------------------------------------------------------------ surveys
 
-def build_part_postprocessor(job: MultiToolJob, part: PartOps, tool_diameter: float) -> FRCPostProcessor:
+def build_part_postprocessor(job: MultiToolJob, part: PartOps, tool_diameter: float,
+                             tool_flutes: int = 1) -> FRCPostProcessor:
     """Load and place one part with a given tool diameter, up to (and including) perimeter
     and pocket identification. Stops short of `classify_holes` so the caller can first
     narrow `pp.circles` to the operation's scope - a hole outside this operation's scope
     must not be rejected as "too small for the tool" when a later operation with a smaller
-    cutter is the one that will drill it."""
+    cutter is the one that will drill it.
+
+    Pass the tool's real flute count: the material preset's own scaling runs during
+    `apply_material_preset`, and with the default single-flute assumption it wrote header
+    notes for a cutter that was not in the collet ("reduced to 12000 RPM for 1 flutes" on
+    a program that then correctly commanded S6000 for the actual 2-flute)."""
     pp = FRCPostProcessor(material_thickness=job.thickness, tool_diameter=tool_diameter,
-                          units=job.units, config=job.config, z_datum=job.z_datum)
+                          units=job.units, config=job.config, z_datum=job.z_datum,
+                          tool_flutes=tool_flutes)
     if job.dry_run_lift:
         pp.set_dry_run(job.dry_run_lift)
     pp.apply_material_preset(job.material, job.machine_id)
@@ -1555,7 +1563,23 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
                                          feeds_machine=job.feeds_machine,
                                          config=job.config)
 
-    pp = build_part_postprocessor(job, part, tool.diameter)
+    # Tool-fit refusals are decided BEFORE the post-processor is built: with the real
+    # flute count now passed in, apply_material_preset itself refuses a >2-flute cutter
+    # in aluminum, and the operator deserves this friendlier per-operation message
+    # instead of a raw exception.
+    mismatch = _check_tool_suits_operation(op, tool)
+    material_key = resolve_feeds_material(job.material, job.config, job.machine_id)
+    flute_cap = feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max')
+    if (not mismatch and tool.type == 'endmill' and flute_cap
+            and tool.flutes > flute_cap):
+        mismatch = (
+            f"{op.label} uses {tool.label}, a {tool.flutes}-flute cutter in "
+            f"{feeds_speeds.MATERIALS[material_key]['name']}. Use a 1- or 2-flute "
+            f"aluminum end mill on this router so chips can evacuate; packed chips "
+            f"weld to the cutter and snap it.")
+
+    pp = build_part_postprocessor(job, part, tool.diameter,
+                                  tool_flutes=(1 if mismatch else tool.flutes))
     anchor_warning = _anchor_metal_feed(pp, tool, feeds)
     if anchor_warning:
         warnings.append(anchor_warning)
@@ -1592,16 +1616,6 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     deferred: Optional[Dict[str, Any]] = None
     pp._pending_clearance_rapid = True
 
-    mismatch = _check_tool_suits_operation(op, tool)
-    material_key = resolve_feeds_material(job.material, job.config, job.machine_id)
-    flute_cap = feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max')
-    if (not mismatch and tool.type == 'endmill' and flute_cap
-            and tool.flutes > flute_cap):
-        mismatch = (
-            f"{op.label} uses {tool.label}, a {tool.flutes}-flute cutter in "
-            f"{feeds_speeds.MATERIALS[material_key]['name']}. Use a 1- or 2-flute "
-            f"aluminum end mill on this router so chips can evacuate; packed chips "
-            f"weld to the cutter and snap it.")
     if not mismatch and feeds_speeds.is_aluminum_material(material_key):
         machine_key = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
         machine = feeds_speeds.MACHINES[machine_key]
@@ -2259,7 +2273,8 @@ def _check_tool_reach(pp: FRCPostProcessor, tool: Tool) -> Optional[str]:
             f"the tool list so PenguinCAM can check for you.")
 
 
-def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
+def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float,
+                   tool_flutes: int = 1):
     """The part's name, cut with the tool that is already in the spindle.
 
     Built on its OWN post-processor rather than the operation's: an operation narrows
@@ -2267,7 +2282,7 @@ def _engrave_lines(job: MultiToolJob, part: PartOps, tool_diameter: float):
     entirely), and the engraving has to see every one of them to keep the label out of
     a bore that gets machined away later.
     """
-    pp = build_part_postprocessor(job, part, tool_diameter)
+    pp = build_part_postprocessor(job, part, tool_diameter, tool_flutes=tool_flutes)
     pp.classify_holes()
     pp.engrave = {
         'text': part.engrave_text or part.name,
@@ -2363,7 +2378,8 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
         # plunge only", then fed it sideways at 75 IPM to draw the part name.
         if job.engrave and part_index not in engraved and body['tool'].type != 'drill':
             engraved.add(part_index)
-            lines, warnings = _engrave_lines(job, part, body['tool'].diameter)
+            lines, warnings = _engrave_lines(job, part, body['tool'].diameter,
+                                             tool_flutes=body['tool'].flutes)
             body['lines'] = lines + body['lines']
             body['warnings'] = list(body['warnings']) + warnings
         bodies.append(body)

@@ -94,13 +94,28 @@ MACHINES = {
 }
 
 
-def usable_horsepower(machine):
-    """Horsepower actually available at the cutter, or None if the spindle is unrated."""
-    kw = _resolve(machine, MACHINES, 'machine').get('spindle_kw')
-    return kw * KW_TO_HP * USABLE_POWER_FRACTION if kw else None
+def usable_horsepower(machine, rpm=None):
+    """Horsepower actually available at the cutter, or None if the spindle is unrated.
+
+    A VFD router spindle is constant-TORQUE below its rated speed, so its power falls
+    off linearly with RPM: at 6000 of a rated 24000 only a quarter of the plate rating
+    exists - exactly the regime the multi-flute chipload protection drives the spindle
+    into. Pass the commanded `rpm` to get the power at that speed; omit it for the
+    full-speed rating (the machine's best case).
+    """
+    m = _resolve(machine, MACHINES, 'machine')
+    kw = m.get('spindle_kw')
+    if not kw:
+        return None
+    hp = kw * KW_TO_HP * USABLE_POWER_FRACTION
+    rpm_max = m.get('rpm_max')
+    if rpm and rpm_max:
+        hp *= min(1.0, rpm / rpm_max)
+    return hp
 
 
-def max_depth_for_power(machine, material, diameter, feed, radial_engagement=None):
+def max_depth_for_power(machine, material, diameter, feed, radial_engagement=None,
+                        rpm=None):
     """Deepest axial cut this spindle can drive, in inches, or None if unlimited.
 
     Cutting power is roughly ``MRR x unit_power``, and MRR is ``axial x radial x feed`` -
@@ -112,9 +127,14 @@ def max_depth_for_power(machine, material, diameter, feed, radial_engagement=Non
     `radial_engagement` defaults to the full diameter - a profile cut is a slot, with the
     part on one side and the offcut on the other, and that is the worst case the same
     depth setting has to survive.
+
+    Pass the commanded `rpm` so the limit is computed from the power the spindle has AT
+    that speed, not its full-speed plate rating. A 2-flute in aluminum runs at the 6000
+    RPM floor, where a 24000-rated spindle has a quarter of its power - a depth limit
+    computed from full power lets it bog, and a bogged router snaps the tool at the shank.
     """
     unit_power = _resolve(material, MATERIALS, 'material').get('unit_power_hp')
-    available = usable_horsepower(machine)
+    available = usable_horsepower(machine, rpm=rpm)
     if not unit_power or not available or feed <= 0:
         return None
     radial = radial_engagement or diameter

@@ -524,6 +524,12 @@ Three properties worth keeping true:
   team's aluminium numbers were tuned against, the guard would be wrong.
 - **It tracks the machine.** A `generic_light_router` (1.25 kW) gets 0.070" where the Omio
   gets 0.122". Machines with no `spindle_kw` are simply unlimited by it.
+- **It tracks the commanded RPM.** A VFD router spindle is constant-torque below its
+  rated speed, so its power falls linearly with RPM: at the 6000 RPM floor — exactly
+  where the multi-flute chipload protection sends a 2-flute in aluminium — a
+  24000-rated spindle has a quarter of its plate rating. `max_depth_for_power` takes
+  the commanded `rpm` and scales the available power down to match, so a depth that is
+  fine at 18000 RPM cannot bog (and snap) a cutter running at the floor.
 
 The operator is told when it binds, because the job takes longer than they might expect:
 *"depth of cut reduced … so a full-width pass stays inside what the spindle can drive. A
