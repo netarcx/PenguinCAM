@@ -802,6 +802,7 @@ class FRCPostProcessor:
                            if self.machine_preset_id in feeds_speeds.MACHINES
                            else 'omio_x8')
             spindle_floor = feeds_speeds.MACHINES[machine_key]['rpm_min']
+            smooth_floor = feeds_speeds.milling_rpm_floor(machine_key)
             base_rpm_ceiling = ((self.feed_rate * to_inch)
                                 / (self.tool_flutes * minimum))
             # Aluminum coordinates against the CORNER feed as well as the straight one,
@@ -815,8 +816,17 @@ class FRCPostProcessor:
                     f'{diameter_in:.3f} in {self.tool_flutes}-flute cutter cannot make '
                     f'the minimum {material_name} chip at the {spindle_floor} RPM '
                     f'spindle floor and this feed. Use a larger or 1-flute cutter.')
-            protected_rpm = max(spindle_floor, min(self.spindle_speed,
-                                                   math.floor(rpm_ceiling)))
+            target_rpm = min(self.spindle_speed, math.floor(rpm_ceiling))
+            # The corner-coordinated ceiling can land in the spindle's growling
+            # low-torque band (a 2F 1/4 in was commanded S6000 and "sounded awful").
+            # When the STRAIGHT feed still makes minimum chip in the smooth band,
+            # run there instead - the corner and ramp feed floors below rise to
+            # compensate, so no move rubs. When even the straight feed cannot
+            # (a small multi-flute cutter), the chipload floor wins and the old
+            # low-RPM behavior stands: rubbing snaps tools, a growl does not.
+            if target_rpm < smooth_floor <= math.floor(base_rpm_ceiling):
+                target_rpm = smooth_floor
+            protected_rpm = max(spindle_floor, target_rpm)
             if protected_rpm < self.spindle_speed:
                 old_rpm = self.spindle_speed
                 self.spindle_speed = int(protected_rpm)
@@ -824,6 +834,10 @@ class FRCPostProcessor:
                 notes.append(f"spindle reduced from {old_rpm} to {self.spindle_speed} RPM "
                              f"for {self.tool_flutes} flutes so {scope} "
                              f"chipload stays above {minimum:.4f} in/tooth")
+                if protected_rpm < smooth_floor:
+                    notes.append(
+                        f"{self.spindle_speed} RPM is below this spindle's smooth "
+                        f"{smooth_floor} RPM band; a 1-flute cutter runs healthier here")
 
         # Pocket corners deliberately run below base_feed. Do not let that force
         # protection cross into rubbing: the lowest emitted F word must still make the
@@ -985,6 +999,18 @@ class FRCPostProcessor:
                            'plunge_rate': 'plunge_rate'}[attr]
             actual_ipm = getattr(self, attr) * to_inch
             ceiling = feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX[ceiling_key] * factor
+            if attr == 'ramp_feed_rate':
+                # The envelope's ramp number is a ONE-FLUTE tested value. A
+                # multi-flute cutter's entry must stay at or above
+                # rpm x flutes x chipload_min or it rubs and welds on the way in,
+                # so the rubbing floor overrides the envelope here - per tooth the
+                # entry bite is no bigger than the tested one. The straight cutting
+                # feed keeps its own ceiling, which also bounds the ramp.
+                minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
+                chip_floor = self.spindle_speed * self.tool_flutes * minimum
+                ceiling = min(
+                    max(ceiling, chip_floor),
+                    feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['feed_rate'] * factor)
             if actual_ipm > ceiling + 1e-9:
                 raise ValueError(
                     f'Aluminum {label} {actual_ipm:.1f} IPM exceeds the '
@@ -3013,6 +3039,22 @@ class FRCPostProcessor:
             '( Clean collet; shortest practical stickout; verify low runout at cutter )',
             '( Stock and spoilboard rigidly clamped; toolpath and clamps clear )',
         ]
+        # In aluminum a SLOWER feed rubs: below the minimum chipload the cutter heats,
+        # the chips weld on, and the seized tool snaps. Operators reach for the feed
+        # override when the cut sounds bad - tell them where the real floor is, in the
+        # override percentage they are actually looking at.
+        minimum = (feeds_speeds.MATERIALS.get(material_key) or {}).get('chipload_min')
+        if minimum and self.spindle_speed and self.feed_rate:
+            to_inch = (1.0 / 25.4) if self.units == 'mm' else 1.0
+            chipload = ((self.feed_rate * to_inch)
+                        / (self.spindle_speed * self.tool_flutes))
+            if chipload > 0:
+                floor_pct = min(100, int(math.ceil(minimum / chipload * 100)))
+                lines.append(
+                    f'( Feed override floor: {floor_pct} percent. Slower RUBS and '
+                    f'snaps the tool; )')
+                lines.append(
+                    '( if the cut sounds bad, stop and reduce depth per pass instead )')
         coolant = (self.machine_coolant or '').strip().lower()
         if coolant in ('air', 'mist', 'flood'):
             lines.append(

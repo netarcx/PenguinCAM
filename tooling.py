@@ -859,9 +859,19 @@ def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
     if minimum and not tool.spindle_speed:
         machine = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
         spindle_floor = feeds_speeds.MACHINES[machine]['rpm_min']
+        smooth_floor = feeds_speeds.milling_rpm_floor(machine)
         corner_floor = getattr(pp, 'corner_min_feed_scale', 1.0)
         rpm_ceiling = feeds['feed_xy'] * corner_floor / (tool.flutes * minimum)
-        protected_rpm = max(spindle_floor, min(feeds['rpm'], math.floor(rpm_ceiling)))
+        straight_ceiling = feeds['feed_xy'] / (tool.flutes * minimum)
+        target_rpm = min(feeds['rpm'], math.floor(rpm_ceiling))
+        # Keep milling out of the spindle's growling low-torque band whenever the
+        # straight feed still makes minimum chip there; the corner and ramp floors
+        # in apply_tool_feeds rise to compensate. A small multi-flute cutter whose
+        # straight feed cannot keeps the old low-RPM protection - rubbing snaps
+        # tools, a growl does not. Mirrors scale_feeds_to_tool exactly.
+        if target_rpm < smooth_floor <= math.floor(straight_ceiling):
+            target_rpm = smooth_floor
+        protected_rpm = max(spindle_floor, target_rpm)
         if protected_rpm < feeds['rpm']:
             feeds['rpm'] = int(protected_rpm)
             rpm_note = (f"spindle reduced to {feeds['rpm']} RPM so {tool.flutes} flutes "
@@ -912,11 +922,18 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
                 feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] * diameter_factor)
         if tool.type == 'endmill' and tool.spindle_speed is None:
             minimum = feeds_speeds.MATERIALS[material_key]['chipload_min']
-            machine = feeds_speeds.MACHINES[feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE]
+            machine_key = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
             rpm_ceiling = (feeds['feed_xy'] * pp.corner_min_feed_scale
                            / (tool.flutes * minimum))
-            feeds['rpm'] = int(max(machine['rpm_min'],
-                                   min(feeds['rpm'], math.floor(rpm_ceiling))))
+            straight_ceiling = feeds['feed_xy'] / (tool.flutes * minimum)
+            target_rpm = min(feeds['rpm'], math.floor(rpm_ceiling))
+            # Same smooth-band preference as _anchor_metal_feed: bump only when the
+            # straight feed still makes minimum chip at the smooth floor.
+            smooth_floor = feeds_speeds.milling_rpm_floor(machine_key)
+            if target_rpm < smooth_floor <= math.floor(straight_ceiling):
+                target_rpm = smooth_floor
+            feeds['rpm'] = int(max(
+                feeds_speeds.MACHINES[machine_key]['rpm_min'], target_rpm))
 
     # Per-tool overrides replace values that feeds_speeds.calculate_feeds had already
     # clamped to the machine, so an override slipped straight past every machine limit:

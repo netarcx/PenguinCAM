@@ -436,6 +436,23 @@ Engagement per op type: `holes` → `slot` (a helical bore engages all round), `
 `pocket` (partial engagement, full reference chipload), `perimeter` and `chamfer` →
 `profile`.
 
+### The spindle stays out of its growling band when it can
+
+The multi-flute chipload protection lowers RPM so every tooth keeps a real chip at the
+tested feed. Left unchecked it commanded a 2-flute 1/4" S6000 — the Omio's VFD floor,
+where an air-cooled constant-torque spindle has a quarter of its power and sounds
+awful — and an operator's instinctive feed-override pull from there lands in the
+rubbing regime. Each machine now carries an `rpm_smooth_min` (`milling_rpm_floor`):
+when the straight feed still makes minimum chip at that floor, milling runs there and
+the corner and ramp feed floors rise to keep the slower moves honest (2F 1/4":
+S9000, corners 0.90 × feed, ramp 27 IPM). When even the straight feed cannot — a
+small multi-flute cutter — the chipload floor wins, the old low-RPM protection
+stands, and a note steers the operator to a 1-flute cutter: rubbing snaps tools, a
+growl does not. Drilling keeps bare `rpm_min`; a twist drill wants low RPM. The
+aluminum preflight also states the feed-override floor as a percentage, because in
+metal SLOWER rubs — the right response to a bad-sounding cut is less depth, not less
+feed.
+
 ### Flutes multiply feed only while chips can escape
 
 The chipload model feeds `RPM x flutes x chipload` — each flute takes a healthy chip, so

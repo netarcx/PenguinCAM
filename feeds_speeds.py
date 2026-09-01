@@ -69,29 +69,46 @@ ALUMINUM_ROUTER_SAFETY_MAX = {
 USABLE_POWER_FRACTION = 0.70
 KW_TO_HP = 1.341
 
+# rpm_min is the VFD's absolute floor - the spindle will turn there, and twist
+# DRILLING legitimately wants it. rpm_smooth_min is the floor for sustained MILLING:
+# an air-cooled VFD spindle is constant-torque, so below ~40% of rated speed it has
+# little torque, its fan barely moves air, and it growls audibly. The 2-flute
+# aluminum chipload protection used to push milling RPM all the way to rpm_min
+# (S6000 on the Omio) and the machine "sounded awful" - the fix is to hold milling
+# at this floor and let the corner/ramp feed floors keep the chipload honest.
 MACHINES = {
     'omio_x8': {
         'name': 'Omio X8-2200',
-        'rpm_min': 6000, 'rpm_max': 24000,
+        'rpm_min': 6000, 'rpm_max': 24000, 'rpm_smooth_min': 9000,
         'xy_feed_max': 150.0, 'z_feed_max': 60.0,
         'rigidity': 'medium',
         'spindle_kw': 2.2,
     },
     'avid_pro2424': {
         'name': 'Avid CNC Pro2424',
-        'rpm_min': 6000, 'rpm_max': 24000,
+        'rpm_min': 6000, 'rpm_max': 24000, 'rpm_smooth_min': 9000,
         'xy_feed_max': 400.0, 'z_feed_max': 100.0,
         'rigidity': 'heavy',
         'spindle_kw': 2.2,
     },
     'generic_light_router': {
         'name': 'Generic light router',
-        'rpm_min': 8000, 'rpm_max': 30000,
+        'rpm_min': 8000, 'rpm_max': 30000, 'rpm_smooth_min': 10000,
         'xy_feed_max': 100.0, 'z_feed_max': 40.0,
         'rigidity': 'light',
         'spindle_kw': 1.25,
     },
 }
+
+
+def milling_rpm_floor(machine):
+    """Lowest RPM sustained milling should command on this machine.
+
+    max(rpm_min, rpm_smooth_min): never below the VFD floor, and not in the
+    growling low-torque band either. Drilling keeps using bare rpm_min - a twist
+    drill wants low RPM and a peck cycle is not a sustained cut."""
+    m = _resolve(machine, MACHINES, 'machine')
+    return max(m['rpm_min'], m.get('rpm_smooth_min') or m['rpm_min'])
 
 
 def usable_horsepower(machine, rpm=None):

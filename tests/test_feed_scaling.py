@@ -120,6 +120,33 @@ class TestScaleFeedsToTool(unittest.TestCase):
         self.assertGreaterEqual(corner_feed / (pp.spindle_speed * 2),
                                 feeds_speeds.MATERIALS['aluminum_6061']['chipload_min'])
 
+    def test_two_flute_quarter_inch_runs_in_the_smooth_spindle_band(self):
+        """A 2F 1/4 in used to be commanded S6000 - the Omio's VFD floor, where the
+        spindle growls with a quarter of its torque, and the operator's instinctive
+        50% feed override then pushed every tooth into the rubbing regime. The
+        straight feed makes minimum chip at the smooth floor, so milling runs there
+        and the corner/ramp floors rise to keep the slow moves honest."""
+        pp, notes = _pp(0.25, flutes=2)
+        self.assertEqual(pp.spindle_speed, feeds_speeds.milling_rpm_floor('omio_x8'))
+        minimum = feeds_speeds.MATERIALS['aluminum_6061']['chipload_min']
+        self.assertGreaterEqual(pp.feed_rate / (pp.spindle_speed * 2), minimum)
+        corner_feed = pp.feed_rate * pp.corner_min_feed_scale
+        self.assertGreaterEqual(corner_feed / (pp.spindle_speed * 2), minimum - 1e-9)
+        self.assertGreaterEqual(pp.ramp_feed_rate / (pp.spindle_speed * 2),
+                                minimum - 1e-9)
+
+    def test_small_two_flute_keeps_chipload_over_spindle_comfort(self):
+        """A 1/8 in 2F cannot make minimum chip in the smooth band at its scaled
+        feed - there the chipload floor wins (rubbing snaps tools, a growl does
+        not) and the old low-RPM protection stands, with a note steering the
+        operator to a 1-flute cutter."""
+        pp, notes = _pp(0.125, flutes=2)
+        self.assertLess(pp.spindle_speed, feeds_speeds.milling_rpm_floor('omio_x8'))
+        minimum = feeds_speeds.MATERIALS['aluminum_6061']['chipload_min']
+        self.assertGreaterEqual(pp.feed_rate / (pp.spindle_speed * 2), minimum)
+        self.assertTrue(any('1-flute cutter runs healthier' in n for n in notes),
+                        notes)
+
     def test_generated_config_uses_the_same_aluminum_envelope(self):
         import yaml
         generated = yaml.safe_load(CONFIG_TEMPLATE)['materials']['aluminum']
