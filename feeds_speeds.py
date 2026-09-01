@@ -53,7 +53,7 @@ FULL_SLOT_OPERATIONS = {'profile', 'slot'}
 # Treat these as a safety envelope, not tuning targets; a config may always ask for less.
 ALUMINUM_ROUTER_SAFETY_MAX = {
     'feed_rate': 30.0,
-    'ramp_feed_rate': 19.0,
+    'ramp_feed_rate': 12.0,
     'plunge_rate': 15.0,
     'ramp_angle': 4.0,
     'stepover_percentage': 0.25,
@@ -126,6 +126,12 @@ def max_depth_for_power(machine, material, diameter, feed, radial_engagement=Non
 
 # chipload_ref values are in/tooth for the REFERENCE_TOOL (4mm 1F). slotting_multiplier
 # derates them for full-width slotting; the product is what reproduces the presets.
+#
+# ramp_multiplier derated 2026-09-01 (0.64 -> 0.40, aluminum 0.30) together with every
+# preset that carries a ramp_feed_rate: a ramp is a full-width slot with AXIAL engagement
+# stacked on top - the worst cut in the program - and running it at nearly two-thirds of
+# the cutting feed was snapping real bits on perimeter entry. The ramp now sits near the
+# plunge rate rather than near the feed.
 MATERIALS = {
     'plywood': {
         'unit_power_hp': 0.05,
@@ -133,7 +139,7 @@ MATERIALS = {
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0020, 'chipload_max': 0.0090,
         'slotting_multiplier': 0.80,
-        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.46,
+        'ramp_multiplier': 0.40, 'plunge_multiplier': 0.46,
         'stepover_ratio': 0.65, 'slot_stepdown_ratio': 2.55,
         'max_flutes_soft': 2,
     },
@@ -143,7 +149,7 @@ MATERIALS = {
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0025, 'chipload_max': 0.0090,
         'slotting_multiplier': 0.80,
-        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.26,
+        'ramp_multiplier': 0.40, 'plunge_multiplier': 0.26,
         'stepover_ratio': 0.55, 'slot_stepdown_ratio': 1.59,
         'max_flutes_soft': 1,
     },
@@ -153,7 +159,7 @@ MATERIALS = {
         'preferred_rpm': 18000,
         'chipload_ref': 0.0060, 'chipload_min': 0.0030, 'chipload_max': 0.0110,
         'slotting_multiplier': 0.83,
-        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.30,
+        'ramp_multiplier': 0.40, 'plunge_multiplier': 0.30,
         'stepover_ratio': 0.55, 'slot_stepdown_ratio': 1.60,
         'max_flutes_soft': 1,
     },
@@ -163,7 +169,7 @@ MATERIALS = {
         'preferred_rpm': 18000,
         'chipload_ref': 0.0050, 'chipload_min': 0.0025, 'chipload_max': 0.0090,
         'slotting_multiplier': 0.80,
-        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.28,
+        'ramp_multiplier': 0.40, 'plunge_multiplier': 0.28,
         'stepover_ratio': 0.55, 'slot_stepdown_ratio': 1.59,
         'max_flutes_soft': 1,
     },
@@ -181,7 +187,7 @@ MATERIALS = {
         'preferred_rpm': 14000,
         'chipload_ref': 0.0032, 'chipload_min': 0.0015, 'chipload_max': 0.0050,
         'slotting_multiplier': 0.52,
-        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.28,
+        'ramp_multiplier': 0.30, 'plunge_multiplier': 0.28,
         'stepover_ratio': 0.25, 'slot_stepdown_ratio': 0.38,
         'max_flutes_soft': 3,
         # Feed never scales past this many flutes. Gummy 6061 in a slot cannot clear

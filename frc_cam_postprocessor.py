@@ -62,7 +62,11 @@ MATERIAL_PRESETS = {
     'plywood': {
         'name': 'Plywood',
         'feed_rate': 75.0,        # Cutting feed rate (IPM)
-        'ramp_feed_rate': 50.0,   # Ramp feed rate (IPM)
+        # Derated 2026-09-01 (50 -> 30, and in lockstep everywhere ramp numbers live):
+        # a ramp is the worst cut in the program - full-width slot PLUS axial
+        # engagement - and running it at two-thirds of the cutting feed was breaking
+        # real bits on perimeter entry. Keep ramp near the plunge rate, not the feed.
+        'ramp_feed_rate': 30.0,   # Ramp feed rate (IPM)
         'plunge_rate': 35.0,      # Plunge feed rate (IPM) for tab Z moves
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 20.0,       # Ramp angle in degrees
@@ -82,7 +86,7 @@ MATERIAL_PRESETS = {
         # FRC/Omio-class consensus (~0.4 x D per pass, light chipload, dry).
         'name': 'Aluminum',
         'feed_rate': 30.0,        # Cutting feed rate (IPM) - 0.0017 in/tooth at 18K 1F
-        'ramp_feed_rate': 19.0,   # Ramp feed rate (IPM)
+        'ramp_feed_rate': 12.0,   # Ramp feed rate (IPM) - derated 2026-09-01, see plywood note
         'plunge_rate': 15.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 4.0,        # Ramp angle in degrees
@@ -98,7 +102,7 @@ MATERIAL_PRESETS = {
     'polycarbonate': {
         'name': 'Polycarbonate',
         'feed_rate': 75.0,        # Same as plywood
-        'ramp_feed_rate': 50.0,   # Same as plywood
+        'ramp_feed_rate': 30.0,   # Same as plywood (derated 2026-09-01, see plywood note)
         'plunge_rate': 20.0,      # Same as plywood - matches Fusion 360
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 20.0,       # Same as plywood
@@ -394,7 +398,7 @@ class FRCPostProcessor:
         # Cutting parameters (defaults - can be overridden by material presets)
         self.spindle_speed = 18000  # RPM
         self.feed_rate = 75.0 if units == "inch" else 1905  # Cutting feed rate (IPM or mm/min)
-        self.ramp_feed_rate = 50.0 if units == "inch" else 1270  # Ramp feed rate (IPM or mm/min)
+        self.ramp_feed_rate = 30.0 if units == "inch" else 762  # Ramp feed rate (IPM or mm/min)
         self.plunge_rate = 35.0 if units == "inch" else 889  # Plunge feed rate (IPM or mm/min) for tab Z moves
         self.traverse_rate = 200.0 if units == "inch" else 5080  # Lateral moves above material (IPM or mm/min) - rapid moves
         self.approach_rate = 50.0 if units == "inch" else 1270  # Z approach to ramp start height (IPM or mm/min)
@@ -5722,7 +5726,11 @@ class FRCPostProcessor:
                     gcode.append(f"G1 Z{tab_z:.4f} F{self.plunge_rate}  "
                                  f"; Tab lift during ramp")
                     current_z = tab_z
-                gcode.append(f"G1 X{x:.4f} Y{y:.4f} F{self.feed_rate}")
+                # Still the entry pass: this horizontal stretch at tab height is a
+                # full-width slot through intact material, so it gets the ramp feed.
+                # Commanding self.feed_rate here spiked the entry cut to the finishing
+                # feed mid-ramp - the highest-load moment in the whole program.
+                gcode.append(f"G1 X{x:.4f} Y{y:.4f} F{self.ramp_feed_rate}")
             else:
                 z = z_at(target)
                 if abs(current_z - tab_z) < 1e-9 and current_z > z + 1e-9:

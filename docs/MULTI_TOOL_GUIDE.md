@@ -606,6 +606,22 @@ Every flat 2D job includes **Tools & Ops** between Parts and Layout. Fill in the
 table, then per part either use the suggested setup derived from the part's own features,
 or build the list by hand. A one-cutter job uses the same workflow with one tool row.
 
+**Standard setups** — the two buttons above the part list plan EVERY part with the
+team's standard recipe in one click, replacing the tool table to match:
+
+* **1/4" plate**: drill the 5/32" holes with the 5/32" bit and centre-mark every hole
+  too small to mill with that same bit; bore the remaining holes and clear small
+  pockets with a 1/8" end mill; large pockets and the profile go to a 1/4" end mill.
+* **1/8" plate**: the same drill-and-spot start, then everything else - holes, all
+  pockets, the profile - with the 1/8" end mill.
+
+Holes are split by drawn size (5/32 within the drill tolerance; anything at least the
+1/8" cutter is bored; smaller is spotted for the drill press). Pockets are split by the
+survey's `inscribed` measure - the largest circle that fits in the pocket, which is the
+largest tool that can machine it - so a slot the 1/4" cannot enter lands on the 1/8"
+automatically. Saved team bits of the matching size are used by name; the active deburr
+chamfer is re-applied after the plans are replaced.
+
 `static/multitool.js` owns that step. It calls `/part-features` to survey each part so
 scopes can be offered against real hole sizes, and posts to `/process-multitool`.
 

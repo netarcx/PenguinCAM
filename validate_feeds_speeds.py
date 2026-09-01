@@ -22,14 +22,14 @@ TOLERANCE = 0.10
 # Each entry: machine key -> material key -> preset values for the 4mm 1F tool.
 PRESETS = {
     'omio_x8': {
-        'plywood':       {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
-        'aluminum_6061': {'feed_rate': 30.0, 'ramp_feed_rate': 19.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 14000},
-        'polycarbonate': {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
+        'plywood':       {'feed_rate': 75.0, 'ramp_feed_rate': 30.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
+        'aluminum_6061': {'feed_rate': 30.0, 'ramp_feed_rate': 12.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 14000},
+        'polycarbonate': {'feed_rate': 75.0, 'ramp_feed_rate': 30.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
     },
     'avid_pro2424': {
-        'plywood':       {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
-        'aluminum_6061': {'feed_rate': 33.0, 'ramp_feed_rate': 21.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 14000},
-        'polycarbonate': {'feed_rate': 75.0, 'ramp_feed_rate': 50.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
+        'plywood':       {'feed_rate': 75.0, 'ramp_feed_rate': 30.0, 'stepover_percentage': 0.65, 'max_slotting_depth': 0.4,  'spindle_speed': 18000},
+        'aluminum_6061': {'feed_rate': 33.0, 'ramp_feed_rate': 13.0, 'stepover_percentage': 0.25, 'max_slotting_depth': 0.06, 'spindle_speed': 14000},
+        'polycarbonate': {'feed_rate': 75.0, 'ramp_feed_rate': 30.0, 'stepover_percentage': 0.55, 'max_slotting_depth': 0.25, 'spindle_speed': 18000},
     },
 }
 

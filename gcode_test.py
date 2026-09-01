@@ -86,22 +86,25 @@ def verify_feedrates(onshape_lines, fusion_lines, debug=False):
     fusion_plunge = min(fusion_feedrates) if fusion_feedrates else None
     fusion_cutting = max(fusion_feedrates) if fusion_feedrates else None
 
-    # Verify plunge feedrate is reasonable (we use 35 IPM for plywood, not Fusion's 20 IPM)
-    EXPECTED_PLUNGE_MM = 889  # 35 IPM in mm/min for plywood
+    # Verify the slowest commanded feed is the plywood RAMP rate. Since the 2026-09-01
+    # ramp derate (bits were breaking on perimeter entry) the ramp - a full-width slot
+    # with axial engagement stacked on top - runs BELOW the plunge rate (30 vs 35 IPM),
+    # so it, not the plunge, is the program's minimum feed.
+    EXPECTED_MIN_FEED_MM = 762  # 30 IPM ramp feed in mm/min for plywood
 
     if onshape_plunge is None:
-        print(f"\tPlunge Feedrate Match ---- {FAIL}")
+        print(f"\tSlowest Feedrate Match ---- {FAIL}")
         print(f"\t\tError: No feedrates found in generated G-code")
         all_passed = False
     else:
-        plunge_match = onshape_plunge == EXPECTED_PLUNGE_MM
-        print(f"\tPlunge Feedrate Match ---- {PASS if plunge_match else FAIL}")
+        plunge_match = onshape_plunge == EXPECTED_MIN_FEED_MM
+        print(f"\tSlowest Feedrate Match ---- {PASS if plunge_match else FAIL}")
         if not plunge_match:
-            print(f"\t\tOnshape plunge: {onshape_plunge/25.4:.2f}")
-            print(f"\t\tExpected plunge: {EXPECTED_PLUNGE_MM/25.4:.2f}")
+            print(f"\t\tOnshape slowest: {onshape_plunge/25.4:.2f}")
+            print(f"\t\tExpected slowest (ramp): {EXPECTED_MIN_FEED_MM/25.4:.2f}")
             all_passed = False
         else:
-            print(f"\t\tPlunge feedrate: {onshape_plunge/25.4:.2f}")
+            print(f"\t\tSlowest feedrate (ramp): {onshape_plunge/25.4:.2f}")
     
     # Compare cutting feedrates
     if onshape_cutting is None or fusion_cutting is None:

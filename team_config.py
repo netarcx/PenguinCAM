@@ -197,7 +197,7 @@ TEAM_6238_DEFAULTS = {
             'name': 'Plywood',
             'spindle_speed': 18000,
             'feed_rate': 75.0,
-            'ramp_feed_rate': 50.0,
+            'ramp_feed_rate': 30.0,   # derated 2026-09-01: ramp is slot + axial, run it near plunge not feed
             'plunge_rate': 35.0,
             'traverse_rate': 200.0,
             'approach_rate': 50.0,
@@ -217,7 +217,7 @@ TEAM_6238_DEFAULTS = {
             'name': 'Aluminum',
             'spindle_speed': 18000,
             'feed_rate': 30.0,
-            'ramp_feed_rate': 19.0,
+            'ramp_feed_rate': 12.0,   # derated 2026-09-01, see plywood note
             'plunge_rate': 15.0,
             'traverse_rate': 200.0,
             'approach_rate': 35.0,
@@ -235,7 +235,7 @@ TEAM_6238_DEFAULTS = {
             'name': 'Polycarbonate',
             'spindle_speed': 18000,
             'feed_rate': 75.0,
-            'ramp_feed_rate': 50.0,
+            'ramp_feed_rate': 30.0,   # derated 2026-09-01: ramp is slot + axial, run it near plunge not feed
             'plunge_rate': 20.0,
             'traverse_rate': 200.0,
             'approach_rate': 50.0,
@@ -1354,7 +1354,7 @@ materials:
     # Speeds and feeds
     spindle_speed: 18000            # RPM
     feed_rate: 75.0                 # Cutting feed rate (IPM)
-    ramp_feed_rate: 50.0            # Ramp feed rate (IPM)
+    ramp_feed_rate: 30.0            # Ramp feed rate (IPM)
     plunge_rate: 35.0               # Plunge feed rate for tab Z moves (IPM)
     traverse_rate: 200.0            # Lateral moves above material (IPM)
     approach_rate: 50.0             # Z approach to ramp start (IPM)
@@ -1379,7 +1379,7 @@ materials:
     # Speeds and feeds
     spindle_speed: 18000
     feed_rate: 30.0
-    ramp_feed_rate: 19.0
+    ramp_feed_rate: 12.0
     plunge_rate: 15.0               # Slower for aluminum
     traverse_rate: 200.0
     approach_rate: 35.0
@@ -1411,7 +1411,7 @@ materials:
     # Speeds and feeds
     spindle_speed: 18000
     feed_rate: 75.0
-    ramp_feed_rate: 50.0
+    ramp_feed_rate: 30.0
     plunge_rate: 20.0
     traverse_rate: 200.0
     approach_rate: 50.0

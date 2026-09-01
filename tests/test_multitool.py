@@ -242,6 +242,10 @@ class TestScopeSelection(unittest.TestCase):
         self.assertEqual(self.features['hole_sizes'], [0.196, 0.75])
         self.assertEqual(len(self.features['pockets']), 1)
         self.assertTrue(self.features['has_perimeter'])
+        # The 2.0 x 0.8 rectangular pocket admits a 0.8 in circle - `inscribed` is the
+        # largest tool that can machine the pocket, and the standard setups split
+        # pockets between the 1/8 and 1/4 end mills with it.
+        self.assertAlmostEqual(self.features['pockets'][0]['inscribed'], 0.8, delta=0.01)
 
     def test_diameter_range_splits_the_holes(self):
         small = tooling.selected_hole_keys(self.features, {'max_diameter': 0.4})

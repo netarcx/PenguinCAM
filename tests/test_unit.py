@@ -491,13 +491,21 @@ class TestCornerSlowdown(unittest.TestCase):
         return tri, g, feeds
 
     def test_sharp_pocket_slows_at_corners_full_speed_on_straights(self):
+        import re
         _, g, feeds = self._triangle_feeds()
         base = self.pp.feed_rate
         floor = round(base * self.pp.corner_min_feed_scale, 1)
         self.assertIn(base, feeds)                       # straights still cut at full feed
         self.assertIn(floor, feeds)                      # 60 deg corners cut at the floor feed
         self.assertIn('corner slowdown', g)
-        cut_feeds = [f for f in feeds if f <= base]      # ignore rapid/traverse (200)
+        # The floor is a CORNER-slowdown floor: entry moves (helical passes, ring ramps)
+        # legitimately run below it at the ramp feed, so only lap moves are held to it.
+        # (The old aluminum ramp feed of 19 IPM sat just above the 18 IPM floor, which
+        # is the only reason this passed without the exclusion.)
+        lap_feeds = [float(x) for line in g.splitlines()
+                     if 'Helical' not in line and 'Ramp' not in line and 'ramp' not in line
+                     for x in re.findall(r'F(\d+\.\d+)', line)]
+        cut_feeds = [f for f in lap_feeds if f <= base]  # ignore rapid/traverse (200)
         self.assertGreaterEqual(min(cut_feeds), floor - 1e-6)   # never below the floor
 
     def test_corner_floor_is_material_aware(self):

@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Polygon
+from shapely.ops import polylabel
 
 import drill_sizes
 import feeds_speeds
@@ -1118,6 +1119,23 @@ def _duplicate_feature_errors(kind: str, listed: List[Dict[str, Any]], describe)
             f"({what}). They would be cut twice. Remove the duplicate geometry in CAD."]
 
 
+def _inscribed_diameter(poly) -> float:
+    """Diameter of the largest circle that fits inside a pocket - which is also the
+    largest TOOL that can machine it: the pocket generator refuses when the inward
+    buffer by the tool radius comes up empty, and that happens exactly when the tool
+    diameter exceeds this number. Surveyed so scope pickers (the standard setups
+    especially) can split pockets between cutters without re-deriving the geometry."""
+    if poly.geom_type == 'MultiPolygon':
+        if poly.is_empty:
+            return 0.0
+        poly = max(poly.geoms, key=lambda g: g.area)
+    try:
+        centre = polylabel(poly, tolerance=1e-3)
+        return _round(2.0 * poly.exterior.distance(centre))
+    except Exception:
+        return 0.0
+
+
 def survey_part(job: MultiToolJob, part: PartOps) -> Dict[str, Any]:
     """Report the features of one part so operations can be scoped to them.
 
@@ -1161,6 +1179,7 @@ def survey_part(job: MultiToolJob, part: PartOps) -> Dict[str, Any]:
             poly = poly.buffer(0)
         pockets.append({'index': i, 'area': _round(poly.area),
                         'x': _round(poly.centroid.x), 'y': _round(poly.centroid.y),
+                        'inscribed': _inscribed_diameter(poly),
                         'key': pocket_key(points)})
 
     errors = list(pp.errors)

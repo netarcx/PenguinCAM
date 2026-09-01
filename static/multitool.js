@@ -172,6 +172,131 @@
     return op;
   }
 
+  /* ------------------------------------------------------- standard setups */
+  /* The team's standard operating setup, one click for every part at once.
+   * Both recipes start the same way: drill the 5/32" holes with the 5/32" bit and
+   * centre-mark every hole too small to mill with that same bit (a dimple for the
+   * drill press). The 1/4" recipe then bores the remaining holes and clears small
+   * pockets with a 1/8" end mill and gives large pockets and the profile to a 1/4";
+   * the 1/8" recipe does everything after the drill with the 1/8" end mill. */
+
+  var STD_DRILL_DIA = 0.15625;   // 5/32
+  var STD_DRILL_TOL = 0.010;     // DEFAULT_DRILL_SIZE_TOLERANCE on the server
+  var STD_MIN_MILLABLE = 0.123;  // 1/8 minus the server's hole_size_tolerance
+  var STD_POCKET_FIT = 0.005;    // clearance beyond the inscribed circle for a fit
+
+  var STANDARD_SETUPS = {
+    quarter: {
+      label: '1/4" plate',
+      title: 'Drill 5/32" holes and centre-mark smaller ones with the 5/32" bit, '
+             + 'bore bigger holes and small pockets with a 1/8" end mill, then cut '
+             + 'large pockets and the profile with a 1/4" end mill',
+      profile_mill: 0.25,
+    },
+    eighth: {
+      label: '1/8" plate',
+      title: 'Drill 5/32" holes and centre-mark smaller ones with the 5/32" bit, '
+             + 'then everything else - holes, all pockets, the profile - with a '
+             + '1/8" end mill',
+      profile_mill: null,   // the 1/8 hole mill is also the profile/pocket cutter
+    },
+  };
+
+  /** A preset tool, taking the team's saved bit of that size/type when there is one
+   *  (its name and flute count are what the operator actually has in the crib). */
+  function presetTool(slot, kind, diameter, fallbackName, fallbackFlutes) {
+    var lib = library();
+    var key = Object.keys(lib).filter(function (k) {
+      return Math.abs((lib[k].diameter || 0) - diameter) < 5e-4
+             && (lib[k].type || 'endmill') === kind;
+    })[0];
+    var hit = key ? lib[key] : null;
+    return { slot: slot, name: hit ? hit.name : fallbackName, diameter: diameter,
+             diameter_text: (hit && hit.diameter_text) || diameter.toFixed(4),
+             flutes: (hit && hit.flutes) || fallbackFlutes,
+             type: kind, included_angle: 90 };
+  }
+
+  function buildStandardOps(part, key, slots) {
+    var spec = STANDARD_SETUPS[key];
+    var f = part.features;
+    var drillIdx = [], boreIdx = [], spotIdx = [];
+    (f.holes || []).forEach(function (h) {
+      if (Math.abs(h.diameter - STD_DRILL_DIA) <= STD_DRILL_TOL) drillIdx.push(h.index);
+      else if (h.diameter >= STD_MIN_MILLABLE) boreIdx.push(h.index);
+      else spotIdx.push(h.index);
+    });
+    var smallP = [], largeP = [];
+    (f.pockets || []).forEach(function (p) {
+      // A pocket the 1/4" cannot enter (its inscribed circle is smaller than the
+      // tool) goes to the 1/8". One even the 1/8" cannot enter is still assigned to
+      // it: the per-operation "too small for tool" error names the pocket honestly,
+      // where leaving it unclaimed would just say "not cut by any operation".
+      if (spec.profile_mill
+          && (p.inscribed || 0) >= spec.profile_mill + STD_POCKET_FIT) largeP.push(p.index);
+      else smallP.push(p.index);
+    });
+
+    var ops = [];
+    if (drillIdx.length) {
+      ops.push({ op_type: 'holes', tool_slot: slots.drill, name: 'Drill 5/32',
+                 depth: null, scope: { indices: drillIdx } });
+    }
+    if (spotIdx.length) {
+      ops.push({ op_type: 'holes', tool_slot: slots.drill, name: 'Centre-mark small holes',
+                 depth: null, scope: { indices: spotIdx, purpose: 'spot' } });
+    }
+    if (boreIdx.length) {
+      ops.push({ op_type: 'holes', tool_slot: slots.holeMill, name: 'Bore holes',
+                 depth: null, scope: { indices: boreIdx } });
+    }
+    if (smallP.length) {
+      ops.push({ op_type: 'pockets', tool_slot: slots.holeMill,
+                 name: slots.profile === slots.holeMill ? 'Pockets' : 'Small pockets',
+                 depth: null, scope: { indices: smallP } });
+    }
+    if (largeP.length) {
+      ops.push({ op_type: 'pockets', tool_slot: slots.profile, name: 'Large pockets',
+                 depth: null, scope: { indices: largeP } });
+    }
+    if (f.has_perimeter) {
+      ops.push({ op_type: 'perimeter', tool_slot: slots.profile, name: 'Profile',
+                 depth: null, scope: {} });
+    }
+    return ops;
+  }
+
+  function applyStandardSetup(key) {
+    api.refreshFeatures().then(function () {
+      var spec = STANDARD_SETUPS[key];
+      var toolsNew = [presetTool(1, 'drill', STD_DRILL_DIA, '5/32 drill', 2),
+                      presetTool(2, 'endmill', 0.125, '1/8 in endmill', 1)];
+      var profileSlot = 2;
+      if (spec.profile_mill) {
+        toolsNew.push(presetTool(3, 'endmill', spec.profile_mill, '1/4 in endmill', 1));
+        profileSlot = 3;
+      }
+      var skipped = [];
+      ctx.state.parts.forEach(function (p) {
+        if (!p.features) { skipped.push(p.name); return; }
+        p.ops = buildStandardOps(p, key,
+                                 { drill: 1, holeMill: 2, profile: profileSlot });
+        p._hadOps = true;
+      });
+      ctx.state.tools = toolsNew;
+      pruneUnusedTools();
+      // Replacing every plan discarded the deburr chamfer the Setup checkbox added;
+      // put it back so a preset click cannot silently turn deburring off.
+      if (ctx.state.chamfer && ctx.state.chamfer.on) api.applyDeburr(ctx.state.chamfer, true);
+      api.render();
+      touch();
+      if (skipped.length) {
+        alert('Could not set up ' + skipped.join(', ') + ' - the part survey has not '
+              + 'answered yet. Press the preset again once the part list settles.');
+      }
+    });
+  }
+
   api.enabled = function () {
     // 2.5D drives depth from the CAD layers and tubing runs its own fixed program, so
     // the operations editor only applies to flat 2D work for now. Flat work always uses
@@ -889,6 +1014,20 @@
     if (!ctx.state.parts.length) {
       parts.appendChild(el('p', { class: 'hint', text: 'Add a part on the Parts step first.' }));
     } else {
+      // The team's standard operating setup: one click plans EVERY part (and sets the
+      // tool table to match), so a routine plate job never needs per-part planning.
+      var std = el('div', { class: 'mt-drills' }, [
+        el('span', { class: 'mt-dim', text: 'Standard setup, every part:' }),
+      ]);
+      Object.keys(STANDARD_SETUPS).forEach(function (key) {
+        std.appendChild(el('button', {
+          type: 'button', class: 'btn small primary',
+          text: STANDARD_SETUPS[key].label,
+          title: STANDARD_SETUPS[key].title,
+          onclick: function () { applyStandardSetup(key); },
+        }));
+      });
+      parts.appendChild(std);
       ctx.state.parts.forEach(function (p) { parts.appendChild(partBlock(p)); });
     }
 
