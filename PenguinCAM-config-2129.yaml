@@ -48,9 +48,14 @@ machines:
       # good jobs get refused; TOO LARGE AND A JOB THAT OVERRUNS THE TABLE IS
       # ACCEPTED. These are the X8's nominal figures - jog your machine to each
       # limit and enter the travel you actually have.
+      # Swapped 2026-09-01: on OUR X8 the long 800mm travel is the machine's Y
+      # axis and the 500mm travel is X - the nominal spec sheet has them the other
+      # way around, and a part longer than 500mm finally exposed it. These numbers
+      # must describe what Mach3's X and Y actually do on this machine; lay long
+      # parts along Y (rotate 90 in the wizard) so they fit the long travel.
       dimensions:
-        x_max: "800mm"
-        y_max: "500mm"
+        x_max: "500mm"
+        y_max: "800mm"
         z_max: "130mm"
 
       # ---------------------------------------------------------------- VERIFY 2
