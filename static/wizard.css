@@ -891,8 +891,18 @@ fieldset.field { border: 1px solid var(--line); border-radius: var(--r); padding
   font-size: 12.5px;
   pointer-events: none;
 }
-#wizard.grid #preview-result { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-#wizard.grid #viewer-container { flex: 1 1 auto; height: auto; min-height: 140px; }
+/* min-height must stay auto (= min-content), NOT 0: the panel is a fixed-height
+   grid cell, and a `min-height: 0` here let this block flex-shrink below its own
+   content. A shrunk flex item does not scroll - it silently lets its children
+   overflow, which painted the error text straight over the toolpath canvas and
+   the scrubber. At min-content the viewer still gives way down to its 140px
+   floor, and anything past that makes the PANEL scroll, as designed. */
+#wizard.grid #preview-result { display: flex; flex-direction: column; flex: 1 1 auto; }
+/* Basis 140px, not auto: with height:auto the canvas element's JS-set pixel size
+   becomes the container's natural height, so the viewer opened at backing-store
+   size and shoved the scrubber below the fold. From a 140px basis it grows to
+   whatever the cell can spare and never starts oversized. */
+#wizard.grid #viewer-container { flex: 1 1 140px; height: auto; min-height: 140px; }
 
 /* Shown until there is a program to look at; the generated result replaces
    it (general sibling, so no :has() needed for the common case). */

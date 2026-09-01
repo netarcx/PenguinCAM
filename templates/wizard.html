@@ -519,6 +519,11 @@
                     <h2>Preview &amp; Save</h2>
                     <div id="gen-status" role="status" aria-live="polite"></div>
                 </div>
+                <!-- Above the viewer on purpose: an error or warning here means the
+                     toolpath below is stale or suspect, so it must be readable without
+                     scrolling - tucked under the viewer it ended up below the fold
+                     (and, before the flex fix, printed over the canvas itself). -->
+                <div id="preview-errors" class="errors" aria-live="polite"></div>
                 <div id="preview-result" hidden>
                     <div id="preview-stats"></div>
                     <div id="resume-programs" hidden></div>
@@ -571,7 +576,6 @@
                     stopped, so a wrong zero, an oversized nest or a clamp in the way shows
                     up while nothing is at stake. The file is named _DRYRUN; untick to cut.
                 </p>
-                <div id="preview-errors" class="errors" aria-live="polite"></div>
                 <!-- Replaced by the result above as soon as there is a program. -->
                 <div class="panel-empty">
                     <strong>No program yet</strong>

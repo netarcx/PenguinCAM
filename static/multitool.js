@@ -738,6 +738,43 @@
         'No operations yet. "Set up this part" builds the whole plan from its geometry.' }));
     }
 
+    // Holes nothing in the job can make have exactly two fixes, and one of them is a
+    // single click: a spot operation that centre-marks them for the drill press. The
+    // other (load a drill that size) is the ordinary Add-tool flow.
+    var tiny = unclaimedTinyHoles(part);
+    if (tiny.length) {
+      var sizes = {};
+      tiny.forEach(function (f) { sizes[f.diameter.toFixed(4)] = true; });
+      body.appendChild(el('div', { class: 'mt-drills' }, [
+        el('span', { class: 'mt-dim mt-warn',
+                     text: tiny.length + ' hole' + (tiny.length === 1 ? '' : 's') + ' ('
+                           + Object.keys(sizes).sort().join('", ') + '") '
+                           + (tiny.length === 1 ? 'is' : 'are')
+                           + ' smaller than every tool here.' }),
+        el('button', {
+          type: 'button', class: 'btn small',
+          text: 'Centre-mark for hand drilling',
+          title: 'Add a spot operation that dimples these holes so a drill press can '
+                 + 'finish them - the dimples are not the holes',
+          onclick: function () {
+            var drill = tools().filter(function (t) { return t.type === 'drill'; })[0];
+            if (!drill) {
+              drill = { slot: nextSlot(), name: '1/8 in centre drill', diameter: 0.125,
+                        diameter_text: '0.1250', flutes: 2, type: 'drill',
+                        included_angle: 90 };
+              tools().push(drill);
+            }
+            ops.push({ op_type: 'holes', tool_slot: drill.slot,
+                       name: 'Centre-mark tiny holes', depth: null,
+                       scope: { indices: tiny.map(function (f) { return f.index; }),
+                                purpose: 'spot' } });
+            api.render();
+            touch();
+          },
+        }),
+      ]));
+    }
+
     body.appendChild(el('div', { class: 'mt-part-actions' }, [
       el('button', { type: 'button', class: 'btn small', text: '+ Operation',
                      onclick: function () { ops.push(newOp('holes')); api.render(); touch(); } }),
@@ -968,6 +1005,19 @@
         && (hi === null || feature.diameter <= hi + 1e-4);
   }
 
+  /** Holes no tool in the job can make (the survey flags them `too_small`) that no
+   *  operation - spot included - has claimed yet. These are what the one-click
+   *  centre-mark fix on the part block acts on. */
+  function unclaimedTinyHoles(part) {
+    if (!part.features) return [];
+    var relevant = opsFor(part).filter(function (o) {
+      return ['holes', 'interior'].indexOf(o.op_type) >= 0;
+    });
+    return (part.features.holes || []).filter(function (f) {
+      return f.too_small && !relevant.some(function (op) { return holeInScope(f, op); });
+    });
+  }
+
   function pocketInScope(feature, op) {
     if (op.scope.indices) return op.scope.indices.indexOf(feature.index) >= 0;
     var lo = num(op.scope.min_area), hi = num(op.scope.max_area);
@@ -984,18 +1034,27 @@
     // documented workflow, as "cut twice".
     var cutters = relevant.filter(function (o) { return (o.scope || {}).purpose !== 'spot'; });
     var spotters = relevant.filter(function (o) { return (o.scope || {}).purpose === 'spot'; });
-    var uncovered = 0, doubled = 0, spotOnly = 0;
+    var uncovered = 0, doubled = 0, spotOnly = 0, tiny = 0;
     features.forEach(function (f) {
       var hits = cutters.filter(function (op) { return inScope(f, op); }).length;
       if (hits > 1) doubled++;
       if (hits === 0) {
         if (spotters.some(function (op) { return inScope(f, op); })) spotOnly++;
+        else if (f.too_small) tiny++;
         else uncovered++;
       }
     });
     if (uncovered) {
       msgs.push(part.name + ': ' + uncovered + ' of ' + features.length + ' ' + kind
                 + 's are not cut by any operation.');
+    }
+    // Not the generic message: no scope can rescue a hole smaller than every tool, so
+    // name the two real fixes - the same ones the server error offers.
+    if (tiny) {
+      msgs.push(part.name + ': ' + tiny + ' ' + kind + (tiny === 1 ? ' is' : 's are')
+                + ' smaller than every tool in the job. Add a drill that size, or use '
+                + 'the centre-mark button on the part to spot '
+                + (tiny === 1 ? 'it' : 'them') + ' for hand drilling.');
     }
     if (spotOnly) {
       notes.push(part.name + ': ' + spotOnly + ' ' + kind + (spotOnly === 1 ? ' is' : 's are')
