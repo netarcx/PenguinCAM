@@ -44,16 +44,16 @@ class TestScaleFeedsToTool(unittest.TestCase):
         # The proven 4 mm base feed/depth stay fixed. The corner-only floor may rise so
         # those deliberately slower moves do not fall below minimum chipload.
         pp, notes = _pp(0.157)
-        self.assertEqual(pp.feed_rate, 30.0)
-        self.assertEqual(pp.max_slotting_depth, 0.06)
+        self.assertEqual(pp.feed_rate, 24.0)
+        self.assertEqual(pp.max_slotting_depth, 0.04)
         self.assertTrue(any('spindle reduced' in n for n in notes), notes)
 
     def test_small_tool_is_derated_on_both_axes(self):
         pp, _ = _pp(0.125)
-        expected_feed = 30.0 * (0.125 / 0.157) ** feeds_speeds.DIAMETER_EXPONENT
+        expected_feed = 24.0 * (0.125 / 0.157) ** feeds_speeds.DIAMETER_EXPONENT
         # Floored to 0.1 IPM so the F words stay readable and never round back up.
         self.assertAlmostEqual(pp.feed_rate, int(expected_feed * 10) / 10, places=6)
-        self.assertAlmostEqual(pp.max_slotting_depth, 0.06 * 0.125 / 0.157, places=6)
+        self.assertAlmostEqual(pp.max_slotting_depth, 0.04 * 0.125 / 0.157, places=6)
         self.assertLess(pp.plunge_rate, 15.0)
         self.assertLess(pp.ramp_feed_rate, 19.0)
         self.assertIn('feed scaled', pp.feed_scale_note)
@@ -66,8 +66,8 @@ class TestScaleFeedsToTool(unittest.TestCase):
 
     def test_large_tool_keeps_the_tested_preset(self):
         pp, notes = _pp(0.375, machine='omio_x8')
-        self.assertEqual(pp.feed_rate, 30.0)
-        self.assertEqual(pp.max_slotting_depth, 0.06)
+        self.assertEqual(pp.feed_rate, 24.0)
+        self.assertEqual(pp.max_slotting_depth, 0.04)
 
     def test_mm_units_scale_consistently(self):
         pp_in, _ = _pp(0.125, units='inch')
@@ -120,20 +120,34 @@ class TestScaleFeedsToTool(unittest.TestCase):
         self.assertGreaterEqual(corner_feed / (pp.spindle_speed * 2),
                                 feeds_speeds.MATERIALS['aluminum_6061']['chipload_min'])
 
-    def test_two_flute_quarter_inch_runs_in_the_smooth_spindle_band(self):
-        """A 2F 1/4 in used to be commanded S6000 - the Omio's VFD floor, where the
-        spindle growls with a quarter of its torque, and the operator's instinctive
-        50% feed override then pushed every tooth into the rubbing regime. The
-        straight feed makes minimum chip at the smooth floor, so milling runs there
-        and the corner/ramp floors rise to keep the slow moves honest."""
+    def test_one_flute_quarter_inch_is_machine_realistic(self):
+        """The 2026-09-01 derate: a real 1F 1/4 in profile at 30 IPM / 0.049 in
+        full-slot passes overloaded the Omio X8's axis motors. The envelope is now
+        24 IPM / 0.04 in with corners at 0.75 x feed - which at 12000 RPM sits
+        exactly on the chipload floor, so corner coordination no longer drags the
+        spindle down and the 1F runs at a healthy S12000."""
+        pp, notes = _pp(0.25, flutes=1)
+        self.assertEqual(pp.spindle_speed, 12000)
+        self.assertEqual(pp.feed_rate, 24.0)
+        self.assertEqual(pp.max_slotting_depth, 0.04)
+        minimum = feeds_speeds.MATERIALS['aluminum_6061']['chipload_min']
+        corner_feed = pp.feed_rate * pp.corner_min_feed_scale
+        self.assertGreaterEqual(corner_feed / pp.spindle_speed, minimum - 1e-9)
+        self.assertGreaterEqual(pp.ramp_feed_rate / pp.spindle_speed, minimum - 1e-9)
+
+    def test_two_flute_quarter_inch_keeps_chipload_and_says_so(self):
+        """At the machine-realistic 24 IPM, a 2-flute 1/4 in cannot stay above the
+        rubbing floor inside the spindle's smooth band - the chipload floor wins
+        (rubbing snaps tools, a growl does not), and the notes steer the operator
+        to the 1-flute cutter that runs at a healthy RPM."""
         pp, notes = _pp(0.25, flutes=2)
-        self.assertEqual(pp.spindle_speed, feeds_speeds.milling_rpm_floor('omio_x8'))
         minimum = feeds_speeds.MATERIALS['aluminum_6061']['chipload_min']
         self.assertGreaterEqual(pp.feed_rate / (pp.spindle_speed * 2), minimum)
         corner_feed = pp.feed_rate * pp.corner_min_feed_scale
         self.assertGreaterEqual(corner_feed / (pp.spindle_speed * 2), minimum - 1e-9)
-        self.assertGreaterEqual(pp.ramp_feed_rate / (pp.spindle_speed * 2),
-                                minimum - 1e-9)
+        self.assertLess(pp.spindle_speed, feeds_speeds.milling_rpm_floor('omio_x8'))
+        self.assertTrue(any('1-flute cutter runs healthier' in n for n in notes),
+                        notes)
 
     def test_small_two_flute_keeps_chipload_over_spindle_comfort(self):
         """A 1/8 in 2F cannot make minimum chip in the smooth band at its scaled
@@ -214,7 +228,8 @@ class TestScaleFeedsToTool(unittest.TestCase):
         pp.pockets = [[(0, 0), (1, 0), (1, 1), (0, 1)]]
         pp.holes = []
         gcode = '\n'.join(pp._generate_toolpath_gcode(skip_perimeter=True))
-        self.assertIn('(Depth levels: 3 ', gcode)
+        # 0.125" wall + 0.008" overcut at the derated 0.04" max pass = 4 levels.
+        self.assertIn('(Depth levels: 4 ', gcode)
 
     def test_generated_tube_drill_uses_drilling_model(self):
         pp, _ = _pp(0.201, material='6063')
@@ -231,9 +246,9 @@ class TestMaxPassDepth(unittest.TestCase):
 
     def test_clamps_down_and_says_so(self):
         pp, _ = _pp(0.157)
-        pp.apply_max_pass_depth(0.05)
-        self.assertEqual(pp.max_slotting_depth, 0.05)
-        self.assertIn('limited to 0.050 in by operator', pp.feed_scale_note)
+        pp.apply_max_pass_depth(0.03)
+        self.assertEqual(pp.max_slotting_depth, 0.03)
+        self.assertIn('limited to 0.030 in by operator', pp.feed_scale_note)
 
     def test_never_raises(self):
         # The automatic value is itself a safety ceiling; an operator setting above it
@@ -272,10 +287,10 @@ class TestMaxPassDepth(unittest.TestCase):
                     result = pp.generate_gcode(timestamp='2026-08-24 12:00:00')
                 assert result.success, result.errors
                 return result.gcode.count('===== PASS ')
-            # 0.258" total at the derated 0.06" preset = 5 passes; a 0.05" ceiling
-            # tightens that to 6.
-            self.assertEqual(passes(None), 5)
-            self.assertEqual(passes(0.05), 6)
+            # 0.258" total at the derated 0.04" preset = 7 passes; a 0.03" ceiling
+            # tightens that to 9.
+            self.assertEqual(passes(None), 7)
+            self.assertEqual(passes(0.03), 9)
         finally:
             os.remove(dxf)
 
@@ -311,13 +326,13 @@ class TestMaxPassDepthRoutes(unittest.TestCase):
                                 content_type='multipart/form-data')
 
     def test_job_route_honors_the_ceiling(self):
-        response = self._post_job({'max_pass_depth': 0.05})
+        response = self._post_job({'max_pass_depth': 0.03})
         body = response.get_json()
         self.assertEqual(response.status_code, 200, body)
-        self.assertIn('6 passes', body['gcode'])
+        self.assertIn('9 passes', body['gcode'])
         # Header comments wrap at the controller line limit; rejoin wrapped
         # comment lines before matching the full phrase.
-        self.assertIn('limited to 0.050 in by operator',
+        self.assertIn('limited to 0.030 in by operator',
                       body['gcode'].replace(')\n(', ' '))
 
     def test_bad_ceiling_is_a_400(self):
@@ -446,9 +461,9 @@ class TestDerateReachesTheProgram(unittest.TestCase):
     def test_small_tool_program_carries_the_derated_feed(self):
         result = self._generate(0.125)
         self.assertTrue(result.success, result.errors)
-        self.assertIn('F25.5', result.gcode)          # scaled cutting feed in the moves
-        self.assertNotIn('F30.0', result.gcode)       # the 4 mm feed must be gone
-        self.assertIn('feed scaled to 25.5 ipm', result.gcode)   # header note
+        self.assertIn('F20.4', result.gcode)          # scaled cutting feed in the moves
+        self.assertNotIn('F24.0', result.gcode)       # the 4 mm feed must be gone
+        self.assertIn('feed scaled to 20.4 ipm', result.gcode)   # header note
 
     def test_program_header_states_flute_count(self):
         result = self._generate(0.157)
@@ -457,7 +472,7 @@ class TestDerateReachesTheProgram(unittest.TestCase):
     def test_reference_tool_program_is_unchanged(self):
         result = self._generate(0.157)
         self.assertTrue(result.success, result.errors)
-        self.assertIn('F30.0', result.gcode)
+        self.assertIn('F24.0', result.gcode)
         self.assertNotIn('feed scaled', result.gcode)
 
 

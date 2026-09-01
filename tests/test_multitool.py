@@ -708,9 +708,16 @@ class TestStepdownClamp(unittest.TestCase):
         self.assertLessEqual(applied, preset + 1e-9)
 
     def test_a_small_cutter_is_still_scaled_down(self):
+        """The preset clamp scales small cutters down. Since the 2026-09-01
+        machine-realism derate (0.04" at the reference), the diameter-scaled
+        preset binds at or before the chipload model's stepdown, so the applied
+        depth equals that scaled preset - the model ceiling no longer bites here."""
         preset, model, applied = self._stepdown('aluminum', 0.125, 1)
-        self.assertLess(applied, preset)        # clamping is a ceiling, not a floor
-        self.assertAlmostEqual(applied, model)
+        # `preset` is captured after apply_material_preset, which already scaled
+        # it to the 1/8" tool - well under the 0.04" reference value.
+        self.assertLess(preset, 0.04)
+        self.assertAlmostEqual(applied, preset)
+        self.assertLessEqual(applied, model + 1e-9)
 
     def test_an_aluminium_profile_is_multi_pass_again(self):
         job = build_job(tools=[Tool(1, '3/8 2F', 0.375, 2)],

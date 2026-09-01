@@ -176,22 +176,26 @@ machines:
         # 6061's - only drill feeds run ~20% gentler, which is safe for 6061-T6.
         name: "Aluminum (6061-T6)"
         # Derated 2026-08-24: the old 55 IPM / 0.2" slot numbers were never proven -
-        # what the shop actually produced at them was snapped 1/8" end mills. These
-        # are a protected 6061/6063 Omio envelope and require continuous chip evacuation.
-        description: "6061-T6 on the Omio X8 - protected tool-adjusted cutting envelope"
+        # what the shop actually produced at them was snapped 1/8" end mills.
+        # Derated again 2026-09-01: a real 1/4" 1F profile at 30 IPM / 0.049" passes
+        # (0.0025 in/tooth, full slot) overloaded the X8's axis motors mid-cut. The
+        # machine, not the cutter, is the limit on a 6040-class stepper router. Peak
+        # force tracks chipload x depth, so both came down; shallower passes also
+        # evacuate chips far better, which is most of the burring too.
+        description: "6061-T6 on the Omio X8 - machine-realistic cutting envelope"
         spindle_speed: 18000
-        feed_rate: 30.0
-        ramp_feed_rate: 19.0
-        plunge_rate: 15.0
+        feed_rate: 24.0                # 0.0020 in/tooth at 12000 RPM 1F
+        ramp_feed_rate: 18.0           # the chipload floor at 12K 1F; slower RUBS
+        plunge_rate: 12.0
         traverse_rate: 200.0
-        approach_rate: 35.0
+        approach_rate: 28.0
         ramp_angle: 4.0                # shallow: the X8 is only medium-rigidity
         ramp_start_clearance: 0.050
         stepover_percentage: 0.25      # conservative radial engagement
         helix_radius_multiplier: 0.5
-        max_slotting_depth: 0.06       # 0.38 x the 4mm reference tool; scaled per tool
+        max_slotting_depth: 0.04       # 0.25 x the 4mm reference tool; scaled per tool
         peck_drill_depth: 0.05
-        corner_min_feed_scale: 0.6     # ease corners without crossing into rubbing
+        corner_min_feed_scale: 0.75    # at 12K 1F corners sit exactly on the chipload floor
         tab_width: 0.25
         tab_height: 0.15
 

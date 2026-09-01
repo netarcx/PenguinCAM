@@ -214,20 +214,23 @@ TEAM_6238_DEFAULTS = {
         'aluminum': {
             # Derated 2026-08-24: 55 IPM / 0.2" slot let a 1/8" plate be slotted in
             # one full-thickness pass and snapped real cutters. See MULTI_TOOL_STATUS.
+            # Derated again 2026-09-01: 30 IPM / 0.049" full-slot passes overloaded a
+            # real Omio X8's axis motors - the machine, not the cutter, is the limit
+            # on a 6040-class stepper router. Chipload x depth both came down.
             'name': 'Aluminum',
             'spindle_speed': 18000,
-            'feed_rate': 30.0,
-            'ramp_feed_rate': 19.0,   # tested envelope; slower RUBS in aluminum and shatters bits
-            'plunge_rate': 15.0,
+            'feed_rate': 24.0,        # 0.0020 in/tooth at 12000 RPM 1F
+            'ramp_feed_rate': 18.0,   # the chipload floor at 12K 1F; slower RUBS in aluminum
+            'plunge_rate': 12.0,
             'traverse_rate': 200.0,
-            'approach_rate': 35.0,
+            'approach_rate': 28.0,
             'ramp_angle': 4.0,
             'ramp_start_clearance': 0.050,
             'stepover_percentage': 0.25,
             'helix_radius_multiplier': 0.5,
-            'max_slotting_depth': 0.06,     # 0.38 x the 4mm reference diameter
+            'max_slotting_depth': 0.04,     # 0.25 x the 4mm reference diameter
             'peck_drill_depth': 0.05,
-            'corner_min_feed_scale': 0.6,   # ease corners without crossing into aluminum rubbing
+            'corner_min_feed_scale': 0.75,  # at 12K 1F corners sit exactly on the chipload floor
             'tab_width': 0.25,
             'tab_height': 0.15
         },
@@ -1374,15 +1377,17 @@ materials:
 
   aluminum:
     name: "Aluminum"
-    description: "6061/6063 on an Omio router - protected tool-adjusted envelope"
+    description: "6061/6063 on an Omio router - machine-realistic cutting envelope"
 
-    # Speeds and feeds
+    # Speeds and feeds (derated 2026-09-01: 30 IPM / 0.049" full-slot passes
+    # overloaded a real Omio X8's axis motors - the machine, not the cutter, is
+    # the limit on a 6040-class stepper router)
     spindle_speed: 18000
-    feed_rate: 30.0
-    ramp_feed_rate: 19.0
-    plunge_rate: 15.0               # Slower for aluminum
+    feed_rate: 24.0                 # 0.0020 in/tooth at 12000 RPM 1F
+    ramp_feed_rate: 18.0            # The chipload floor at 12K 1F; slower RUBS in aluminum
+    plunge_rate: 12.0               # Slower for aluminum
     traverse_rate: 200.0
-    approach_rate: 35.0
+    approach_rate: 28.0
 
     # Toolpath parameters
     ramp_angle: 4.0                 # Shallow ramp for aluminum
@@ -1391,14 +1396,15 @@ materials:
     helix_radius_multiplier: 0.5    # Conservative helix entry for aluminum
 
     # Multi-pass parameters
-    max_slotting_depth: 0.06        # Safety ceiling for a 4mm cutter; smaller tools scale down
+    max_slotting_depth: 0.04        # Safety ceiling for a 4mm cutter; smaller tools scale down
     peck_drill_depth: 0.05          # Peck ceiling; generated twist drills use D/3
 
     # OPTIONAL: feed floor at sharp pocket corners, as a fraction of feed_rate. At a sharp
     # corner the cutter wraps two edges and engagement spikes, so we ease the feed down (the
     # toolpath itself is unchanged). Aluminum cannot be slowed below a real chip, so the
-    # protected default is 0.6 and RPM is coordinated with it. Softer materials use ~0.7.
-    corner_min_feed_scale: 0.6
+    # protected default is 0.75 - at 12000 RPM 1F that sits exactly on the chipload floor -
+    # and RPM is coordinated with it. Softer materials use ~0.7.
+    corner_min_feed_scale: 0.75
 
     # Tab parameters
     tab_width: 0.25

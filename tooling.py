@@ -823,8 +823,9 @@ def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
     inside the aluminum safety envelope.
 
     Must run BEFORE apply_tool_feeds: pp.feed_rate still holds the material preset's
-    feed at that point, and the power-limited depth inside apply_tool_feeds must be
-    computed from the feed the program will actually command.
+    feed at that point (for aluminum: already scaled to this tool's diameter by the
+    auto-run scale_feeds_to_tool), and the power-limited depth inside apply_tool_feeds
+    must be computed from the feed the program will actually command.
     """
     material_key = feeds.get('material_key')
     is_metal = bool(feeds_speeds.MATERIALS.get(material_key, {}).get('feed_flutes_max'))
@@ -839,11 +840,20 @@ def _anchor_metal_feed(pp: FRCPostProcessor, tool: Tool,
     if not is_metal or not preset_feed or tool.type == 'drill' or tool.feed_rate:
         return None
     d_ref = feeds_speeds.REFERENCE_TOOL['diameter']
+    # On the aluminum path apply_material_preset auto-runs scale_feeds_to_tool, so
+    # pp.feed_rate is ALREADY the preset scaled for this tool's diameter - scaling
+    # it again here under-fed every multitool aluminum operation by the diameter
+    # factor squared (about 15% for a 1/8 in cutter), which in aluminum is the
+    # rubbing direction. Only apply the factor ourselves when the post-processor
+    # has not (a future metal without the aluminum auto-scale).
+    if getattr(pp, '_tool_scaling_applied', False):
+        diameter_factor = 1.0
+    else:
+        diameter_factor = min(
+            1.0, (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT)
     # Floored, not rounded: a clamp must never nudge itself upward, and the single-tool
     # path's scale_feeds_to_tool floors identically (46.8, not 46.9, for a 1/8" tool).
-    anchor = math.floor(preset_feed
-                        * min(1.0, (tool.diameter / d_ref) ** feeds_speeds.DIAMETER_EXPONENT)
-                        * 10.0) / 10.0
+    anchor = math.floor(preset_feed * diameter_factor * 10.0) / 10.0
     original = feeds['feed_xy']
     feed_note = ''
     if anchor < feeds['feed_xy']:

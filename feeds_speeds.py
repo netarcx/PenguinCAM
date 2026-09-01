@@ -51,14 +51,18 @@ FULL_SLOT_OPERATIONS = {'profile', 'slot'}
 # template wrote 55 IPM / 0.200 in into every new config.  Because machine config wins
 # over built-in defaults, those stale values silently defeated the 2026-08-24 derate.
 # Treat these as a safety envelope, not tuning targets; a config may always ask for less.
+# Lowered 2026-09-01 in lockstep with the preset derate: a real 1/4 in 1F profile at
+# the previous 30 IPM / 0.049 in full-slot passes overloaded a real Omio X8's axis
+# motors mid-cut, so the old ceiling values are themselves over what the machine
+# class can sustain - a stale config restoring them would be just as dangerous.
 ALUMINUM_ROUTER_SAFETY_MAX = {
-    'feed_rate': 30.0,
-    'ramp_feed_rate': 19.0,
-    'plunge_rate': 15.0,
+    'feed_rate': 24.0,
+    'ramp_feed_rate': 18.0,
+    'plunge_rate': 12.0,
     'ramp_angle': 4.0,
     'stepover_percentage': 0.25,
     'helix_radius_multiplier': 0.5,
-    'max_slotting_depth': 0.06,
+    'max_slotting_depth': 0.04,
     'peck_drill_depth': 0.05,
 }
 

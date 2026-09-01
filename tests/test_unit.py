@@ -319,12 +319,13 @@ class TestMaterialPresets(unittest.TestCase):
         self.assertEqual(pp.stepover_percentage, 0.65)
 
     def test_aluminum_preset_applies_correctly(self):
-        # 30 IPM / 0.06" slot since the 2026-08-24 derate (real 1/8" bits snapped at
-        # the old 55 IPM / 0.2" numbers; see MULTI_TOOL_STATUS item 10).
+        # 24 IPM / 0.04" slot since the 2026-09-01 machine-realism derate (a real
+        # 1/4" 1F profile at 30 IPM / 0.049" passes overloaded the Omio X8's axis
+        # motors; before that, 2026-08-24 derated 55 IPM / 0.2" after snapped bits).
         pp = FRCPostProcessor(0.25, 0.157)
         pp.apply_material_preset('aluminum')
-        self.assertEqual(pp.feed_rate, 30.0)
-        self.assertEqual(pp.max_slotting_depth, 0.06)
+        self.assertEqual(pp.feed_rate, 24.0)
+        self.assertEqual(pp.max_slotting_depth, 0.04)
         self.assertEqual(pp.spindle_speed, 12000)
         self.assertEqual(pp.ramp_angle, 4.0)
         self.assertEqual(pp.stepover_percentage, 0.25)
@@ -471,12 +472,12 @@ class TestCornerSlowdown(unittest.TestCase):
 
     def setUp(self):
         self.pp = FRCPostProcessor(0.25, 0.157)
-        self.pp.apply_material_preset('aluminum')   # feed 30 IPM
+        self.pp.apply_material_preset('aluminum')   # feed 24 IPM
 
     def test_corner_feed_scale_by_angle(self):
         s = self.pp._corner_feed_scale
         self.assertAlmostEqual(s((-1, 0), (0, 0), (1, 0)), 1.0)                  # straight -> no slowdown
-        self.assertAlmostEqual(s((0, 1), (0, 0), (1, 0)), 0.7333, places=2)     # 90 deg -> partial
+        self.assertAlmostEqual(s((0, 1), (0, 0), (1, 0)), 0.8333, places=2)     # 90 deg -> partial
         self.assertAlmostEqual(s((0, 0), (0, 0), (1, 0)), 1.0)                  # degenerate -> safe 1.0
         # A sharp (<=60 deg) corner hits the floor.
         import math as m
@@ -511,7 +512,7 @@ class TestCornerSlowdown(unittest.TestCase):
     def test_corner_floor_is_material_aware(self):
         al = FRCPostProcessor(0.25, 0.157); al.apply_material_preset('aluminum')
         pc = FRCPostProcessor(0.25, 0.157); pc.apply_material_preset('polycarbonate')
-        self.assertAlmostEqual(al.corner_min_feed_scale, 0.6)   # keeps a real chip at protected RPM
+        self.assertAlmostEqual(al.corner_min_feed_scale, 0.75)  # at 12K 1F this is exactly the chipload floor
         self.assertAlmostEqual(pc.corner_min_feed_scale, 0.7)   # heat-limited: gentler, preserve chip load
         # A material the TEAM defined but the feeds model has not falls back to the
         # (softer) default floor, not the aluminum one. A material nobody defined is

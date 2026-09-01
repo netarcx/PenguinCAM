@@ -80,26 +80,30 @@ MATERIAL_PRESETS = {
         'description': 'Standard plywood settings - 18K RPM, 75 IPM cutting'
     },
     'aluminum': {
-        # Derated 2026-08-24 after real 1/8" bits kept snapping: the old 55 IPM /
-        # 0.2" slot numbers let a 1/8" plate be slotted full-thickness in one pass,
-        # which no hobby-router aluminum practice supports. These match the
-        # FRC/Omio-class consensus (~0.4 x D per pass, light chipload, dry).
+        # Derated 2026-08-24 after real 1/8" bits kept snapping, and again 2026-09-01
+        # after a real 1/4 in 1F profile (S12000 F30, 0.049 in full-slot passes,
+        # 0.0025 in/tooth) overloaded the Omio X8's axis motors mid-cut: the machine,
+        # not the cutter, is the limit on a 6040-class stepper router. Peak cutting
+        # force tracks chipload x depth, so both came down - about 40% less force,
+        # and shallower slot passes evacuate chips far better. Corners run at 0.75 x
+        # feed, which at 12000 RPM 1F is exactly the 0.0015 chipload floor, so the
+        # corner coordination no longer drags RPM down.
         'name': 'Aluminum',
-        'feed_rate': 30.0,        # Cutting feed rate (IPM) - 0.0017 in/tooth at 18K 1F
-        'ramp_feed_rate': 19.0,   # Ramp feed rate (IPM) - the tested envelope; in aluminum a
-        #                           slower ramp RUBS (see feeds_speeds MATERIALS note) - a 1/4 in
-        #                           end mill shattered at 9 IPM entry. Never derate below chipload.
-        'plunge_rate': 15.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
+        'feed_rate': 24.0,        # Cutting feed rate (IPM) - 0.0020 in/tooth at 12K 1F
+        'ramp_feed_rate': 18.0,   # Ramp feed rate (IPM) - the chipload floor at 12K 1F; in
+        #                           aluminum a slower ramp RUBS (see feeds_speeds MATERIALS
+        #                           note) - a 1/4 in end mill shattered at 9 IPM entry.
+        'plunge_rate': 12.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 4.0,        # Ramp angle in degrees
         'ramp_start_clearance': 0.050,  # Clearance above material to start ramping (inches)
         'stepover_percentage': 0.25,    # Radial stepover as fraction of tool diameter (25% conservative for aluminum)
         'helix_radius_multiplier': 0.5,  # Helix entry radius as fraction of tool radius (conservative for aluminum)
-        'max_slotting_depth': 0.06,     # Maximum depth per pass for slotting (0.38 x reference diameter)
-        'corner_min_feed_scale': 0.6,   # Corner-slowdown feed floor (see apply_material_preset)
+        'max_slotting_depth': 0.04,     # Maximum depth per pass for slotting (0.25 x reference diameter)
+        'corner_min_feed_scale': 0.75,  # Corner-slowdown feed floor (see apply_material_preset)
         'tab_width': 0.25,        # Tab width (inches) - same as plywood
         'tab_height': 0.15,       # Tab height (inches) - same as plywood
-        'description': 'Aluminum - 18K RPM, 30 IPM cutting, 0.06" max pass, 4° ramp'
+        'description': 'Aluminum - 24 IPM cutting, 0.04" max pass, 4 deg ramp'
     },
     'polycarbonate': {
         'name': 'Polycarbonate',
