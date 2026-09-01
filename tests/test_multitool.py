@@ -369,6 +369,65 @@ class TestUndersizedHoleSpotting(unittest.TestCase):
         self.assertTrue(any('centre-marked' in n for n in plan['notes']), plan['notes'])
 
 
+class TestAluminumEntryChipload(unittest.TestCase):
+    """Entry moves in aluminum must never rub. A ramp or helix commanded below the
+    minimum chipload at the program's RPM heats instead of cutting, welds chips to the
+    flutes, and shatters the tool - a real 1/4 in end mill died to a 9 ipm entry at
+    12000 RPM after a well-meaning "slow the ramp down" derate. Slower is only safer
+    in materials that do not seize."""
+
+    @staticmethod
+    def make_dxf():
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        msp.add_lwpolyline([(0, 0), (5, 0), (5, 3), (0, 3)], close=True)
+        msp.add_lwpolyline([(1.5, 1.0), (3.5, 1.0), (3.5, 2.0), (1.5, 2.0)], close=True)
+        msp.add_circle((4.2, 2.5), 0.375)
+        path = tempfile.mktemp(suffix='.dxf')
+        doc.saveas(path)
+        return path
+
+    def assert_entries_make_a_chip(self, diameter, flutes):
+        job = MultiToolJob(
+            material='aluminum', thickness=0.25, machine_id='omio_x8',
+            tools=[Tool(1, 'mill', diameter, flutes)],
+            parts=[PartOps(dxf_path=self.make_dxf(), name='p', operations=[
+                Operation('holes', 1), Operation('pockets', 1),
+                Operation('perimeter', 1)])])
+        result = generate(job)
+        self.assertTrue(result.success, result.errors)
+        minimum = feeds_speeds.MATERIALS['aluminum_6063']['chipload_min']
+        # Each operation commands its own S word, so every entry move is judged
+        # against the spindle speed actually active on its line.
+        rpm, checked = None, 0
+        for line in result.gcode.splitlines():
+            s = re.search(r'S(\d+)', line)
+            if s:
+                rpm = int(s.group(1))
+            if rpm and ('Ramp segment' in line or 'Helical' in line):
+                for f in re.findall(r'F([\d.]+)', line):
+                    feed, floor = float(f), rpm * flutes * minimum
+                    checked += 1
+                    self.assertGreaterEqual(
+                        feed, floor - 0.1,
+                        f'{line.strip()!r} commands {feed} ipm = '
+                        f'{feed / (rpm * flutes):.5f} in/tooth at {rpm} RPM - below '
+                        f'the {minimum} rubbing floor. This is how end mills shatter.')
+        self.assertGreater(checked, 0)
+
+    def test_quarter_inch_entries_make_a_chip(self):
+        self.assert_entries_make_a_chip(0.25, 1)
+
+    def test_eighth_inch_entries_make_a_chip(self):
+        self.assert_entries_make_a_chip(0.125, 1)
+
+    def test_two_flute_entries_make_a_chip(self):
+        # A 2-flute needs TWICE the feed to keep the same per-tooth chip, so a ramp
+        # that was safe for a single flute rubs with two. The floor scales by flutes.
+        self.assert_entries_make_a_chip(0.25, 2)
+        self.assert_entries_make_a_chip(0.125, 2)
+
+
 class TestFeeds(unittest.TestCase):
     def test_feeds_track_the_tool_not_the_material_preset(self):
         small, _ = tooling.compute_tool_feeds(Tool(1, 'small', 0.125, 1), 'plywood', None, 'pockets')

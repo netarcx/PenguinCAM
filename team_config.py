@@ -217,7 +217,7 @@ TEAM_6238_DEFAULTS = {
             'name': 'Aluminum',
             'spindle_speed': 18000,
             'feed_rate': 30.0,
-            'ramp_feed_rate': 12.0,   # derated 2026-09-01, see plywood note
+            'ramp_feed_rate': 19.0,   # tested envelope; slower RUBS in aluminum and shatters bits
             'plunge_rate': 15.0,
             'traverse_rate': 200.0,
             'approach_rate': 35.0,
@@ -1379,7 +1379,7 @@ materials:
     # Speeds and feeds
     spindle_speed: 18000
     feed_rate: 30.0
-    ramp_feed_rate: 12.0
+    ramp_feed_rate: 19.0
     plunge_rate: 15.0               # Slower for aluminum
     traverse_rate: 200.0
     approach_rate: 35.0

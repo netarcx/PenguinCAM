@@ -53,7 +53,7 @@ FULL_SLOT_OPERATIONS = {'profile', 'slot'}
 # Treat these as a safety envelope, not tuning targets; a config may always ask for less.
 ALUMINUM_ROUTER_SAFETY_MAX = {
     'feed_rate': 30.0,
-    'ramp_feed_rate': 12.0,
+    'ramp_feed_rate': 19.0,
     'plunge_rate': 15.0,
     'ramp_angle': 4.0,
     'stepover_percentage': 0.25,
@@ -127,11 +127,18 @@ def max_depth_for_power(machine, material, diameter, feed, radial_engagement=Non
 # chipload_ref values are in/tooth for the REFERENCE_TOOL (4mm 1F). slotting_multiplier
 # derates them for full-width slotting; the product is what reproduces the presets.
 #
-# ramp_multiplier derated 2026-09-01 (0.64 -> 0.40, aluminum 0.30) together with every
-# preset that carries a ramp_feed_rate: a ramp is a full-width slot with AXIAL engagement
-# stacked on top - the worst cut in the program - and running it at nearly two-thirds of
-# the cutting feed was snapping real bits on perimeter entry. The ramp now sits near the
-# plunge rate rather than near the feed.
+# ramp_multiplier derated 2026-09-01 (0.64 -> 0.40) for the materials that do not
+# seize: a ramp is a full-width slot with AXIAL engagement stacked on top - the worst
+# cut in the program - and running it at nearly two-thirds of the cutting feed was
+# snapping real bits on perimeter entry. Wood and plastics tolerate a slow ramp.
+#
+# ALUMINUM IS THE OPPOSITE. Slower is NOT safer in metal: a feed below the minimum
+# chipload rubs instead of cutting - the cutter heats, aluminum welds to the flutes,
+# and the seized tool shatters. The first derate here took the aluminum ramp to
+# 9 ipm at 12000 RPM (0.0008 in/tooth, half the floor) and a real 1/4 in end mill
+# shattered on entry the same day. Aluminum keeps its tested 0.64 ratio, and
+# apply_tool_feeds floors the final ramp feed at rpm x flutes x chipload_min so no
+# clamp or rescale can push an entry into the rubbing regime again.
 MATERIALS = {
     'plywood': {
         'unit_power_hp': 0.05,
@@ -187,7 +194,7 @@ MATERIALS = {
         'preferred_rpm': 14000,
         'chipload_ref': 0.0032, 'chipload_min': 0.0015, 'chipload_max': 0.0050,
         'slotting_multiplier': 0.52,
-        'ramp_multiplier': 0.30, 'plunge_multiplier': 0.28,
+        'ramp_multiplier': 0.64, 'plunge_multiplier': 0.28,
         'stepover_ratio': 0.25, 'slot_stepdown_ratio': 0.38,
         'max_flutes_soft': 3,
         # Feed never scales past this many flutes. Gummy 6061 in a slot cannot clear

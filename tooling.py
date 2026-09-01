@@ -1021,6 +1021,19 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
             pp.plunge_rate = min(
                 pp.plunge_rate,
                 feeds_speeds.ALUMINUM_ROUTER_SAFETY_MAX['plunge_rate'] * diameter_factor)
+        # Slower is NOT safer in metal. A ramp/helix feed below the minimum chipload
+        # at the commanded RPM rubs instead of cutting: the cutter heats, aluminum
+        # welds to the flutes, and the seized tool shatters - a real 1/4 in end mill
+        # died to a 9 ipm entry at 12000 RPM (0.0008 in/tooth). The multipliers,
+        # envelope caps and preset rescales above each pull the ramp DOWN; this floor
+        # runs last so that whatever they produce, the entry still makes a chip.
+        # Plunges stay slow on purpose - a plunge cuts on the centre, not the flanks.
+        if tool.type == 'endmill':
+            minimum = feeds_speeds.MATERIALS[material_key].get('chipload_min')
+            if minimum:
+                chip_floor = pp.spindle_speed * tool.flutes * minimum
+                pp.ramp_feed_rate = round(
+                    min(max(pp.ramp_feed_rate, chip_floor), pp.feed_rate), 1)
 
     # Peck depth per plunge is a fraction of the cutter's diameter; the preset value is
     # quoted for the 4 mm reference tool, so scale it to this one.

@@ -170,14 +170,18 @@ machines:
         tab_height: 0.15
 
       aluminum:
-        name: "Aluminum"
+        # The shop's stock is 6061-T6. The id stays `aluminum` (tube mode and saved
+        # jobs key off it); the feeds model resolves a generic aluminum id to the
+        # most conservative alloy envelope, whose MILLING numbers are identical to
+        # 6061's - only drill feeds run ~20% gentler, which is safe for 6061-T6.
+        name: "Aluminum (6061-T6)"
         # Derated 2026-08-24: the old 55 IPM / 0.2" slot numbers were never proven -
         # what the shop actually produced at them was snapped 1/8" end mills. These
         # are a protected 6061/6063 Omio envelope and require continuous chip evacuation.
-        description: "6061/6063 on the Omio X8 - protected tool-adjusted cutting envelope"
+        description: "6061-T6 on the Omio X8 - protected tool-adjusted cutting envelope"
         spindle_speed: 18000
         feed_rate: 30.0
-        ramp_feed_rate: 12.0
+        ramp_feed_rate: 19.0
         plunge_rate: 15.0
         traverse_rate: 200.0
         approach_rate: 35.0

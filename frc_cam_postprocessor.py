@@ -86,7 +86,9 @@ MATERIAL_PRESETS = {
         # FRC/Omio-class consensus (~0.4 x D per pass, light chipload, dry).
         'name': 'Aluminum',
         'feed_rate': 30.0,        # Cutting feed rate (IPM) - 0.0017 in/tooth at 18K 1F
-        'ramp_feed_rate': 12.0,   # Ramp feed rate (IPM) - derated 2026-09-01, see plywood note
+        'ramp_feed_rate': 19.0,   # Ramp feed rate (IPM) - the tested envelope; in aluminum a
+        #                           slower ramp RUBS (see feeds_speeds MATERIALS note) - a 1/4 in
+        #                           end mill shattered at 9 IPM entry. Never derate below chipload.
         'plunge_rate': 15.0,      # Plunge feed rate (IPM) for tab Z moves - slower for aluminum
         'spindle_speed': 18000,   # RPM
         'ramp_angle': 4.0,        # Ramp angle in degrees
