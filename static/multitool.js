@@ -866,7 +866,13 @@
     // Holes nothing in the job can make have exactly two fixes, and one of them is a
     // single click: a spot operation that centre-marks them for the drill press. The
     // other (load a drill that size) is the ordinary Add-tool flow.
-    var tiny = unclaimedTinyHoles(part);
+    // Only offered once the part HAS a plan. Before planning, the tool table is just
+    // the default cutter, so EVERY hole counts as "too small" - and this button then
+    // outshone "Set up this part" while offering to dimple holes the plan's drills
+    // would have made. Leftovers are only leftovers after there is a plan to leave
+    // them out.
+    var planned = ops.some(function (o) { return !o._deburr; });
+    var tiny = planned ? unclaimedTinyHoles(part) : [];
     if (tiny.length) {
       var sizes = {};
       tiny.forEach(function (f) { sizes[f.diameter.toFixed(4)] = true; });
@@ -1028,6 +1034,11 @@
         }));
       });
       parts.appendChild(std);
+      parts.appendChild(el('p', { class: 'hint', text:
+        'Both drill 5/32" holes and centre-mark smaller ones with that same bit. '
+        + '1/4" bores other holes and small pockets with a 1/8" end mill, then cuts '
+        + 'large pockets and the profile with a 1/4"; 1/8" does everything after the '
+        + 'drill with the 1/8" end mill.' }));
       ctx.state.parts.forEach(function (p) { parts.appendChild(partBlock(p)); });
     }
 
