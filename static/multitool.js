@@ -648,13 +648,25 @@
     // What this part needs, and one button that supplies it. Deliberately ABOVE the
     // operation list: you cannot sensibly plan a part with tools you have not chosen
     // yet, and this is where you find out which ones those are.
-    if (part.plan && part.plan.tools.length) {
-      var wanted = part.plan.tools;
+    // Gate on the plan having ANYTHING to apply, not on it needing NEW tools. When every
+    // tool the part wants is already in the table the server returns tools: [] with a
+    // full operations list - and keying on tools.length then hid the one button that
+    // applies it, while the hint below still told the user to press it. That is the
+    // default case out of the box: one 1/4" end mill in the table and any part whose
+    // holes are all at least that size, every blank engraving plate included. Since
+    // 660ead3 dropped state.multitool from enabled(), this editor is mandatory for all
+    // flat 2D work, so there was no other route to a program.
+    var planTools = (part.plan && part.plan.tools) || [];
+    var planOps = (part.plan && part.plan.operations) || [];
+    if (planTools.length || planOps.length) {
+      var wanted = planTools;
+      var reused = (part.plan && part.plan.reused) || [];
       var missing = wanted.filter(function (t) { return !haveTool(t); });
       var line = el('div', { class: 'mt-drills' }, [
         el('span', { class: 'mt-dim', text: 'This part needs:' }),
       ]);
-      wanted.forEach(function (t, i) {
+      // With nothing new to load, name what it will use instead of showing a bare label.
+      (wanted.length ? wanted : reused).forEach(function (t, i) {
         if (i) line.appendChild(el('span', { class: 'mt-dim', text: ',' }));
         line.appendChild(el('span', {
           class: haveTool(t) ? 'mt-have' : 'mt-need',
@@ -662,6 +674,9 @@
           title: haveTool(t) ? 'already in your tool table' : 'not loaded yet',
         }));
       });
+      if (!wanted.length && !reused.length) {
+        line.appendChild(el('span', { class: 'mt-have', text: 'the tools you have' }));
+      }
       line.appendChild(el('button', {
         type: 'button', class: 'btn small primary',
         text: ops.length ? 'Re-plan this part' : 'Set up this part',

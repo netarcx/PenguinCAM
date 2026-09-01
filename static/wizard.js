@@ -332,7 +332,12 @@
   }
 
   function defaultEngraveHeightText() {
-    return (Math.round(defaultEngraveHeight() * 1000) / 1000) + '"';
+    // Round UP. bindLengthField commits this rounded text straight back into
+    // engrave_height on render, so rounding to nearest sent the server a number a
+    // thousandth BELOW the legibility floor it had just been derived from - for a
+    // 5/32", 0.201" or 5/16" cutter that produced a "cannot write letters 0.328 in
+    // tall - it needs at least 0.328 in" warning on a value the wizard chose itself.
+    return (Math.ceil(defaultEngraveHeight() * 1000) / 1000) + '"';
   }
 
   function previewUploadedFont(file) {
@@ -1231,7 +1236,19 @@
     $('#gen-status').textContent = 'Updating toolpath…';
     previewRegenerateTimer = setTimeout(function () {
       previewRegenerateTimer = null;
-      if (state.step !== 'preview') return;
+      if (state.step !== 'preview') {
+        // Leaving the step mid-debounce used to return here with "Updating toolpath…"
+        // still on screen and Generate still disabled, and nothing ever cleared it:
+        // later edits early-return in invalidatePreview() because #preview-result is
+        // hidden by then. In full-page grid mode the panel stays visible, so the user
+        // watched a message that never resolved. Leave the same note the "changed while
+        // away" path leaves.
+        $('#gen-status').textContent = '';
+        $('#preview-errors').textContent =
+          'Settings changed. Preview will regenerate when you return.';
+        $('#btn-do').disabled = false;
+        return;
+      }
       var problems = previewValidationProblems();
       if (problems.length) {
         $('#gen-status').textContent = '';
@@ -2848,6 +2865,17 @@
         restackTubeParts();
         refitView();
         drawLayout();
+      }
+      // A drag moves, rotates or re-anchors a part, which changes the toolpath just as
+      // surely as flip, auto-arrange or a stock change do - and every one of those calls
+      // invalidatePreview(). These two did not, so the most-used Layout gestures left a
+      // stale program on screen with Download still armed: nudge a part to clear a clamp,
+      // see an unchanged preview, and machine the pre-drag nest. Only for the actions
+      // that actually alter geometry - a pan or a marquee select changes nothing.
+      var acted = canvasState.action && canvasState.action.type;
+      if (acted === 'drag' || acted === 'rotate' || acted === 'label-drag'
+          || acted === 'design-drag') {
+        invalidatePreview();
       }
       canvasState.action = null;
     }

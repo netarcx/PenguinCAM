@@ -227,7 +227,13 @@
     }
     for (var li = 0; li < lines.length; li++) {
       var t = lines[li].trim();
-      if (t.indexOf('PHASE 2') >= 0) phase = 2;
+      // Only the tube-flip phase banner, which the post-processor writes as
+      // "( === PHASE 2: ... === )". A bare substring test also matched an OPERATION
+      // banner, "(===== PHASE 2 BORES - plate - T2 =====)", because a user is free to
+      // name an operation "Phase 2" and tooling.py uppercases that label into the
+      // comment. The viewer then split a flat plate's toolpath in two and drew only the
+      // half holding the scrubber - half the program simply invisible.
+      if (/^\(\s*===\s[^)]*PHASE 2/.test(t)) phase = 2;
       if (!t || t.charAt(0) === '(' || t.charAt(0) === ';') continue;
       var gm = t.match(/^(G[0-3])\b/);
       if (!gm) continue;

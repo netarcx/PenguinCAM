@@ -8,6 +8,7 @@ import os
 import json
 import tempfile
 import time
+import threading
 import traceback
 
 import ezdxf
@@ -25,6 +26,16 @@ from shapely.ops import unary_union
 
 from dxf_geometry import entities_to_closed_paths
 from logging_config import log  # shared log() + logging setup (was duplicated per module)
+
+
+# (connect, read) seconds. `requests` has NO default timeout, so a stalled Onshape socket
+# hung forever - and because the retry adapter needs a timeout to produce a retryable
+# event, the Retry policy could not rescue it either. Both deployments run gunicorn with
+# --workers 1, so one hung call blocked the app for every user until the 300s worker
+# timeout killed it: a five-minute outage from a single request. Reads are generous
+# because translation polling legitimately waits on Onshape.
+OAUTH_TIMEOUT = (5, 20)
+API_TIMEOUT = (5, 60)
 
 
 def mask(secret):
@@ -54,6 +65,9 @@ class OnshapeClient:
         self.access_token = None
         self.refresh_token = None
         self.token_expires = None
+        # Guards the refresh in _ensure_valid_token: one client instance is shared by the
+        # 5-thread pool that exports depth layers in parallel.
+        self._token_lock = threading.Lock()
         # Auth mode: 'oauth' (interactive, session-driven) or 'apikey' (headless).
         self.auth_mode = 'oauth'
         self.api_access_key = None
@@ -179,7 +193,8 @@ class OnshapeClient:
             response = requests.post(
                 f"{self.BASE_URL}/oauth/token",
                 headers=headers,
-                data=data
+                data=data,
+                timeout=OAUTH_TIMEOUT
             )
             
             if response.status_code == 200:
@@ -224,7 +239,8 @@ class OnshapeClient:
             response = requests.post(
                 f"{self.BASE_URL}/oauth/token",
                 headers=headers,
-                data=data
+                data=data,
+                timeout=OAUTH_TIMEOUT
             )
             
             if response.status_code == 200:
@@ -253,10 +269,19 @@ class OnshapeClient:
         if not self.access_token:
             raise ValueError("No access token. User must authenticate first.")
         
-        # Refresh if expired or about to expire (within 5 minutes)
-        if self.token_expires and datetime.now() >= self.token_expires - timedelta(minutes=5):
-            if not self.refresh_access_token():
-                raise ValueError("Token expired and refresh failed")
+        # Refresh if expired or about to expire (within 5 minutes).
+        #
+        # Serialised, because export_multilayer_dxf fans out to a ThreadPoolExecutor of 5
+        # sharing this one client. Unlocked, all five entered this window together and
+        # each presented the SAME refresh token; Onshape rotates refresh tokens, so one
+        # succeeded and the other four got invalid_grant and raised - which is what made
+        # individual depth layers fail. Re-check inside the lock so the four that queued
+        # behind the winner see the new token and return rather than refreshing again.
+        with self._token_lock:
+            if (self.token_expires
+                    and datetime.now() >= self.token_expires - timedelta(minutes=5)):
+                if not self.refresh_access_token():
+                    raise ValueError("Token expired and refresh failed")
     
     def _make_api_request(self, method, endpoint, **kwargs):
         """
@@ -278,12 +303,14 @@ class OnshapeClient:
         if self.auth_mode == 'apikey':
             # HTTP Basic (accessKey:secretKey). requests builds the header
             # internally; the credential is never placed in a variable we log.
+            kwargs.setdefault('timeout', API_TIMEOUT)
             return self.session.request(
                 method, url, headers=headers,
                 auth=(self.api_access_key, self.api_secret_key), **kwargs
             )
 
         headers['Authorization'] = f'Bearer {self.access_token}'
+        kwargs.setdefault('timeout', API_TIMEOUT)
         return self.session.request(method, url, headers=headers, **kwargs)
     
     def get_user_info(self):
@@ -1426,6 +1453,11 @@ class OnshapeClient:
 
         # Create new DXF document
         merged_doc = ezdxf.new('R2010', setup=True)
+        # Inches. See step_geometry: ezdxf defaults $INSUNITS to 6 (METRES). This one
+        # matters twice over, because merge_dxfs_with_layers discards the SOURCE files'
+        # $INSUNITS - so a per-depth export that came back in millimetres would lose
+        # the 25.4x warning that should have caught it.
+        merged_doc.header['$INSUNITS'] = 1
         merged_msp = merged_doc.modelspace()
 
         for depth, dxf_content in dxf_contents_by_depth.items():
@@ -1675,6 +1707,15 @@ class OnshapeClient:
             transformed_contents = {}
 
             for depth, faces in depth_bins.items():
+                # A depth group whose export failed is absent from dxf_contents. The
+                # export loop deliberately tolerates that - it logs the failure, carries
+                # on, and only gives up if NOTHING exported - but indexing dxf_contents
+                # here by every detected depth raised KeyError and killed the whole
+                # multi-layer export anyway, so the tolerance above never took effect.
+                # Skip the missing layer and keep the ones that did come back.
+                if depth not in dxf_contents:
+                    log(f"   Z={depth:+.4f}\" skipped - its export did not succeed")
+                    continue
                 # Transform: new_z = old_z - min_depth
                 # This makes bottom (min_depth) -> 0 and top (max_depth) -> thickness
                 new_depth = depth - min_depth

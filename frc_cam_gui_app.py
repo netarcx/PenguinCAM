@@ -287,6 +287,12 @@ VALID_TUBE_SIZES = ('1x1', '2x1', '2x1-flat', '2x1-standing', '1.5x1.5', '2x2')
 #: reason the tube SIZES are: a stale client or a typo must be refused, not guessed at.
 VALID_TUBE_PATTERNS = ('holes', 'lightening', 'custom')
 
+#: Ceiling on the tube length /api/tube-pattern will lay out. Pattern generation is
+#: quadratic in length and the endpoint is unauthenticated, so an unbounded value is a
+#: denial of service against a single-worker deployment. 50 feet is far longer than any
+#: tube anyone can fixture and still generates in well under a second.
+MAX_TUBE_PREVIEW_LENGTH_IN = 600.0
+
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -354,6 +360,46 @@ def parse_tool_flutes(value) -> int:
     return int(number)
 
 
+def unknown_machine_error(machine_id, team_config):
+    """Message naming an unrecognised machine_id, or None when it is fine.
+
+    An unknown id is NOT harmless: TeamConfig.machine_travel() falls back to the DEFAULT
+    machine's envelope for one it does not recognise, which is precisely the failure that
+    function exists to prevent - "a shop with two machines that posts a job for the
+    smaller one had its layout checked against the bigger one's envelope; a program
+    accepted here runs into the limits there." /set-machine and /api/bed-leveling already
+    reject unknown ids; the three routes that actually emit G-code accepted them and
+    silently validated against the wrong machine.
+
+    An empty id means "use the default" and is allowed - that is how the field is omitted.
+    """
+    if not machine_id:
+        return None
+    if machine_id in (team_config.get_available_machines() or {}):
+        return None
+    return (f'Unknown machine: {machine_id}. Pick one of: '
+            f'{", ".join(sorted(team_config.get_available_machines() or {})) or "none configured"}')
+
+
+def unique_output_path(display_filename: str) -> str:
+    """A collision-proof on-disk path for a file that will be SERVED as `display_filename`.
+
+    Output names are '<part>_<timestamp>.nc' with both halves supplied by the client and
+    the timestamp only accurate to the second, so two operators generating the same part
+    in the same second - or one operator, now that live regeneration fires every 500ms -
+    produced the very same path. A download token stores a PATH, not the bytes, so the
+    second write silently changed what the first token served: an operator could follow
+    their own token and receive someone else's program, under their own filename, with
+    nothing to indicate the swap. The resume tails and the recovery bundle collided the
+    same way, which is worse - those are what someone loads to restart a half-cut job.
+
+    register_file() already carries the display name separately, so only the name on disk
+    has to be unique; the operator still downloads '<part>_<timestamp>.nc'.
+    """
+    stem, ext = os.path.splitext(os.path.basename(display_filename))
+    return os.path.join(OUTPUT_FOLDER, f'{stem}_{secrets.token_hex(8)}{ext}')
+
+
 def register_resume_programs(result: PostProcessorResult):
     """Register standalone resumes and one durable all-files recovery bundle."""
     public = []
@@ -362,7 +408,7 @@ def register_resume_programs(result: PostProcessorResult):
         # build_resume_programs already sanitizes this, but basename is a final boundary
         # before joining user-derived program names to the server's output directory.
         filename = os.path.basename(program['filename'])
-        path = os.path.join(OUTPUT_FOLDER, filename)
+        path = unique_output_path(filename)
         with open(path, 'w') as fh:
             fh.write(program['gcode'])
         token = file_token_manager.register_file(path, filename)
@@ -377,7 +423,7 @@ def register_resume_programs(result: PostProcessorResult):
 
     main_filename = os.path.basename(result.filename)
     bundle_filename = (os.path.splitext(main_filename)[0] + '_RECOVERY.zip')
-    bundle_path = os.path.join(OUTPUT_FOLDER, bundle_filename)
+    bundle_path = unique_output_path(bundle_filename)
     with zipfile.ZipFile(bundle_path, 'w', zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr(main_filename, result.gcode)
         for program in programs:
@@ -1175,7 +1221,14 @@ def refresh_config():
                 _load_team_config_into_session(client)
             except Exception as e:
                 log(f"⚠️  Manual team config refresh failed: {e}")
-    return redirect(request.referrer or '/')
+    # Back where they came from, but only if that is somewhere on this site. Reflecting
+    # the Referer verbatim let any page send a user here and bounce them straight to an
+    # attacker's URL wearing this site's name - and a `javascript:` Referer came through
+    # unchanged too. Same-host relative targets only; anything else falls back to '/'.
+    referrer = request.referrer or ''
+    parsed = urlparse(referrer)
+    safe = (not parsed.scheme and not parsed.netloc) or parsed.netloc == request.host
+    return redirect(referrer if (referrer and safe) else '/')
 
 
 @app.route('/app')
@@ -1365,6 +1418,10 @@ def process_file():
         material = request.form.get('material') or _session_default_material()
         is_aluminum_tube = (material.lower() == 'aluminum_tube')
         machine_id = request.form.get('machine_id', None)  # Optional machine selection
+        _machine_problem = unknown_machine_error(
+            machine_id, TeamConfig(session.get('team_config_data', {})))
+        if _machine_problem:
+            return jsonify({'error': _machine_problem}), 400
         material = normalize_material(material)  # aluminum_tube->aluminum, polycarb->polycarbonate
 
         tool_diameter = float(request.form.get('tool_diameter', DEFAULT_TOOL_DIAMETER_IN))
@@ -1486,7 +1543,13 @@ def process_file():
                     and request.files['file_face2'].filename):
                 ignored_upload = True
         elif file is not None and file.filename:
-            input_path = os.path.join(UPLOAD_FOLDER, 'input.dxf')
+            # Per-request name. A fixed 'input.dxf' is safe only under gunicorn
+            # --workers 1; `make local` runs Flask's app.run, which is threaded, so
+            # two operators generating at once had the second upload overwrite the
+            # first before it was read - and the first got back the other's part
+            # under their own filename.
+            input_path = os.path.join(UPLOAD_FOLDER,
+                                      f'input_{secrets.token_hex(8)}.dxf')
             file.save(input_path)
 
         # For tube mode, extract DXF bounds to determine tube dimensions
@@ -1670,7 +1733,8 @@ def process_file():
                 if face2 is not None and face2.filename:
                     if not face2.filename.lower().endswith('.dxf'):
                         return jsonify({'error': 'Second face must be a DXF file'}), 400
-                    face2_path = os.path.join(UPLOAD_FOLDER, 'input_face2.dxf')
+                    face2_path = os.path.join(
+                        UPLOAD_FOLDER, f'input_face2_{secrets.token_hex(8)}.dxf')
                     face2.save(face2_path)
                     second_face_pp = _prepare_tube_face(face2_path)
                     # Both faces are opposite walls of the same tube, so their widths
@@ -1743,7 +1807,7 @@ def process_file():
                 }), 500
 
             # Write G-code to file
-            output_path = os.path.join(OUTPUT_FOLDER, result.filename)
+            output_path = unique_output_path(result.filename)
             with open(output_path, 'w') as f:
                 f.write(result.gcode)
 
@@ -1934,6 +1998,10 @@ def process_job():
         thickness = float(job.get('thickness', 0.25))
         tab_spacing = float(job.get('tab_spacing', 6.0))
         machine_id = job.get('machine_id')
+        _machine_problem = unknown_machine_error(
+            machine_id, TeamConfig(session.get('team_config_data', {})))
+        if _machine_problem:
+            return jsonify({'error': _machine_problem}), 400
         timestamp_str = request.form.get('timestamp', '')
 
         # Optional deburr / chamfer pass, shared by every part in the job (one V-bit
@@ -2154,7 +2222,7 @@ def process_job():
                                     timestamp=timestamp_str or None,
                                     suggested_filename=job.get('name', 'job'))
 
-        output_path = os.path.join(OUTPUT_FOLDER, result.filename)
+        output_path = unique_output_path(result.filename)
         with open(output_path, 'w') as fh:
             fh.write(result.gcode)
         output_token = file_token_manager.register_file(output_path, result.filename)
@@ -2231,14 +2299,38 @@ def tube_pattern_geometry():
         tool = float(request.args.get('tool', DEFAULT_TOOL_DIAMETER_IN))
     except ValueError:
         return jsonify({'error': 'length and tool must be numbers'}), 400
+    if not (math.isfinite(length) and math.isfinite(tool)):
+        return jsonify({'error': 'length and tool must be numbers'}), 400
+    if tool <= 0:
+        return jsonify({'error': 'tool must be a positive diameter in inches'}), 400
+    # Bound the length. tube_patterns.generate rejects only NaN and infinity, and its cost
+    # is quadratic - 500" takes 0.4s, 1500" takes 3.7s, and 20000" does not finish inside
+    # five minutes. /process guards the same call with a machine-envelope check before
+    # load_tube_pattern; this preview had no equivalent, so one anonymous GET could hold
+    # the whole app down - both deployments run gunicorn with --workers 1. The cap is far
+    # beyond any real tube or machine bed and still renders in well under a second.
+    if length < 0 or length > MAX_TUBE_PREVIEW_LENGTH_IN:
+        return jsonify({'error': f'length must be between 0 and '
+                                 f'{MAX_TUBE_PREVIEW_LENGTH_IN:.0f} inches'}), 400
 
     face_width, height = FRCPostProcessor._parse_tube_size(None, size)
     # A drilled pattern runs the drill, and the tool decides whether pockets survive, so
     # the preview has to be asked about the same tool the job will use.
     if mode == 'holes':
         tool = tube_patterns.HOLE_DIAMETER
+    # ...and about the same helix entry radius. Falling back to the module default of 0.75
+    # while /process runs the material preset's 0.5 made the preview disagree with the
+    # program it was previewing: a 1x1 tube with a 1/4" cutter drew "no lightening
+    # pockets" for a job that then cut ten of them. The POST branch below already reads
+    # the preset for exactly this reason.
+    machine_id = request.args.get('machine_id') or session.get('machine_id')
+    _tc = TeamConfig(session.get('team_config_data', {}))
+    _preset = _tc.get_material_preset('aluminum', machine_id) or {}
+    helix = _preset.get('helix_radius_multiplier',
+                        tube_designer.DEFAULT_HELIX_RADIUS_MULTIPLIER)
     try:
-        pattern = tube_patterns.generate(face_width, length, tool, mode=mode)
+        pattern = tube_patterns.generate(face_width, length, tool, mode=mode,
+                                         helix_radius_multiplier=helix)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -2677,7 +2769,12 @@ def process_multitool():
                 return jsonify({'error': 'The stock size must be a positive number of '
                                          'inches.'}), 400
             sheet = (sheet_w, sheet_h)
-        # The job's own machine, not the config's default one - see /process-job.
+        # The job's own machine, not the config's default one - see /process-job. An id
+        # the config does not know silently resolves to the DEFAULT machine's envelope,
+        # so the layout below would be checked against the wrong machine.
+        machine_problem = unknown_machine_error(job.machine_id, job.config)
+        if machine_problem:
+            return jsonify({'error': machine_problem}), 400
         mt_machine_x, mt_machine_y = job.config.machine_travel(job.machine_id)
         layout_errors = validate_job_layout(placed, mt_machine_x, mt_machine_y,
                                             min_gap=kerf, stock=sheet)
@@ -2694,7 +2791,7 @@ def process_multitool():
             return jsonify({'success': False,
                             'part_errors': [{'error': e} for e in result.errors]}), 400
 
-        output_path = os.path.join(OUTPUT_FOLDER, result.filename)
+        output_path = unique_output_path(result.filename)
         with open(output_path, 'w') as fh:
             fh.write(result.gcode)
         output_token = file_token_manager.register_file(output_path, result.filename)

@@ -3,6 +3,7 @@ PenguinCAM Authentication Module V2
 Google OAuth 2.0 with Drive API access
 """
 
+import datetime
 import os
 import json
 from functools import wraps
@@ -90,7 +91,20 @@ class PenguinCAMAuth:
         if not creds_data:
             return None
         
-        # Reconstruct credentials from session
+        # Reconstruct credentials from session. `expiry` MUST be restored: google-auth's
+        # `Credentials.expired` returns False whenever expiry is None, so leaving it out
+        # made the refresh below dead code - `expired` could never be True. The visible
+        # symptom was every Drive upload failing with a 401 an hour after signing in,
+        # with a perfectly good refresh token sitting unused in the session. That is the
+        # "log out and log back in (refresh Drive tokens)" workaround in
+        # docs/INTEGRATIONS_GUIDE.md.
+        expiry = None
+        raw_expiry = creds_data.get('expiry')
+        if raw_expiry:
+            try:
+                expiry = datetime.datetime.fromisoformat(raw_expiry)
+            except (TypeError, ValueError):
+                expiry = None      # unreadable: treat as unknown, not as "never expires"
         creds = Credentials(
             token=creds_data['token'],
             refresh_token=creds_data.get('refresh_token'),
@@ -99,10 +113,16 @@ class PenguinCAMAuth:
             client_secret=creds_data.get('client_secret'),
             scopes=creds_data.get('scopes')
         )
-        
-        # Refresh if expired
-        if creds.expired and creds.refresh_token:
-            creds.refresh(GoogleRequest())
+        creds.expiry = expiry
+
+        # Refresh if expired, or if we do not know when it expires - an unknown expiry
+        # used to read as "still valid" right up to the 401.
+        if creds.refresh_token and (creds.expired or expiry is None):
+            try:
+                creds.refresh(GoogleRequest())
+            except Exception as exc:
+                log(f"⚠️  Google credential refresh failed: {exc}")
+                return creds
             # Update session
             self._save_credentials(creds)
         
@@ -116,7 +136,10 @@ class PenguinCAMAuth:
             'token_uri': creds.token_uri,
             'client_id': creds.client_id,
             'client_secret': creds.client_secret,
-            'scopes': creds.scopes
+            'scopes': creds.scopes,
+            # Without this the reload above cannot tell a fresh token from an hour-old
+            # one, and the refresh branch never runs.
+            'expiry': creds.expiry.isoformat() if creds.expiry else None,
         }
     
     def _create_flow(self):

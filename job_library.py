@@ -139,6 +139,26 @@ def save_job(config_path: str, name: str, setup: dict, parts: list, font: dict =
 
     job_id = _slug(name)
     path = _job_path(root, job_id)
+
+    # Two DIFFERENT names can slug to one id - "Drive Plate", "Drive-Plate!" and
+    # "drive plate" all become `drive-plate`, and so does anything differing only past
+    # the 60-character truncation. save_job then replaced the existing directory and
+    # rmtree'd the backup, so the first job's setup, placements and DXFs were gone with
+    # no warning and no way back. Re-saving under the SAME name must still replace (that
+    # is how saving works), so compare the stored name rather than merely testing whether
+    # the directory exists.
+    existing_meta_path = os.path.join(path, 'job.json')
+    if os.path.isfile(existing_meta_path):
+        try:
+            with open(existing_meta_path, 'r', encoding='utf-8') as fh:
+                existing_name = (json.load(fh).get('name') or '').strip()
+        except (OSError, ValueError):
+            existing_name = ''      # damaged metadata: let the save proceed and repair it
+        if existing_name and existing_name != str(name).strip():
+            raise JobLibraryError(
+                f'"{existing_name}" is already saved under the same short name, and '
+                f'saving this would overwrite it. Rename one of them - names differing '
+                f'only in punctuation, capitals, or past 60 characters collide.')
     # A staging directory of its own per save. A shared `path + '.saving'` meant two
     # saves of the same name racing each other wrote into one directory and the loser's
     # rmtree took the winner's files with it.

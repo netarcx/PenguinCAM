@@ -428,6 +428,11 @@ class FRCPostProcessor:
         # Advice from reading the DXF (an unclosed outline, a bridged gap). Separate
         # from self.warnings because that one is cleared at generation time.
         self.geometry_warnings = []
+        # Advice from CONFIGURING the job, raised before any generation runs - currently
+        # the dry-run over-travel notice. Same reason as geometry_warnings for being its
+        # own list: set_dry_run() runs first, and generation then clears self.warnings,
+        # so a warning parked there was always wiped before anyone could read it.
+        self.config_warnings = []
         #: Chains that did not close, so identify_perimeter_and_pockets can tell a lost
         #: outer profile from a stray line.
         self.open_chains = []
@@ -1043,8 +1048,16 @@ class FRCPostProcessor:
         # work and jogging Z is the normal thing to do while there. Resuming into a
         # lateral rapid at whatever height they left drags the tool across the part - the
         # same hazard the program start already guards against.
-        if safe_z is not None:
-            gcode.append(f'G0 Z{safe_z:.4f}  ; Retract before any XY move after the pause')
+        #
+        # This used to fire only when a caller passed `safe_z`, which the two tube-flip
+        # callers do and the four PAUSE FOR FIXTURING callers do not - so the fixturing
+        # case the comment above names explicitly was the one case left unguarded, and it
+        # resumed straight into a full-width lateral feed. A resume checkpoint needs
+        # nothing here: _resume_state_gcode() already retracts as part of its modal reset.
+        retract_z = safe_z if safe_z is not None else (
+            None if resume_checkpoint else self._safe_z())
+        if retract_z is not None:
+            gcode.append(f'G0 Z{retract_z:.4f}  ; Retract before any XY move after the pause')
         gcode.append('')
         # Tool resumes at safe height after the pause; the next feature must rapid down to
         # the clearance plane before its slow plunge feed (see _approach_ramp_start).
@@ -2187,17 +2200,34 @@ class FRCPostProcessor:
             self.pockets = []
             return
 
-        # Convert to Shapely polygons, tracking path index
+        # Convert to Shapely polygons, tracking path index. A loop that closes but
+        # self-intersects (a pinch, a figure-eight, a doubled-back segment - ordinary CAD
+        # export damage) is not a valid polygon, so it is dropped here. Keep the dropped
+        # ones: if the outer profile is what we just threw away, the largest survivor is a
+        # POCKET, and promoting it to perimeter cuts a hole through the middle of the
+        # part. _check_discarded_loops_against_perimeter decides that below.
         polygons = []
+        invalid_loops = []
         for path_idx, points in enumerate(all_paths):
             try:
                 poly = Polygon(points)
                 if poly.is_valid:
                     polygons.append((poly, points, path_idx))
+                else:
+                    invalid_loops.append(points)
             except Exception:
                 pass
+        self._invalid_loops = invalid_loops
 
         if not polygons:
+            # Every closed loop in the drawing was rejected. Saying nothing here leaves a
+            # part with no perimeter and no explanation for why.
+            if invalid_loops:
+                self._add_error(
+                    f'Every boundary in the drawing crosses itself '
+                    f'({len(invalid_loops)} found), so none could be machined. Repair the '
+                    f'outlines in CAD - look for doubled-back or pinched segments - and '
+                    f'export again.')
             self.perimeter = None
             self.pockets = []
             return
@@ -2248,9 +2278,49 @@ class FRCPostProcessor:
         print(f"\nIdentified perimeter and {len(self.pockets)} pockets")
 
         self._check_open_chains_against_perimeter(candidate_perimeter)
+        self._check_discarded_loops_against_perimeter(candidate_perimeter)
 
         # Sort pockets to minimize travel time
         self._sort_pockets()
+
+    def _check_discarded_loops_against_perimeter(self, perimeter_points) -> None:
+        """Refuse the part when a SELF-INTERSECTING loop is bigger than the perimeter.
+
+        The closed-loop twin of _check_open_chains_against_perimeter, and the same
+        failure: a loop that pinches or crosses itself is not a valid polygon, so it is
+        discarded, and the biggest remaining closed loop - a POCKET - is promoted to
+        perimeter. The program then profiles that pocket with tabs and reports complete
+        success, having cut a hole through the middle of the part and never cut the real
+        outline. The only signal is that something discarded was larger than what we kept.
+
+        The area-vs-hole-bbox check below this is not a backstop: it is computed from the
+        CIRCLE bounding box, so it collapses to zero for a part with one hole or none,
+        and for a part whose holes fall on a single bolt line.
+        """
+        if not getattr(self, '_invalid_loops', None) or not perimeter_points:
+            return
+
+        def extents(points):
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            return (max(xs) - min(xs), max(ys) - min(ys))
+
+        perimeter_w, perimeter_h = extents(perimeter_points)
+        for coords in self._invalid_loops:
+            if len(coords) < 3:
+                continue
+            width, height = extents(coords)
+            if width * height <= perimeter_w * perimeter_h + 1e-6:
+                continue
+            self._add_error(
+                f'A boundary in the drawing crosses itself, so it could not be used: '
+                f'{width:.3f}" x {height:.3f}" around '
+                f'({min(p[0] for p in coords):.3f}, {min(p[1] for p in coords):.3f}). '
+                f'That outline is bigger than the boundary PenguinCAM would otherwise '
+                f'profile, so the program would cut through the middle of the part. '
+                f'Repair the outline in CAD - look for a doubled-back or pinched '
+                f'segment - and export again.')
+            return
 
     def _check_open_chains_against_perimeter(self, perimeter_points) -> None:
         """Refuse the part when a DROPPED chain is bigger than the perimeter we chose.
@@ -2569,6 +2639,7 @@ class FRCPostProcessor:
             filename=filename,
             warnings=(warnings
                       + [w for w in self.geometry_warnings if w not in warnings]
+                      + [w for w in self.config_warnings if w not in warnings]
                       + [w for w in self.warnings if w not in warnings]),
             stats={
                 'num_holes': len(self.holes) if hasattr(self, 'holes') else 0,
@@ -2651,7 +2722,8 @@ class FRCPostProcessor:
 
         return {'interior': interior, 'perimeter': perimeter, 'chamfer': chamfer,
                 'tab_removal': tab_removal, 'errors': list(self.errors),
-                'warnings': list(self.geometry_warnings) + list(self.warnings)}
+                'warnings': (list(self.geometry_warnings) + list(self.config_warnings)
+                             + list(self.warnings))}
 
     # ---- Portability helpers: work-coordinate safe moves + optional coolant/park -------
     # Everything below emits G54 work-coordinate G-code by default. Machine-coordinate
@@ -2761,7 +2833,7 @@ class FRCPostProcessor:
         # crash - but the operator should hear it from us, not from the controller.
         z_max = getattr(self.config, 'machine_z_max', None)
         if z_max and self._safe_z() > z_max:
-            self.warnings.append(
+            self.config_warnings.append(
                 f'Dry run retracts to Z{self._safe_z():.3f} in, above this machine\'s '
                 f'{z_max:.3f} in of Z travel. Lower the stock or the clearance height.')
 
@@ -3063,7 +3135,19 @@ class FRCPostProcessor:
                 self.warnings.append('The engraving position is invalid; skipped.')
                 return []
         strict_size = bool(spec.get('strict_size')) or bool(font_path)
-        requested_height = height if strict_size else max(height, min_height)
+        # The legibility floor is a property of the CUTTER, not a preference: below
+        # tool_diameter * 2.1 the letterforms cannot be formed at all. Taking a smaller
+        # request literally meant emitting NOTHING and filing a warning, and that is how
+        # engraving quietly disappeared from ordinary jobs - `strict_size` is set whenever
+        # an engrave_height field is present, the wizard always sends one, and the default
+        # it sends is derived from the Setup tool rather than the tool actually engraving.
+        # So a perfectly sensible job asked for 0.330 in with a 1/4 in cutter whose floor
+        # is 0.525 in, and got a blank part. Cut at the smallest size this cutter CAN
+        # form, and say so. `strict_size` still governs area fitting below, so an explicit
+        # height is not silently shrunk to squeeze into a tight space.
+        requested_height = max(height, min_height)
+        clamped_to_floor = requested_height > height + 1e-9
+        asked_height = height          # `height` is rebound to the placed size below
         try:
             placed = self._engrave_placement(
                 area, text, requested_height, preferred,
@@ -3073,12 +3157,14 @@ class FRCPostProcessor:
             return []
         if placed is None:
             # Name the real obstacle. Blaming the geometry when the cutter is the
-            # problem sends someone looking for space they already have.
-            if height < min_height:
+            # problem sends someone looking for space they already have. The height can
+            # no longer be below the floor - it is clamped up above - so the cutter is
+            # the obstacle when that clamp is what made the text too big to place.
+            if clamped_to_floor:
                 self.warnings.append(
                     f'{text}: a {self.tool_diameter:.4f} in cutter cannot write letters '
-                    f'{height:.3f} in tall - it needs at least '
-                    f'{min_height:.3f} in. Use a finer bit or a taller name; skipped.')
+                    f'smaller than {min_height:.3f} in, and that does not fit the space '
+                    f'on this part. Use a finer bit or a shorter name; skipped.')
             else:
                 self.warnings.append(
                     f'{text}: ' + ('the selected label position does not keep the whole '
@@ -3088,6 +3174,13 @@ class FRCPostProcessor:
                                    'no clear space on this part for legible text; skipped.'))
             return []
         ox, oy, height, strokes = placed
+        # Only now that the text is definitely going to be cut. Saying "engraved at 0.525
+        # in" and then "skipped" in the same warning list tells the operator nothing.
+        if clamped_to_floor:
+            self.warnings.append(
+                f'{text}: engraved {height:.3f} in tall, not the {asked_height:.3f} in '
+                f'requested - a {self.tool_diameter:.4f} in cutter cannot write letters '
+                f'smaller than {min_height:.3f} in. Use a finer bit for smaller text.')
 
         cut_z = self.material_top - depth
         # Lateral moves between letters go at the same height everything else in this
@@ -3182,8 +3275,14 @@ class FRCPostProcessor:
         # characters shortens it; it does not make it safe for a comment.
         timestamp_display = sanitize_comment(timestamp[:16], 'unknown')
 
-        # Title
-        gcode.append(f"({sanitize_comment(self.team_name, 'PenguinCAM').upper()} - Team {self.team_number})")
+        # Title. The team NUMBER goes through the sanitizer too: it is typed into a YAML
+        # config by hand and `TeamConfig.team_number` returns it unconverted despite the
+        # `-> int` annotation, so "2129 (Ultraviolet - Rev [2])" reaches here intact - a
+        # nested paren, a bracket and a non-ASCII dash, all three forbidden, on line 1.
+        # A value carrying a newline was worse still: everything after it became an
+        # unguarded motion line ahead of G20/G90/G54 and the spindle start.
+        gcode.append(f"({sanitize_comment(self.team_name, 'PenguinCAM').upper()} - "
+                     f"Team {sanitize_comment(self.team_number, 'unknown')})")
         if is_multilayer:
             gcode.append("(PenguinCAM CNC Post-Processor - MULTI-LAYER)")
         elif is_job:
@@ -5828,8 +5927,43 @@ class FRCPostProcessor:
                     if remaining_depth > 0.001:  # Only if significant depth remains
                         # Use small helical loop instead of straight plunge
                         helix_radius = self.tool_radius * self.helix_radius_multiplier  # Helix radius from material preset
+                        # ...displaced sideways into SCRAP. Centred on the toolpath, this
+                        # helix sweeps a disc of tool_radius + helix_radius about a point
+                        # only tool_radius clear of the finished edge, so it bit
+                        # helix_radius into the part through the full thickness - a
+                        # scrapped part, silently, on any contour too short to ramp
+                        # (aluminium parts under about an inch, where the 4 deg ramp needs
+                        # more perimeter than the part has). Which side is scrap depends on
+                        # the contour: a perimeter keeps the material INSIDE its offset
+                        # ring, a pocket keeps it outside and the slug within.
+                        n_pts = len(offset_points)
+                        seg_i = ramp_end_segment % n_pts
+                        tx = ty = 0.0
+                        for probe in range(n_pts):     # skip degenerate/zero-length edges
+                            a = offset_points[(seg_i - probe) % n_pts]
+                            b = offset_points[(seg_i - probe + 1) % n_pts]
+                            tx, ty = b[0] - a[0], b[1] - a[1]
+                            if math.hypot(tx, ty) > 1e-9:
+                                break
+                        tlen = math.hypot(tx, ty)
                         helix_center_x = current_pos[0]
                         helix_center_y = current_pos[1]
+                        if tlen > 1e-9:
+                            nx_, ny_ = -ty / tlen, tx / tlen
+                            cand_a = (current_pos[0] + nx_ * helix_radius,
+                                      current_pos[1] + ny_ * helix_radius)
+                            cand_b = (current_pos[0] - nx_ * helix_radius,
+                                      current_pos[1] - ny_ * helix_radius)
+                            # Scrap is inside the offset ring for a pocket, outside for a
+                            # perimeter.
+                            want_inside = offset_direction < 0
+                            try:
+                                a_inside = offset_poly.contains(Point(cand_a))
+                            except Exception:
+                                a_inside = None
+                            if a_inside is not None:
+                                helix_center_x, helix_center_y = (
+                                    cand_a if a_inside == want_inside else cand_b)
 
                         # Calculate number of helical loops needed
                         circumference = 2 * math.pi * helix_radius
@@ -5910,6 +6044,21 @@ class FRCPostProcessor:
                 remaining_lengths = ([max(0.0, next_vertex_distance - current_ramp_dist)]
                                      + remaining_lengths[1:])
 
+            # ...and finish ON the vertex the ramp started from, not on the one before it.
+            # The rotation above drops `offset_points[ramp_end_segment]` off the front, so
+            # without this the lap ran P[r-1] -> ramp_end as a straight chord and never cut
+            # the last edge. `remaining_lengths[-1]` is already that edge's length (it was
+            # unused, the loop stopping one point early), so the distance accounting the tab
+            # zones share is unchanged - only the path is. An outward perimeter offset rounds
+            # its corners, so the skipped vertex sat on a short arc chord and the damage was
+            # invisible there; an inward pocket offset keeps sharp mitres, and a whole edge
+            # went uncut with a tab stranded on the diagonal.
+            # The modulo matches `next_vertex_distance` above: a ramp that runs to the end
+            # of the last segment sets ramp_end_segment to len(offset_points), meaning the
+            # wrap back to vertex 0.
+            remaining_points = remaining_points + [
+                offset_points[ramp_end_segment % len(offset_points)]]
+
             # Helper function to process a segment with tab checking
             def process_segment(p1, p2, seg_start_dist, seg_length):
                 nonlocal tab_number, current_z, tab_waypoints_by_idx
@@ -5948,9 +6097,16 @@ class FRCPostProcessor:
                 subsegments = []
                 current_pos = seg_start_dist
 
+                # The tolerances matter: `overlap_end` is clamped from the tab zone while
+                # `seg_end_dist` is accumulated from the segment lengths, so a tab running
+                # to the exact end of a segment leaves the two differing in the last bits.
+                # A bare `<` then appends a sub-nanoinch "remaining" subsegment, and the
+                # only thing it emits is a plunge back to cut depth - INSIDE the tab it
+                # just lifted over. At the close of a lap that ends mid-tab, that clipped
+                # the tab by the full lift height.
                 for overlap_start, overlap_end, tab_key in intersecting_tabs:
                     # Add pre-tab segment if there's a gap
-                    if current_pos < overlap_start:
+                    if current_pos < overlap_start - 1e-9:
                         subsegments.append((current_pos, overlap_start, False, None))
 
                     # Add tab segment
@@ -5958,7 +6114,7 @@ class FRCPostProcessor:
                     current_pos = overlap_end
 
                 # Add post-tab segment if there's remaining length
-                if current_pos < seg_end_dist:
+                if current_pos < seg_end_dist - 1e-9:
                     subsegments.append((current_pos, seg_end_dist, False, None))
 
                 # Process each subsegment

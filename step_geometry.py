@@ -374,6 +374,11 @@ def convert_step_to_multilayer_dxf(path: str) -> StepConversion:
         raise StepGeometryError("The STEP model did not expose both a top and bottom face.")
 
     document = ezdxf.new('R2010', setup=True)
+    # Inches, explicitly. ezdxf defaults $INSUNITS to 6 (METRES), so a file holding
+    # inch geometry announced itself as metres - off by 39.37x in any other CAD tool.
+    # It also disarmed the post-processor's own safety net: _check_header_units only
+    # maps codes 1 and 4, so code 6 returned silently instead of warning.
+    document.header['$INSUNITS'] = 1
     modelspace = document.modelspace()
     layer_depths = []
     for entry in bins:

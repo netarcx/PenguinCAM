@@ -915,10 +915,49 @@ def apply_tool_feeds(pp: FRCPostProcessor, tool: Tool, feeds: Dict[str, Any]) ->
             feeds['rpm'] = int(max(machine['rpm_min'],
                                    min(feeds['rpm'], math.floor(rpm_ceiling))))
 
-    pp.spindle_speed = int(tool.spindle_speed or feeds['rpm'])
-    pp.feed_rate = float(tool.feed_rate or feeds['feed_xy'])
+    # Per-tool overrides replace values that feeds_speeds.calculate_feeds had already
+    # clamped to the machine, so an override slipped straight past every machine limit:
+    # a V-bit in aluminium with feed_rate 400 ran F400 on a 150 IPM machine, and
+    # spindle_speed 30000 ran S30000 on a 24000 RPM spindle - with no warning at all,
+    # because the aluminium guard below is written `elif tool.type == 'endmill'` and
+    # validate_aluminum_cutting_parameters is never reached on this path. An override is
+    # the operator's call about CUTTING, never permission to exceed what the machine can
+    # physically do, so re-apply the machine's own ceilings on top of it.
+    _machine = feeds_speeds.MACHINES.get(feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE)
+
+    # apply_tool_feeds returns nothing, so the notice goes on the post-processor's
+    # config_warnings - the list that survives generation and is surfaced by
+    # generate_gcode, generate_part_phases and generate_operation alike.
+    def _note(message):
+        getattr(pp, 'config_warnings', []).append(message)
+
+    # CEILINGS ONLY. A value over the machine's maximum is physically impossible, so
+    # clamping it is the only honest reading of the request. A value UNDER the spindle's
+    # minimum is a different thing entirely: quietly raising the RPM changes the chipload
+    # the operator was reasoning about, so that case stays a refusal - see the
+    # 'refuse/rpm-below-machine' audit, which this clamp initially broke.
+    def _capped(value, ceiling, what, unit):
+        if ceiling and value > ceiling:
+            _note(f'{tool.label}: {what} {value:.0f} {unit} exceeds this machine\'s '
+                  f'{ceiling:.0f} {unit} limit; using {ceiling:.0f}.')
+            return ceiling
+        return value
+
+    _rpm = float(tool.spindle_speed or feeds['rpm'])
+    _feed = float(tool.feed_rate or feeds['feed_xy'])
+    _plunge = float(tool.plunge_rate or feeds['peck_feed'])
+    if _machine:
+        if tool.spindle_speed:
+            _rpm = _capped(_rpm, _machine.get('rpm_max'), 'spindle speed', 'RPM')
+        if tool.feed_rate:
+            _feed = _capped(_feed, _machine.get('xy_feed_max'), 'feed rate', 'IPM')
+        if tool.plunge_rate:
+            _plunge = _capped(_plunge, _machine.get('z_feed_max'), 'plunge rate', 'IPM')
+
+    pp.spindle_speed = int(_rpm)
+    pp.feed_rate = _feed
     pp.ramp_feed_rate = float(feeds['ramp_feed'])
-    pp.plunge_rate = float(tool.plunge_rate or feeds['peck_feed'])
+    pp.plunge_rate = _plunge
     pp.stepover_percentage = float(feeds['stepover_percentage'])
 
     # Depth of cut is CLAMPED to the material preset, never raised by the model.
@@ -1659,6 +1698,19 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
 
     errors.extend(pp.errors)
 
+    # The post-processor's own advisories, which this path used to drop on the floor.
+    # `geometry_warnings` is where load_dxf reports a $INSUNITS mismatch ("every dimension
+    # in the program is off by a factor of 25.4") and a boundary that had to be closed
+    # across a gap or could not be machined at all; `config_warnings` carries the dry-run
+    # over-travel notice. The single-tool path surfaces all three through generate_gcode,
+    # and /process-job through generate_part_phases - but the wizard sends every flat 2D
+    # job here, so on the default path nobody ever saw them. Prefixed with the part name
+    # because a job stitches several parts into one program.
+    for note in (list(getattr(pp, 'geometry_warnings', ()))
+                 + list(getattr(pp, 'config_warnings', ()))
+                 + list(getattr(pp, 'warnings', ()))):
+        warnings.append(f'{part.name}: {note}')
+
     # The deepest Z this body actually reaches, for the header's ZMIN. Two op types do
     # not cut to `cut_depth` and must say so, or the operator checks clearance below the
     # stock against a number the program goes straight past:
@@ -1833,6 +1885,11 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     # mistyped a size range needs to hear, and dropping the body would silence it.
     all_warnings = [w for b in bodies for w in b['warnings']]
     all_warnings.extend(extra_warnings or [])
+    # Every operation on a part loads that part's DXF into its own post-processor, so a
+    # warning about the DRAWING (wrong units, a boundary that would not close) is raised
+    # once per operation. The operator needs to read it once. Order is preserved so the
+    # first mention keeps its place in the list.
+    all_warnings = list(dict.fromkeys(all_warnings))
     bodies = [b for b in bodies if b['lines']]
     if not bodies:
         return PostProcessorResult(success=False,
