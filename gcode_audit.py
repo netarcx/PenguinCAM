@@ -911,11 +911,14 @@ def audit_bed_leveling(name):
     check_text_rules(name, lines)
     check_offset_reset_before_motion(name, lines)
 
-    pause = next((i for i, line in enumerate(lines) if line.startswith('M0')), None)
     spindle = next((i for i, line in enumerate(lines)
                     if re.match(r'^S\d+ M3\b', line)), None)
-    if pause is None or spindle is None or pause >= spindle:
-        fail(name, 'verification pause does not precede spindle start')
+    plunge = next((i for i, line in enumerate(lines)
+                   if line.startswith('G1 Z-')), None)
+    if spindle is None or plunge is None or spindle >= plunge:
+        fail(name, 'automatic spindle start does not precede the cutting plunge')
+    if any(line.startswith('M0') for line in lines):
+        fail(name, 'contains a pause that prevents an automatic surfacing cycle')
     if any(re.match(r'^M[789]\b', line) for line in lines):
         fail(name, 'emits a coolant code even though bed leveling has no coolant config')
     if 'G20  ; Inches' not in lines:
@@ -923,7 +926,6 @@ def audit_bed_leveling(name):
     if sum(1 for line in lines if line.startswith('M30')) != 1:
         fail(name, 'does not contain exactly one program end')
 
-    radius = spec.tool_diameter / 2.0
     x = y = z = 0.0
     saw_cut = False
     last_cut_line = -1
@@ -949,13 +951,19 @@ def audit_bed_leveling(name):
                 fail(name, f'lateral feed is not at the declared cut depth: {raw}')
             if abs(nx - x) > 1e-9 and abs(ny - y) > 1e-9:
                 fail(name, f'raster contains a diagonal cutting move: {raw}')
-            if not (radius - 1e-6 <= nx <= spec.width - radius + 1e-6 and
-                    radius - 1e-6 <= ny <= spec.height - radius + 1e-6):
-                fail(name, f'cutting center leaves the cutter-radius envelope: {raw}')
+            if not (-1e-6 <= nx <= spec.width + 1e-6 and
+                    -1e-6 <= ny <= spec.height + 1e-6):
+                fail(name, f'cutting center leaves requested machine travel: {raw}')
         x, y, z = nx, ny, nz
 
     if not saw_cut:
         fail(name, 'contains no lateral surfacing cuts')
+    cut_points = result.path[1:]
+    if (not cut_points or min(point[0] for point in cut_points) > 1e-6 or
+            max(point[0] for point in cut_points) < spec.width - 1e-6 or
+            min(point[1] for point in cut_points) > 1e-6 or
+            max(point[1] for point in cut_points) < spec.height - 1e-6):
+        fail(name, 'raster does not reach every requested X/Y travel limit')
     if last_spindle_off <= last_cut_line:
         fail(name, 'does not stop the spindle after the final cut')
 

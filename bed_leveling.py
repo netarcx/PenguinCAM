@@ -29,6 +29,7 @@ class BedLevelingSpec:
     plunge_rate: float
     spindle_speed: int
     safe_z: float
+    raster_direction: str = 'long'
 
 
 @dataclass(frozen=True)
@@ -39,13 +40,23 @@ class BedLevelingResult:
     rows: int
     cutting_distance: float
     estimated_minutes: float
+    pass_axis: str
+    actual_stepover: float
 
     def stats(self) -> Dict[str, float]:
         return {
             'rows': self.rows,
+            'passes': self.rows,
             'cutting_distance': round(self.cutting_distance, 2),
             'estimated_minutes': round(self.estimated_minutes, 1),
+            'pass_axis': self.pass_axis,
+            'actual_stepover': round(self.actual_stepover, 3),
         }
+
+
+def _runs_along_x(width: float, length: float, direction: str) -> bool:
+    """Resolve the human long/short choice to an actual machine axis."""
+    return ((width >= length) if direction == 'long' else (width < length))
 
 
 def _finite_number(name: str, value) -> float:
@@ -63,7 +74,8 @@ def parse_spec(data: Dict, machine_width: Optional[float] = None,
                machine_z: Optional[float] = None) -> BedLevelingSpec:
     """Validate JSON-like input and return a normalized inch-based spec."""
     width = _finite_number('Width', data.get('width'))
-    height = _finite_number('Height', data.get('height'))
+    # Accept the original `height` key for downloaded clients and older open pages.
+    height = _finite_number('Length', data.get('length', data.get('height')))
     tool = _finite_number('Cutter diameter', data.get('tool_diameter'))
     stepover = _finite_number('Stepover', data.get('stepover_percent'))
     depth = _finite_number('Cut depth', data.get('depth'))
@@ -71,15 +83,16 @@ def parse_spec(data: Dict, machine_width: Optional[float] = None,
     plunge = _finite_number('Plunge rate', data.get('plunge_rate'))
     rpm_number = _finite_number('Spindle speed', data.get('spindle_speed'))
     safe_z = _finite_number('Safe Z', data.get('safe_z'))
+    direction = str(data.get('raster_direction', 'long')).strip().lower()
 
     if width <= 0 or height <= 0:
-        raise BedLevelingError('Width and height must be greater than zero.')
+        raise BedLevelingError('Width and length must be greater than zero.')
     if machine_width and width > machine_width + 1e-9:
         raise BedLevelingError(
             f'Width {width:g} in exceeds the machine X travel of {machine_width:g} in.')
     if machine_height and height > machine_height + 1e-9:
         raise BedLevelingError(
-            f'Height {height:g} in exceeds the machine Y travel of {machine_height:g} in.')
+            f'Length {height:g} in exceeds the machine Y travel of {machine_height:g} in.')
     if tool <= 0:
         raise BedLevelingError('Cutter diameter must be greater than zero.')
     if tool > min(width, height):
@@ -102,38 +115,46 @@ def parse_spec(data: Dict, machine_width: Optional[float] = None,
     if machine_z is not None and safe_z > machine_z + 1e-9:
         raise BedLevelingError(
             f'Safe Z {safe_z:g} in exceeds the machine Z travel of {machine_z:g} in.')
-    usable_y = max(0.0, height - tool)
-    row_count = (math.ceil(usable_y / (tool * stepover / 100.0)) + 1
-                 if usable_y else 1)
+    if direction not in ('long', 'short'):
+        raise BedLevelingError('Raster direction must be long or short.')
+    along_x = _runs_along_x(width, height, direction)
+    cross_span = height if along_x else width
+    row_count = math.ceil(cross_span / (tool * stepover / 100.0)) + 1
     if row_count > MAX_RASTER_ROWS:
         raise BedLevelingError(
-            f'This setup needs {row_count:,} raster rows; use a larger cutter or '
+            f'This setup needs {row_count:,} raster passes; use a larger cutter or '
             f'stepover to stay at or below {MAX_RASTER_ROWS:,}.')
 
     return BedLevelingSpec(width, height, tool, stepover, depth, feed, plunge,
-                           int(rpm_number), safe_z)
+                           int(rpm_number), safe_z, direction)
 
 
 def raster_path(spec: BedLevelingSpec) -> List[Tuple[float, float]]:
-    """Return a continuous, alternating-X path that covers the requested rectangle."""
-    radius = spec.tool_diameter / 2.0
-    first_y = radius
-    last_y = spec.height - radius
-    usable_y = max(0.0, last_y - first_y)
+    """Return a continuous raster spanning the machine's full requested travel.
+
+    Width and height describe cutter-center travel, matching the machine dimensions
+    shown in the UI.  Driving the center all the way to each limit also lets the
+    cutter overhang the spoilboard edge instead of leaving an uncut perimeter.
+    """
+    along_x = _runs_along_x(spec.width, spec.height, spec.raster_direction)
+    along_span = spec.width if along_x else spec.height
+    cross_span = spec.height if along_x else spec.width
     max_step = spec.tool_diameter * spec.stepover_percent / 100.0
 
-    # Divide the usable span evenly.  That makes the final row land exactly at the
-    # far cutter-radius boundary and guarantees every actual step is <= max_step.
-    intervals = max(1, math.ceil(usable_y / max_step)) if usable_y else 0
-    y_values = ([first_y] if intervals == 0 else
-                [first_y + usable_y * i / intervals for i in range(intervals + 1)])
-    x_low, x_high = radius, spec.width - radius
+    # Divide the cross span evenly. The last pass lands exactly at the far travel
+    # limit and every actual step remains at or below the requested maximum.
+    intervals = max(1, math.ceil(cross_span / max_step))
+    cross_values = [cross_span * i / intervals for i in range(intervals + 1)]
 
-    path: List[Tuple[float, float]] = [(x_low, y_values[0])]
-    for index, y in enumerate(y_values):
-        path.append((x_high if index % 2 == 0 else x_low, y))
-        if index + 1 < len(y_values):
-            path.append((path[-1][0], y_values[index + 1]))
+    def point(along: float, cross: float) -> Tuple[float, float]:
+        return (along, cross) if along_x else (cross, along)
+
+    path: List[Tuple[float, float]] = [point(0.0, cross_values[0])]
+    for index, cross in enumerate(cross_values):
+        path.append(point(along_span if index % 2 == 0 else 0.0, cross))
+        if index + 1 < len(cross_values):
+            path.append(point(path[-1][0] if along_x else path[-1][1],
+                              cross_values[index + 1]))
     return path
 
 
@@ -143,27 +164,33 @@ def generate_bed_leveling(spec: BedLevelingSpec) -> BedLevelingResult:
     cutting_distance = sum(math.hypot(b[0] - a[0], b[1] - a[1])
                            for a, b in zip(path, path[1:]))
     plunge_distance = spec.depth + min(spec.safe_z, 0.05)
-    estimated = cutting_distance / spec.feed_rate + plunge_distance / spec.plunge_rate
+    estimated = (cutting_distance / spec.feed_rate +
+                 plunge_distance / spec.plunge_rate + 2.0 / 60.0)
     rows = (len(path) + 1) // 2
+    pass_axis = 'X' if _runs_along_x(spec.width, spec.height,
+                                     spec.raster_direction) else 'Y'
+    cross_span = spec.height if pass_axis == 'X' else spec.width
+    actual_stepover = cross_span / (rows - 1) if rows > 1 else 0.0
 
     lines = [
         '%',
         '(UV-CAM BED LEVELING - SPOILBOARD SURFACING)',
-        f'(Area: {spec.width:.3f} x {spec.height:.3f} in)',
+        f'(Area: {spec.width:.3f} wide x {spec.height:.3f} long)',
         f'(Cutter: {spec.tool_diameter:.3f} in; stepover: {spec.stepover_percent:g} percent)',
-        f'(Cut depth: {spec.depth:.4f} in; rows: {rows})',
-        '(G54 X0 Y0: lower-left corner of surfacing area)',
+        f'(Cut depth: {spec.depth:.4f} in; passes: {rows})',
+        f'(Pass direction: {spec.raster_direction} way, along {pass_axis})',
+        '(G54 X0 Y0: lower-left cutter-center travel limit)',
         '(G54 Z0: TOP OF SPOILBOARD before this cut)',
+        '(Cutter center traverses the full requested X/Y extents.)',
         '(Verify the cutter, work offset, hold-downs, and full travel before running.)',
         '',
         'G90 G94 G17 G40 G49  ; Absolute, feed/min, XY plane, compensation off',
         'G20  ; Inches',
         'G92.1  ; Cancel temporary coordinate offsets',
         'G54  ; Work coordinate system 1',
-        'M5  ; Spindle off during setup check',
+        'M5  ; Establish spindle-off state',
         f'G0 Z{spec.safe_z:.4f}  ; Safe Z',
         f'G0 X{path[0][0]:.4f} Y{path[0][1]:.4f}  ; First pass start',
-        'M0  ; VERIFY Z0 ON SPOILBOARD TOP AND CLEAR FULL XY TRAVEL',
         f'S{spec.spindle_speed} M3  ; Spindle on',
         'G4 P2  ; Wait for spindle',
         f'G0 Z{min(spec.safe_z, 0.05):.4f}  ; Approach surface',
@@ -183,4 +210,5 @@ def generate_bed_leveling(spec: BedLevelingSpec) -> BedLevelingResult:
 
     filename = f'UV-CAM_bed_level_{spec.width:g}x{spec.height:g}in.nc'
     return BedLevelingResult('\n'.join(lines), filename, path, rows,
-                             cutting_distance, estimated)
+                             cutting_distance, estimated, pass_axis,
+                             actual_stepover)

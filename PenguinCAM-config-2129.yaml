@@ -100,17 +100,16 @@ machines:
         # without changing the height of every routine retract.
         tool_change_height: 2.0
 
-      # Bed leveling starts from this machine's dimensions, default_tool,
-      # z_reference, and default material feeds/speeds. Override only the values
-      # that are different for the spoilboard surfacing cutter you actually own.
+      # Bed leveling starts from this machine's dimensions, default_tool, and
+      # z_reference. Feeds and speed are calculated from the selected material,
+      # cutter diameter, flute count, and machine limits.
       # bed_leveling:
       #   tool_diameter: "1in"
+      #   flutes: 2
+      #   material: plywood
       #   stepover_percent: 60
       #   depth: 0.01
       #   safe_z: 0.5
-      #   feed_rate: 75
-      #   plunge_rate: 20
-      #   spindle_speed: 18000
 
       tabs:
         enabled: true

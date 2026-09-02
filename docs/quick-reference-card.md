@@ -58,13 +58,16 @@ Done! 🎉
 ### Leveling the bed / surfacing the spoilboard
 
 Open **Level bed** in UV-CAM when the spoilboard needs to be made parallel to the
-machine's XY travel. Enter the surfacing cutter, area, shallow cut depth, stepover, feed,
-and spindle speed; inspect the raster preview before downloading the `.nc` file.
+machine's XY travel. Enter the surfacing cutter, flute count, spoilboard material, area,
+shallow cut depth, and stepover. UV-CAM calculates feed, plunge, and spindle speed from
+those choices and the selected machine. Choose whether passes run along the area's long
+or short direction, then inspect the raster preview before downloading the `.nc` file.
 
-- Set G54 X0/Y0 at the lower-left of the area.
+- Set G54 X0/Y0 at the lower-left cutter-center travel limit.
 - Set G54 Z0 on the current spoilboard top. The program cuts downward from that surface.
 - Dry-run the full XY travel above the board first and verify clamps are outside the area.
-- The program pauses before starting the spindle so the zero and cutter can be checked.
+- The program starts the spindle automatically, waits for spin-up, then approaches and
+  cuts. Verify the zero, cutter, clamps, and full travel before pressing Cycle Start.
 
 ### Before You Start
 

@@ -30,7 +30,7 @@
         <main class="level-grid">
             <form id="level-form" class="level-panel">
                 <div class="panel-head"><h2>Surfacing setup</h2></div>
-                <p class="level-intro">True the spoilboard with one continuous raster cut. All dimensions are inches.</p>
+                <p class="level-intro">Make the spoilboard parallel to the router by taking one shallow, continuous cut. Measurements are in inches.</p>
 
                 {% if machines and machines|length > 1 %}
                 <label class="field">
@@ -44,65 +44,93 @@
                 {% endif %}
 
                 <div class="fieldgrid">
+                    <h3 class="setup-heading">Area &amp; path</h3>
                     <label class="field">
                         <span>Surface width (X)</span>
                         <input id="level-width" type="number" min="0.1" max="{{ machine_x_max }}" step="0.001" value="{{ machine_x_max }}" required>
                     </label>
                     <label class="field">
-                        <span>Surface height (Y)</span>
-                        <input id="level-height" type="number" min="0.1" max="{{ machine_y_max }}" step="0.001" value="{{ machine_y_max }}" required>
+                        <span>Surface length (Y)</span>
+                        <input id="level-length" type="number" min="0.1" max="{{ machine_y_max }}" step="0.001" value="{{ machine_y_max }}" required>
                     </label>
                     <label class="field">
-                        <span>Surfacing cutter</span>
+                        <span>Cutter diameter</span>
                         <input id="level-tool" type="number" min="0.01" step="0.001" value="{{ bed_leveling_defaults.tool_diameter }}" required>
+                    </label>
+                    <label class="field">
+                        <span>Spoilboard material</span>
+                        <select id="level-material">
+                            {% for material_id, material in materials.items() if material_id != 'aluminum_tube' %}
+                            <option value="{{ material_id }}" {% if material_id == default_material %}selected{% endif %}>{{ material.name|default(material_id) }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span>Cutter flutes</span>
+                        <input id="level-flutes" type="number" min="1" max="6" step="1" value="{{ bed_leveling_defaults.flutes|default(2) }}" required>
                     </label>
                     <label class="field">
                         <span>Stepover (%)</span>
                         <input id="level-stepover" type="number" min="10" max="90" step="1" value="{{ bed_leveling_defaults.stepover_percent }}" required>
                     </label>
                     <label class="field">
-                        <span>Cut depth</span>
+                        <span>Raster direction</span>
+                        <select id="level-direction" aria-describedby="level-direction-help">
+                            <option value="long" selected>Long way</option>
+                            <option value="short">Short way</option>
+                        </select>
+                        <small id="level-direction-help" class="field-help"></small>
+                    </label>
+                    <h3 class="setup-heading">Cut</h3>
+                    <label class="field">
+                        <span>Cut depth below Z0</span>
                         <input id="level-depth" type="number" min="0.001" max="0.125" step="0.001" value="{{ bed_leveling_defaults.depth }}" required>
                     </label>
+                    <h3 class="setup-heading">Motion &amp; spindle</h3>
                     <label class="field">
-                        <span>Safe Z</span>
+                        <span>Safe Z above board</span>
                         <input id="level-safe-z" type="number" min="0.05" max="{{ machine_z_max }}" step="0.01" value="{{ bed_leveling_defaults.safe_z }}" required>
                     </label>
                     <label class="field">
-                        <span>Feed rate (in/min)</span>
-                        <input id="level-feed" type="number" min="1" max="500" step="1" value="{{ bed_leveling_defaults.feed_rate }}" required>
+                        <span>Calculated feed (in/min)</span>
+                        <input id="level-feed" type="number" value="{{ bed_leveling_defaults.feed_rate }}" readonly aria-readonly="true">
                     </label>
                     <label class="field">
-                        <span>Plunge rate (in/min)</span>
-                        <input id="level-plunge" type="number" min="1" max="200" step="1" value="{{ bed_leveling_defaults.plunge_rate }}" required>
+                        <span>Calculated plunge (in/min)</span>
+                        <input id="level-plunge" type="number" value="{{ bed_leveling_defaults.plunge_rate }}" readonly aria-readonly="true">
                     </label>
                     <label class="field">
-                        <span>Spindle (RPM)</span>
-                        <input id="level-rpm" type="number" min="1000" max="40000" step="100" value="{{ bed_leveling_defaults.spindle_speed }}" required>
+                        <span>Calculated spindle (RPM)</span>
+                        <input id="level-rpm" type="number" value="{{ bed_leveling_defaults.spindle_speed }}" readonly aria-readonly="true">
                     </label>
+                    <p id="level-feed-note" class="calculation-note">Calculated from the selected machine, material, cutter diameter, and flute count.</p>
                 </div>
 
                 <div class="zero-callout">
                     <strong>Work zero</strong>
-                    <span>Set G54 X0 Y0 at the lower-left of the area and Z0 on the current spoilboard top.</span>
+                    <span>Set G54 X0 Y0 at the lower-left cutter-center travel limit and Z0 on the current spoilboard top.</span>
+                </div>
+                <div class="spindle-callout">
+                    <strong>Automatic spindle</strong>
+                    <span>The downloaded program starts the spindle, waits 2 seconds, then lowers the cutter. Verify the setup before Cycle Start.</span>
                 </div>
                 <div id="level-error" class="errors" role="alert" aria-live="polite"></div>
-                <button class="btn primary level-generate" type="submit">Generate leveling program</button>
+                <button class="btn primary level-generate" type="submit">Update preview &amp; program</button>
             </form>
 
             <section class="level-panel preview-panel">
                 <div class="panel-head">
                     <h2>Toolpath preview</h2>
-                    <div id="level-stats" class="level-stats"></div>
+                    <div id="level-stats" class="level-stats" aria-live="polite"></div>
                 </div>
                 <div class="level-canvas-wrap">
                     <canvas id="level-canvas" aria-label="Bed leveling raster toolpath"></canvas>
                     <div id="level-empty" class="panel-empty">
                         <strong>No program yet</strong>
-                        <span>Generate the program to inspect every surfacing pass.</span>
+                        <span>Enter the setup values to inspect every surfacing pass.</span>
                     </div>
                 </div>
-                <p class="hint origin-hint">The amber dot is G54 X0 Y0. The shaded stroke shows the cutter&rsquo;s swept width.</p>
+                <p class="hint origin-hint">Amber dot: G54 X0 Y0. Wide shaded line: the area swept by the cutter.</p>
             </section>
 
             <section class="level-panel code-panel">

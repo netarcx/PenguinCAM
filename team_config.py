@@ -691,7 +691,10 @@ class TeamConfig:
         configured = machining.get('bed_leveling', {}) or {}
         z_reference = machining.get('z_reference', {}) or {}
 
-        material_id = self.default_material_for(machine_id)
+        available_materials = self.get_available_materials(machine_id)
+        material_id = str(configured.get('material', 'plywood'))
+        if material_id not in available_materials:
+            material_id = self.default_material_for(machine_id)
         material = self.get_material_preset(material_id, machine_id)
 
         def configured_length(key, fallback):
@@ -730,6 +733,10 @@ class TeamConfig:
             'plunge_rate': configured.get('plunge_rate', material.get('plunge_rate', 20.0)),
             'spindle_speed': configured.get(
                 'spindle_speed', material.get('spindle_speed', 18000)),
+            'flutes': configured.get('flutes', 2),
+            # Spoilboards are normally MDF/wood even when the machine's production
+            # default is aluminum. Shops surfacing another material can override it.
+            'material': material_id,
         }
 
     # ========================================================================
@@ -1281,16 +1288,15 @@ machining:
 
   # Spoilboard surfacing defaults. The Level bed utility always gets its X/Y size
   # from machine.dimensions. If this block is omitted, it gets its cutter from
-  # default_tool, depth/clearance from z_reference, and feeds/speed/stepover from
-  # the machine's default material. Override values here for a dedicated fly cutter.
+  # default_tool and depth/clearance from z_reference. Feeds and spindle speed are
+  # calculated from the machine, material, cutter diameter, and flute count.
   # bed_leveling:
   #   tool_diameter: "1in"
+  #   flutes: 2
+  #   material: plywood
   #   stepover_percent: 60
   #   depth: 0.01
   #   safe_z: 0.5
-  #   feed_rate: 75
-  #   plunge_rate: 20
-  #   spindle_speed: 18000
 
   # Tab parameters (for perimeter operations)
   tabs:

@@ -631,6 +631,8 @@ def _app_template_context():
             'tool': md.get('default_tool_diameter'),
             'tool_text': md.get('default_tool_diameter_text'),
             'bed_leveling': md.get('bed_leveling') or {},
+            'default_material': (md.get('bed_leveling') or {}).get(
+                'material', 'plywood'),
             'materials': [
                 {'id': matid, 'name': m.get('name') or matid}
                 for matid, m in mats.items() if matid != 'aluminum_tube'
@@ -647,6 +649,7 @@ def _app_template_context():
         'machine_y_max': machine_y_max,
         'machine_z_max': machine_z_max,
         'bed_leveling_defaults': bed_leveling_defaults,
+        'default_material': bed_leveling_defaults.get('material', 'plywood'),
         'using_default_config': session.get('using_default_config', False),
         'machines': machines,
         'machines_info': machines_info,
@@ -1254,7 +1257,12 @@ def bed_leveling_api():
     """Validate a surfacing setup and return G-code plus its 2D preview path."""
     _ensure_local_team_config()
     team_config = TeamConfig(session.get('team_config_data', {}))
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    elif not isinstance(data, dict):
+        return jsonify({'success': False,
+                        'error': 'Surfacing settings must be a JSON object.'}), 400
     machine_id = data.get('machine_id') or session.get(
         'machine_id', team_config.default_machine_id)
     if machine_id not in team_config.get_available_machines():
@@ -1262,8 +1270,55 @@ def bed_leveling_api():
                         'error': f'Unknown machine: {machine_id}'}), 400
     machine = team_config.to_dict(machine_id)
     try:
+        leveling_defaults = team_config.bed_leveling_defaults(machine_id)
+        material_id = str(data.get('material') or
+                          leveling_defaults.get('material', 'plywood'))
+        available_materials = team_config.get_available_materials(machine_id)
+        if material_id not in available_materials:
+            raise BedLevelingError(f'Unknown spoilboard material: {material_id}.')
+        try:
+            flute_number = float(data.get('flutes', 2))
+        except (TypeError, ValueError) as exc:
+            raise BedLevelingError('Cutter flutes must be a whole number.') from exc
+        if not math.isfinite(flute_number) or flute_number != int(flute_number):
+            raise BedLevelingError('Cutter flutes must be a whole number.')
+        flutes = int(flute_number)
+        if flutes < 1 or flutes > 6:
+            raise BedLevelingError('Cutter flutes must be a whole number from 1 to 6.')
+        try:
+            diameter = float(data.get('tool_diameter'))
+        except (TypeError, ValueError) as exc:
+            raise BedLevelingError('Cutter diameter must be a number.') from exc
+        if not math.isfinite(diameter) or diameter <= 0:
+            raise BedLevelingError('Cutter diameter must be greater than zero.')
+        material_key = tooling.resolve_feeds_material(
+            material_id, team_config, machine_id)
+        feed_warnings = []
+        if material_key:
+            calculated = feeds_speeds.calculate_feeds(
+                tooling.resolve_feeds_machine(machine_id), material_key,
+                {'diameter': diameter, 'flutes': flutes}, operation='clearing')
+            feed_rate = calculated['feed_xy']
+            plunge_rate = calculated['peck_feed']
+            spindle_speed = calculated['rpm']
+            feed_warnings = calculated.get('warnings', [])
+            calculation_source = 'chipload model'
+        else:
+            # A team-defined material has no chipload model. Its configured preset is
+            # still authoritative and safer than silently treating it as plywood.
+            preset = team_config.get_material_preset(material_id, machine_id)
+            feed_rate = preset.get('feed_rate')
+            plunge_rate = preset.get('plunge_rate')
+            spindle_speed = preset.get('spindle_speed')
+            calculation_source = 'team material preset'
+            feed_warnings = [
+                'This custom material has no chipload model; using its team-configured '
+                'feeds and spindle speed.']
+        normalized = dict(data)
+        normalized.update(feed_rate=feed_rate, plunge_rate=plunge_rate,
+                          spindle_speed=spindle_speed)
         spec = parse_spec(
-            data,
+            normalized,
             machine_width=machine.get('machine_x_max') or 48.0,
             machine_height=machine.get('machine_y_max') or 96.0,
             machine_z=machine.get('machine_z_max'),
@@ -1275,15 +1330,26 @@ def bed_leveling_api():
     metrics.log_event('bed_leveling_generated',
                       team_number=session.get('team_number'),
                       user_email=session.get('user_email'),
-                      metadata={'width': spec.width, 'height': spec.height,
-                                'rows': result.rows})
+                      metadata={'width': spec.width, 'length': spec.height,
+                                'passes': result.rows,
+                                'pass_axis': result.pass_axis})
     return jsonify({
         'success': True,
         'gcode': result.gcode,
         'filename': result.filename,
         'path': [[round(x, 5), round(y, 5)] for x, y in result.path],
-        'area': {'width': spec.width, 'height': spec.height},
+        'area': {'width': spec.width, 'length': spec.height},
         'tool_diameter': spec.tool_diameter,
+        'direction': spec.raster_direction,
+        'feeds': {
+            'feed_rate': spec.feed_rate,
+            'plunge_rate': spec.plunge_rate,
+            'spindle_speed': spec.spindle_speed,
+            'material': material_id,
+            'flutes': flutes,
+            'source': calculation_source,
+            'warnings': feed_warnings,
+        },
         'stats': result.stats(),
     })
 
