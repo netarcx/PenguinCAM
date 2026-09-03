@@ -1377,6 +1377,18 @@
     // The sheet the placements are absolute on, so the server checks the parts against
     // the real stock rather than against their own bounding box.
     if (stock) job.stock = stock;
+    if (ctx.state.indexedY) {
+      job.indexing = {
+        axis: 'y', method: 'rotate_180', setups: 2,
+        fixture: {
+          x: ctx.state.fixture.x, y: ctx.state.fixture.y,
+          pin_diameter: ctx.state.fixture.pin,
+          pin_depth: ctx.state.fixture.pin_depth,
+          pin_clearance: ctx.state.fixture.pin_clearance,
+          witness_depth: ctx.state.fixture.witness_depth,
+        },
+      };
+    }
     ctx.state.parts.forEach(function (part, i) {
       var place = placements[i] || { x: 0, y: 0 };
       job.parts.push({

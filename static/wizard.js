@@ -83,12 +83,16 @@
     // and the origin is the SHEET's corner, so a part keeps its place on the material
     // between jobs.
     stock: null,
+    // Automatically enabled for one flat part on exact stock longer than Y travel.
+    indexedY: false,
     // Optional repeatable table fixture. Three removable dowels locate two stock edges;
     // external bolts drive low-profile clamps rather than drilling through good stock.
     // Coordinates are machine-bed coordinates, while every part remains stock-relative.
     fixture: { on: false,
                x: 0.375, x_text: '0.375"', y: 0.375, y_text: '0.375"',
-               pin: 0.25, pin_text: '0.25"', bolt: 0.25, bolt_text: '0.25"' },
+               pin: 0.25, pin_text: '0.25"', pin_depth: 0.25,
+               pin_depth_text: '0.25"', pin_clearance: 0.002,
+               witness_depth: 0.01, bolt: 0.25, bolt_text: '0.25"' },
     //: A one-off message from Auto-arrange / Fill sheet, shown above the layout errors
     //: and cleared as soon as the layout changes under it - a notice about a nest that
     //: no longer exists is worse than no notice.
@@ -499,8 +503,9 @@
     var f = state.fixture, s = state.stock, errors = [];
     if (!s) return { pins: [], bolts: [], errors: ['Choose a stock size before enabling the locator fixture.'] };
     var right = state.machine.width - f.x - s.width;
-    var top = state.machine.height - f.y - s.height;
-    if (right < -1e-6 || top < -1e-6) {
+    var visibleLength = state.indexedY ? state.machine.height - f.y : s.height;
+    var top = state.machine.height - f.y - visibleLength;
+    if (right < -1e-6 || (!state.indexedY && top < -1e-6)) {
       errors.push('The stock at X ' + fmtSize(f.x) + ', Y ' + fmtSize(f.y)
                   + ' does not fit the configured machine bed.');
     }
@@ -515,12 +520,16 @@
       // Tangent to the stock edge: these are locators, not merely nearby holes.
       { label: 'P1 lower', x: f.x + s.width * 0.25, y: f.y - f.pin / 2 },
       { label: 'P2 lower', x: f.x + s.width * 0.75, y: f.y - f.pin / 2 },
-      { label: 'P3 left', x: f.x - f.pin / 2, y: f.y + s.height * 0.5 },
+      { label: 'P3 left', x: f.x - f.pin / 2,
+        y: f.y + (state.indexedY ? Math.min(6, visibleLength / 2) : s.height * 0.5) },
     ];
     if (s.width * 0.5 < f.pin + 0.05) {
       errors.push('The stock is too narrow to separate the two lower dowel holes.');
     }
     var boltChannel = f.bolt + 0.10, bolts = [];
+    if (state.indexedY) {
+      return { pins: pins, bolts: [], errors: errors, right: right, top: top };
+    }
     // Prefer the far edges so pins establish the datum and the clamps push toward it.
     if (top >= boltChannel) {
       bolts = [{ label: 'B1 upper', x: f.x + s.width * 0.25, y: f.y + s.height + top / 2 },
@@ -551,7 +560,9 @@
     var gap = jobKerf();
     var bbox = combinedBBox();
     var tooBig = false;
-    if (bbox && (bbox.w > state.machine.width + 1e-6 || bbox.h > state.machine.height + 1e-6)) {
+    var indexed = state.indexedY;
+    if (bbox && (bbox.w > state.machine.width + 1e-6 ||
+                 (!indexed && bbox.h > state.machine.height + 1e-6))) {
       tooBig = true;
       // toFixed: the machine size comes from a mm config, so the one message the user is
       // meant to act on read "31.496062992125985" x 19.68503937007874".
@@ -563,7 +574,7 @@
     // machine check above passes happily, and the cut runs off the material.
     if (state.stock) {
       var sheetW = state.stock.width, sheetH = state.stock.height;
-      if (sheetW > state.machine.width + 1e-6 || sheetH > state.machine.height + 1e-6) {
+      if (sheetW > state.machine.width + 1e-6 || (!indexed && sheetH > state.machine.height + 1e-6)) {
         tooBig = true;
         msgs.push('"' + state.stock.name + '" (' + sheetW.toFixed(2) + '" x '
                   + sheetH.toFixed(2) + '") does not fit the machine.');
@@ -583,6 +594,14 @@
     }
     if (state.fixture.on) {
       fixtureGeometry().errors.forEach(function (message) { msgs.push('Fixture: ' + message); });
+    }
+    if (indexed) {
+      var overlap = 2 * state.machine.height - state.stock.height;
+      var need = Math.max(1, 4 * gap);
+      if (state.parts.length !== 1) msgs.push('Two-setup long-part mode requires exactly one part.');
+      if (overlap < need - 1e-6) msgs.push('This stock leaves only ' + overlap.toFixed(2)
+        + '" overlap; at least ' + need.toFixed(2) + '" is required. Maximum length is '
+        + (2 * state.machine.height - need).toFixed(2) + '".');
     }
     for (var i = 0; i < items.length; i++) {
       for (var j = i + 1; j < items.length; j++) {
@@ -1806,7 +1825,8 @@
   function updateFixtureUI() {
     var toggle = $('#f-fixture'), options = $('#fixture-options'), note = $('#fixture-note');
     if (!toggle || !options) return;
-    toggle.disabled = !state.stock;
+    toggle.disabled = !state.stock || state.indexedY;
+    if (state.indexedY) state.fixture.on = true;
     if (!state.stock && state.fixture.on) state.fixture.on = false;
     toggle.checked = state.fixture.on;
     options.hidden = !state.fixture.on;
@@ -1826,12 +1846,29 @@
   function applyStockUI() {
     var note = $('#stock-note'), usage = $('#dro-usage');
     var sheet = state.stock;
+    state.indexedY = !!(sheet && state.mode === '2d'
+      && sheet.width <= state.machine.width + 1e-6
+      && sheet.height > state.machine.height + 1e-6);
+    if (state.indexedY) state.fixture.on = true;
+    var indexedPanel = $('#indexed-y-panel');
+    if (indexedPanel) indexedPanel.hidden = !state.indexedY;
+    var indexedText = $('#indexed-y-note');
+    if (indexedText && state.indexedY) {
+      var overlap = 2 * state.machine.height - sheet.height;
+      indexedText.textContent = 'Setup 1 machines the near end, then the program stops so you can '
+        + 'rotate the stock 180° with the same face up. Setup 2 finishes the opposite end. '
+        + 'Available overlap: ' + fmtSize(overlap) + '.';
+    }
     if (usage) usage.hidden = !sheet;
     var remnant = $('#btn-save-remnant'); if (remnant) remnant.hidden = !sheet;
     if (note) {
       var placement = centeredStockPlacement();
       note.textContent = sheet
-        ? (state.fixture.on
+        ? (state.indexedY
+           ? ('"' + sheet.name + '" uses two indexed setups. Width (X) '
+              + fmtSize(sheet.width) + ', length (Y) ' + fmtSize(sheet.height)
+              + '. Set G54 X/Y at the L witness corner.')
+           : state.fixture.on
            ? ('Cutting from "' + sheet.name + '" in the locator fixture. Stock lower-left: X '
               + fmtFixtureSize(state.fixture.x) + ', Y ' + fmtFixtureSize(state.fixture.y)
               + ' from the machine-bed lower-left. Set G54 X/Y at the stock corner.')
@@ -2575,6 +2612,27 @@
       ctx.strokeRect(Math.min(s0[0], s1[0]), Math.min(s0[1], s1[1]),
                      Math.abs(s1[0] - s0[0]), Math.abs(s1[1] - s0[1]));
       ctx.restore();
+      if (state.indexedY) {
+        var yA = state.machine.height;
+        var yB = state.stock.height - state.machine.height;
+        var a0 = worldToCanvas(0, 0), a1 = worldToCanvas(state.stock.width, yA);
+        var b0 = worldToCanvas(0, yB), b1 = worldToCanvas(state.stock.width, state.stock.height);
+        ctx.save();
+        ctx.fillStyle = 'rgba(76,175,109,0.10)';
+        ctx.fillRect(Math.min(a0[0], a1[0]), Math.min(a0[1], a1[1]),
+                     Math.abs(a1[0]-a0[0]), Math.abs(a1[1]-a0[1]));
+        ctx.fillStyle = 'rgba(169,112,255,0.10)';
+        ctx.fillRect(Math.min(b0[0], b1[0]), Math.min(b0[1], b1[1]),
+                     Math.abs(b1[0]-b0[0]), Math.abs(b1[1]-b0[1]));
+        var seam0 = worldToCanvas(0, state.stock.height/2);
+        var seam1 = worldToCanvas(state.stock.width, state.stock.height/2);
+        ctx.setLineDash([6,4]); ctx.strokeStyle = col.accent;
+        ctx.beginPath(); ctx.moveTo(seam0[0], seam0[1]); ctx.lineTo(seam1[0], seam1[1]); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = col.ink; ctx.font = 'bold 11px ' + CANVAS_FONT;
+        ctx.fillText('SETUP 1', a0[0] + 8, a0[1] - 10);
+        ctx.fillText('SETUP 2 · ROTATE 180°', b0[0] + 8, b0[1] - 10);
+        ctx.restore();
+      }
       drawFixture(ctx, col);
     }
 
@@ -2933,7 +2991,8 @@
       });
     }
     [['#f-fixture-x', 'x'], ['#f-fixture-y', 'y'],
-     ['#f-fixture-pin', 'pin'], ['#f-fixture-bolt', 'bolt']].forEach(function (spec) {
+     ['#f-fixture-pin', 'pin'], ['#f-fixture-pin-depth', 'pin_depth'],
+     ['#f-fixture-bolt', 'bolt']].forEach(function (spec) {
       bindLengthField($(spec[0]),
         function () { return state.fixture[spec[1] + '_text']; },
         function (inches, text) {
@@ -3307,14 +3366,18 @@
       }
     }
     if (setup.fixture && state.stock) {
-      ['x', 'y', 'pin', 'bolt'].forEach(function (key) {
+      ['x', 'y', 'pin', 'pin_depth', 'bolt'].forEach(function (key) {
         var value = parseFloat(setup.fixture[key]);
         if (isFinite(value) && value > 0) {
           state.fixture[key] = value;
           state.fixture[key + '_text'] = setup.fixture[key + '_text'] || (value + '"');
-          var field = $('#f-fixture-' + (key === 'pin' ? 'pin' : key === 'bolt' ? 'bolt' : key));
+          var field = $('#f-fixture-' + (key === 'pin_depth' ? 'pin-depth' : key));
           if (field) field.value = state.fixture[key + '_text'];
         }
+      });
+      ['pin_clearance', 'witness_depth'].forEach(function (key) {
+        var value = parseFloat(setup.fixture[key]);
+        if (isFinite(value) && value >= 0) state.fixture[key] = value;
       });
       state.fixture.on = true;
     } else {
@@ -3443,6 +3506,8 @@
     if (state.stock) {
       rows.push(['Stock', state.stock.name + '  (' + fmtSize(state.stock.width) + ' x '
                  + fmtSize(state.stock.height) + ')']);
+      if (state.indexedY) rows.push(['Long-part sequence',
+        'Setup 1 near end, rotate 180° with the same face up, then Setup 2 opposite end']);
       var placement = state.fixture.on ? null : centeredStockPlacement();
       if (state.fixture.on) {
         var fixture = fixtureGeometry();
@@ -3924,6 +3989,8 @@
       n = np + ' part' + (np === 1 ? '' : 's');
     }
     var bits = [n, t];
+    if (resp.indexing) bits.splice(1, 0, '2 indexed setups · '
+      + (+resp.indexing.overlap).toFixed(2) + '" overlap');
     if (resp.tools && resp.tools.length) {
       bits.splice(1, 0, resp.tools.length + ' tool' + (resp.tools.length === 1 ? '' : 's')
                         + ' · ' + (resp.tool_changes || 0) + ' change'
@@ -3932,7 +3999,8 @@
       if (resp.excludes_tool_change_time) bits.push('excludes tool-change time');
     }
     $('#preview-stats').textContent = bits.filter(Boolean).join(' · ');
-    showResumePrograms(resp.restart_files || [], resp.restart_bundle || null, resp.filename);
+    showResumePrograms(resp.restart_files || [], resp.restart_bundle || null, resp.filename,
+                       resp.fixture_file || null);
     // A tool-change job is safest when the ordinary final action keeps its recovery
     // programs with the main file. Refresh the label now that generation has told us
     // whether a bundle exists (setupFinalAction runs before that response arrives).
@@ -3951,17 +4019,18 @@
     updateSummary();  // refresh the stock chip with the server-authoritative size
   }
 
-  function showResumePrograms(files, bundle, mainToken) {
+  function showResumePrograms(files, bundle, mainToken, fixture) {
     var box = $('#resume-programs');
     while (box.firstChild) box.removeChild(box.firstChild);
-    box.hidden = !files.length;
-    if (!files.length) return;
+    box.hidden = !files.length && !fixture;
+    if (!files.length && !fixture) return;
 
     var title = document.createElement('strong');
-    title.textContent = 'Tool-change recovery files';
+    title.textContent = 'Setup and recovery programs';
     box.appendChild(title);
     var note = document.createElement('p');
-    note.textContent = 'If a run fails after a tool change, load the matching checkpoint file. '
+    note.textContent = 'Run the locator fixture program before the first indexed job. If a run '
+      + 'fails after a tool change or stock turn, load the matching checkpoint file. '
       + 'Home or reference the router if position was lost, verify G54 X/Y, install the named '
       + 'tool, and re-zero G54 Z before pressing Cycle Start. Do not use a temporary G92 zero.';
     box.appendChild(note);
@@ -3974,6 +4043,13 @@
       main.textContent = 'Download main program only';
       main.addEventListener('click', function () { doDownload(mainToken); });
       actions.appendChild(main);
+    }
+    if (fixture) {
+      var fixtureButton = document.createElement('button');
+      fixtureButton.type = 'button'; fixtureButton.className = 'btn small';
+      fixtureButton.textContent = 'Download locator fixture program';
+      fixtureButton.addEventListener('click', function () { doDownload(fixture.filename); });
+      actions.appendChild(fixtureButton);
     }
     files.forEach(function (file) {
       var button = document.createElement('button');

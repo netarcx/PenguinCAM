@@ -442,7 +442,8 @@
                     <div id="layout-toolbar" class="panel-actions">
                         <button type="button" class="btn small" id="btn-arrange">Auto-arrange</button>
                         <button type="button" class="btn small" id="btn-fill" title="Add copies of the selected part until the sheet is full">Fill sheet</button>
-                        <button type="button" class="btn small" id="btn-flip" disabled>Flip over</button>
+                        <button type="button" class="btn small" id="btn-flip" disabled
+                                title="Mirror the drawing when machining the back face">Mirror for back side</button>
                         <button type="button" class="btn small icon" id="btn-zoom-out" title="Zoom out"
                                 aria-label="Zoom out">&minus;</button>
                         <button type="button" class="btn small icon" id="btn-zoom-in" title="Zoom in"
@@ -460,6 +461,13 @@
                             title="Save what is left of this sheet as an offcut">Save offcut</button>
                 </div>
                 <div id="stock-note" class="hint"></div>
+                <div id="indexed-y-panel" class="subpanel" hidden>
+                    <h3>Two-setup long part</h3>
+                    <p id="indexed-y-note" class="hint"></p>
+                    <p class="hint"><strong>Same face stays up.</strong> Label the near end A.
+                        After Setup 1, rotate the stock end-for-end so end B seats against
+                        the same pins. Do not flip it onto its back.</p>
+                </div>
                 <div id="fixture-panel">
                     <label class="field inline" id="fixture-toggle">
                         <input type="checkbox" id="f-fixture" autocomplete="off">
@@ -478,6 +486,11 @@
                             <label class="field">
                                 <span>Dowel diameter</span>
                                 <input type="text" id="f-fixture-pin" inputmode="text" autocomplete="off" value='0.25"'>
+                            </label>
+                            <label class="field">
+                                <span>Locator-hole depth</span>
+                                <input type="text" id="f-fixture-pin-depth" inputmode="text"
+                                       autocomplete="off" value='0.25"'>
                             </label>
                             <label class="field">
                                 <span>Clamp-bolt diameter</span>

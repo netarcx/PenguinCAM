@@ -577,6 +577,28 @@ class PartOps:
 
 
 @dataclass
+class IndexedYConfig:
+    """One end-for-end reposition for stock longer than the machine's Y travel."""
+    stock_width: float
+    stock_length: float
+    fixture_x: float = 0.375
+    fixture_y: float = 0.375
+    pin_diameter: float = 0.25
+    pin_depth: float = 0.25
+    pin_clearance: float = 0.002
+    witness_depth: float = 0.01
+
+    def __post_init__(self):
+        for name in ('stock_width', 'stock_length', 'pin_diameter', 'pin_depth'):
+            setattr(self, name, _positive_finite(getattr(self, name), name.replace('_', ' ')))
+        for name in ('fixture_x', 'fixture_y', 'pin_clearance', 'witness_depth'):
+            value = _finite(getattr(self, name), name.replace('_', ' '))
+            if value < 0:
+                raise ToolingError(f"{name.replace('_', ' ')} cannot be negative")
+            setattr(self, name, value)
+
+
+@dataclass
 class MultiToolJob:
     """Everything shared by every operation in one program."""
     material: str
@@ -610,6 +632,7 @@ class MultiToolJob:
     user_name: Optional[str] = None
     name: str = 'job'
     units: str = 'inch'
+    indexing: Optional[IndexedYConfig] = None
 
     def __post_init__(self):
         if self.units != 'inch':
@@ -631,6 +654,9 @@ class MultiToolJob:
         if len(self.parts) > MAX_PARTS_PER_JOB:
             raise ToolingError(f"This job has {len(self.parts)} parts; the limit is "
                                f"{MAX_PARTS_PER_JOB}. Split it into several jobs.")
+        if self.indexing and len(self.parts) != 1:
+            raise ToolingError(
+                "Two-setup long-part mode machines exactly one oversized part per job.")
         total_operations = sum(len(p.operations) for p in self.parts)
         if total_operations > MAX_OPERATIONS_PER_JOB:
             raise ToolingError(
@@ -1572,7 +1598,9 @@ def _chamfer_rings(pp: FRCPostProcessor, op: Operation, features: Dict[str, Any]
 
 def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
                        features: Dict[str, Any],
-                       defer_tabs: bool = False) -> Dict[str, Any]:
+                       defer_tabs: bool = False,
+                       index_window: Optional[Tuple[float, float]] = None,
+                       index_feature_keys: Optional[Dict[str, set]] = None) -> Dict[str, Any]:
     """Emit one operation's toolpath body.
 
     Builds a post-processor holding this operation's tool, narrows the part's features to
@@ -1643,6 +1671,27 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
     lines: List[str] = []
     deferred: Optional[Dict[str, Any]] = None
     pp._pending_clearance_rapid = True
+
+    def _inside_window(bounds, padding=0.0):
+        if index_window is None:
+            return True
+        return (bounds[1] - padding >= index_window[0] - 1e-6
+                and bounds[3] + padding <= index_window[1] + 1e-6)
+
+    if index_window is not None:
+        # Keep closed features whole. Splitting a pocket creates an artificial wall and
+        # is never equivalent to machining the original feature.
+        pp.circles = [c for c in (pp.circles or []) if _inside_window((
+            c['center'][0], c['center'][1] - (c.get('radius') or c.get('diameter', 0) / 2),
+            c['center'][0], c['center'][1] + (c.get('radius') or c.get('diameter', 0) / 2)),
+            tool.diameter / 2)]
+        pp.pockets = [p for p in (pp.pockets or [])
+                      if _inside_window(Polygon(p).bounds, tool.diameter / 2)]
+    if index_feature_keys is not None:
+        pp.circles = [c for c in (pp.circles or [])
+                      if circle_key(c) in index_feature_keys.get('holes', set())]
+        pp.pockets = [p for p in (pp.pockets or [])
+                      if pocket_key(p) in index_feature_keys.get('pockets', set())]
 
     if not mismatch and feeds_speeds.is_aluminum_material(material_key):
         machine_key = feeds.get('machine_key') or DEFAULT_FEEDS_MACHINE
@@ -1725,8 +1774,16 @@ def generate_operation(job: MultiToolJob, part: PartOps, op: Operation,
         # program that would snap the tool. `_check_tool_suits_operation` has already
         # confined drills to hole operations by the time we get here.
         wanted = selected_hole_keys(features, op.scope)
+        allowed_holes = (index_feature_keys.get('holes', set())
+                         if index_feature_keys is not None else None)
         in_scope = [{'center': (h['x'], h['y']), 'diameter': h['diameter']}
-                    for h in features['holes'] if h['key'] in wanted]
+                    for h in features['holes']
+                    if h['key'] in wanted and (allowed_holes is None or h['key'] in allowed_holes)]
+        if index_window is not None:
+            in_scope = [h for h in in_scope if _inside_window((
+                h['center'][0], h['center'][1] - h['diameter'] / 2,
+                h['center'][0], h['center'][1] + h['diameter'] / 2),
+                tool.diameter / 2)]
 
         planned, notes, size_errors = plan_drilled_holes(
             op, tool, in_scope, job_tolerance=job.drill_size_tolerance)
@@ -1952,7 +2009,8 @@ def _tool_change_gcode(pp: FRCPostProcessor, previous: Optional[Tool], nxt: Tool
 def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
                  timestamp: Optional[str] = None,
                  suggested_filename: Optional[str] = None,
-                 extra_warnings: Optional[Sequence[str]] = None) -> PostProcessorResult:
+                 extra_warnings: Optional[Sequence[str]] = None,
+                 setup_break_index: Optional[int] = None) -> PostProcessorResult:
     """Stitch the ordered operation bodies into one program with manual tool changes."""
     import datetime
 
@@ -2056,6 +2114,24 @@ def assemble_job(job: MultiToolJob, bodies: Sequence[Dict[str, Any]],
     for i, body in enumerate(bodies):
         pp, tool, op, part = body['pp'], body['tool'], body['op'], body['part']
         needs_change = current_tool is None or current_tool.slot != tool.slot
+        if setup_break_index is not None and i == setup_break_index:
+            turn = [
+                'Setup 1 complete - spindle is stopped before entering the work area',
+                'Unclamp the stock and keep the same machined face UP',
+                'Rotate the stock 180 degrees end-for-end in the XY plane',
+                'Seat the opposite end and the same side against all three locator pins',
+                'Clamp securely, remove the locator pins, and verify the L witness lines',
+                'Do NOT change G54 X or Y',
+            ]
+            if needs_change and current_tool is not None:
+                gcode.extend(_tool_change_gcode(
+                    pp, current_tool, tool, turn, checkpoint_id='FLIP01'))
+                needs_change = False
+            else:
+                gcode.extend(pp._generate_pause_and_park_gcode(
+                    'TURN STOCK END FOR END', turn,
+                    resume_checkpoint='FLIP01',
+                    resume_description='Setup 2 after 180 degree stock turn'))
         if i == after_holes:
             fixturing_here = hole_fixturing_instructions
         elif i == first_perimeter:
@@ -2335,6 +2411,11 @@ def generate_multitool_job(job: MultiToolJob, timestamp: Optional[str] = None,
     On failure the result carries every part's errors at once rather than stopping at the
     first, so a student fixes one list instead of rediscovering problems one run at a time.
     """
+    if job.indexing:
+        from indexed_y import generate_indexed_y_job
+        return generate_indexed_y_job(job, timestamp=timestamp,
+                                      suggested_filename=suggested_filename)
+
     # Plan-level checks that need no geometry run first, so an obviously wrong tool
     # assignment is reported as such instead of surfacing later as whatever downstream
     # complaint happens to fire first.
@@ -2548,6 +2629,30 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
                                               f'part {i + 1} operations')],
         ))
 
+    indexing = None
+    raw_indexing = spec.get('indexing')
+    if raw_indexing is not None:
+        if not isinstance(raw_indexing, dict):
+            raise ToolingError("indexing must be an object")
+        if raw_indexing.get('axis', 'y') != 'y' or \
+                raw_indexing.get('method', 'rotate_180') != 'rotate_180':
+            raise ToolingError("Only two-setup Y indexing with a 180 degree turn is supported.")
+        fixture = raw_indexing.get('fixture') or {}
+        if not isinstance(fixture, dict):
+            raise ToolingError("indexing.fixture must be an object")
+        stock = spec.get('stock') or {}
+        if not isinstance(stock, dict) or not stock.get('from_library'):
+            raise ToolingError(
+                "Two-setup long-part mode needs an exact saved stock width and length.")
+        indexing = IndexedYConfig(
+            stock_width=stock.get('width'), stock_length=stock.get('height'),
+            fixture_x=fixture.get('x', 0.375), fixture_y=fixture.get('y', 0.375),
+            pin_diameter=fixture.get('pin_diameter', 0.25),
+            pin_depth=fixture.get('pin_depth', 0.25),
+            pin_clearance=fixture.get('pin_clearance', 0.002),
+            witness_depth=fixture.get('witness_depth', 0.01),
+        )
+
     return MultiToolJob(
         material=spec.get('material', 'plywood'),
         thickness=_expect_positive(spec.get('thickness', 0.25), 'thickness'),
@@ -2572,6 +2677,7 @@ def job_from_dict(spec: Dict[str, Any], dxf_paths: Dict[int, str],
         config=config,
         user_name=user_name,
         name=spec.get('name', 'job'),
+        indexing=indexing,
     )
 
 

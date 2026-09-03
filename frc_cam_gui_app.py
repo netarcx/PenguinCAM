@@ -2843,8 +2843,12 @@ def process_multitool():
         if machine_problem:
             return jsonify({'error': machine_problem}), 400
         mt_machine_x, mt_machine_y = job.config.machine_travel(job.machine_id)
-        layout_errors = validate_job_layout(placed, mt_machine_x, mt_machine_y,
-                                            min_gap=kerf, stock=sheet)
+        # Indexed-Y deliberately uses stock longer than Y travel. Its generator validates
+        # both physical setups and every swept path; the ordinary one-setup validator
+        # would reject the stock before those checks can run.
+        layout_errors = ([] if job.indexing else
+                         validate_job_layout(placed, mt_machine_x, mt_machine_y,
+                                             min_gap=kerf, stock=sheet))
         if layout_errors:
             log(f"[MULTITOOL] layout invalid: {layout_errors}")
             return jsonify({'success': False, 'part_errors': layout_errors}), 400
@@ -2863,6 +2867,16 @@ def process_multitool():
             fh.write(result.gcode)
         output_token = file_token_manager.register_file(output_path, result.filename)
         restart_files, restart_bundle = register_resume_programs(result)
+        fixture_file = None
+        if result.stats.get('fixture_gcode'):
+            fixture_name = os.path.basename(result.stats['fixture_filename'])
+            fixture_path = unique_output_path(fixture_name)
+            with open(fixture_path, 'w') as fh:
+                fh.write(result.stats['fixture_gcode'])
+            fixture_file = {
+                'filename': file_token_manager.register_file(fixture_path, fixture_name),
+                'filename_display': fixture_name,
+            }
 
         boxes = [p['bbox'] for p in placed if p.get('bbox')]
         if sheet:
@@ -2888,6 +2902,7 @@ def process_multitool():
             'filename_display': result.filename,
             'restart_files': restart_files,
             'restart_bundle': restart_bundle,
+            'fixture_file': fixture_file,
             'gcode': result.gcode,
             'cycle_time': result.stats.get('cycle_time_display'),
             'cycle_time_seconds': result.stats.get('cycle_time_seconds'),
@@ -2900,6 +2915,9 @@ def process_multitool():
             'parts': [{'index': i, 'name': p.name, 'place_x': p.place_x,
                        'place_y': p.place_y, 'rotation': p.rotation}
                       for i, p in enumerate(job.parts)],
+            'indexing': ({k: result.stats.get(k) for k in
+                          ('setup_count', 'overlap', 'handoff_y', 'setup_ranges')}
+                         if result.stats.get('indexed_y') else None),
         })
 
     except ToolingError as e:
